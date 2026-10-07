@@ -1,7 +1,5 @@
-```python
 import os
 import re
-import json
 import asyncio
 import hashlib
 import threading
@@ -12,7 +10,6 @@ import requests
 
 from flask import Flask, jsonify, request
 from google import genai
-from google.genai import types
 
 from telegram import Update
 from telegram.ext import (
@@ -40,7 +37,7 @@ TELEGRAM_TOKEN = os.getenv(
 
 
 # =========================================================
-# GEMINI
+# GEMINI CONFIG
 # =========================================================
 
 LLM_MODEL = os.getenv(
@@ -65,7 +62,7 @@ FALLBACK_ARABIC_MODEL = os.getenv(
 
 
 # =========================================================
-# TURATH
+# TURATH CONFIG
 # =========================================================
 
 TURATH_SERVICE_URL = os.getenv(
@@ -118,9 +115,7 @@ GEMINI_INITIAL_WAIT = float(
 # FLASK
 # =========================================================
 
-app = Flask(
-    __name__
-)
+app = Flask(__name__)
 
 
 # =========================================================
@@ -130,7 +125,9 @@ app = Flask(
 gemini_client = None
 
 if GOOGLE_API_KEY:
+
     try:
+
         gemini_client = genai.Client(
             api_key=GOOGLE_API_KEY
         )
@@ -162,21 +159,17 @@ ANSWER_CACHE = {}
 CACHE_MAX_SIZE = 100
 
 
-def normalize_question(
-    question
-):
+def normalize_question(question):
+
     return re.sub(
         r"\s+",
         " ",
-        str(
-            question or ""
-        )
+        str(question or "")
     ).strip()
 
 
-def cache_key(
-    question
-):
+def cache_key(question):
+
     normalized = (
         normalize_question(
             question
@@ -191,9 +184,7 @@ def cache_key(
     ).hexdigest()
 
 
-def get_cached_answer(
-    question
-):
+def get_cached_answer(question):
 
     key = cache_key(
         question
@@ -217,9 +208,7 @@ def set_cached_answer(
     )
 
     if (
-        len(
-            ANSWER_CACHE
-        )
+        len(ANSWER_CACHE)
         >= CACHE_MAX_SIZE
     ):
 
@@ -234,16 +223,15 @@ def set_cached_answer(
             None
         )
 
-    ANSWER_CACHE[
-        key
-    ] = answer
+    ANSWER_CACHE[key] = answer
 
 
 def clear_cache():
+
     ANSWER_CACHE.clear()
 
     print(
-        "🧹 ANSWER CACHE DIBERSIHKAN"
+        "🧹 CACHE DIBERSIHKAN"
     )
 
 
@@ -251,9 +239,7 @@ def clear_cache():
 # TEXT HELPERS
 # =========================================================
 
-def clean_text(
-    text
-):
+def clean_text(text):
 
     if text is None:
         return ""
@@ -265,16 +251,12 @@ def clean_text(
     ).strip()
 
 
-def strip_markdown(
-    text
-):
+def strip_markdown(text):
 
     if not text:
         return ""
 
-    text = str(
-        text
-    )
+    text = str(text)
 
     text = re.sub(
         r"\*\*(.*?)\*\*",
@@ -312,9 +294,7 @@ def telegram_chunks(
     text = text or ""
 
     if len(text) <= max_chars:
-        return [
-            text
-        ]
+        return [text]
 
     chunks = []
 
@@ -327,6 +307,7 @@ def telegram_chunks(
         )
 
         if split_at < 1000:
+
             split_at = text.rfind(
                 " ",
                 0,
@@ -334,6 +315,7 @@ def telegram_chunks(
             )
 
         if split_at < 1000:
+
             split_at = max_chars
 
         chunks.append(
@@ -356,9 +338,7 @@ def telegram_chunks(
 # MADHHAB COMPARISON
 # =========================================================
 
-def is_madhhab_comparison(
-    question
-):
+def is_madhhab_comparison(question):
 
     q = normalize_question(
         question
@@ -389,10 +369,9 @@ def is_madhhab_comparison(
         "compare madhhab",
         "compare madhhabs",
         "madhhab comparison",
-        "comparison",
 
-        "قارن",
         "مقارنة",
+        "قارن",
         "الفرق بين",
         "المذاهب الأربعة",
     ]
@@ -401,6 +380,7 @@ def is_madhhab_comparison(
         phrase in q
         for phrase in explicit_phrases
     ):
+
         return True
 
     madhhab_patterns = [
@@ -431,12 +411,10 @@ def is_madhhab_comparison(
 
 
 # =========================================================
-# GEMINI RETRY DETECTION
+# GEMINI ERROR
 # =========================================================
 
-def is_retryable_gemini_error(
-    error
-):
+def is_retryable_gemini_error(error):
 
     message = str(
         error
@@ -468,36 +446,41 @@ def is_retryable_gemini_error(
 
 def gemini_generate(
     model,
-    prompt
+    prompt,
+    fallback_model=""
 ):
 
     if not gemini_client:
+
         raise RuntimeError(
             "Gemini client tidak tersedia"
         )
 
-    last_error = None
-
     models_to_try = []
 
     if model:
+
         models_to_try.append(
             model
         )
 
     if (
-        FALLBACK_LLM_MODEL
-        and FALLBACK_LLM_MODEL
+        fallback_model
+        and fallback_model
         not in models_to_try
     ):
+
         models_to_try.append(
-            FALLBACK_LLM_MODEL
+            fallback_model
         )
 
     if not models_to_try:
-        models_to_try = [
+
+        models_to_try.append(
             LLM_MODEL
-        ]
+        )
+
+    last_error = None
 
     for current_model in models_to_try:
 
@@ -508,7 +491,7 @@ def gemini_generate(
             try:
 
                 print(
-                    f"🤖 GEMINI MODEL: {current_model} | ATTEMPT: {attempt + 1}"
+                    f"🤖 GEMINI: {current_model} | ATTEMPT {attempt + 1}"
                 )
 
                 response = (
@@ -520,7 +503,7 @@ def gemini_generate(
                     )
                 )
 
-                text = clean_text(
+                result = clean_text(
                     getattr(
                         response,
                         "text",
@@ -528,14 +511,15 @@ def gemini_generate(
                     )
                 )
 
-                if text:
+                if result:
+
                     return (
-                        text,
+                        result,
                         True
                     )
 
                 raise RuntimeError(
-                    "Gemini mengembalikan kandungan kosong"
+                    "Gemini mengembalikan jawapan kosong"
                 )
 
             except Exception as error:
@@ -543,14 +527,14 @@ def gemini_generate(
                 last_error = error
 
                 print(
-                    f"⚠️ GEMINI ERROR: {error}"
+                    "⚠️ GEMINI ERROR:",
+                    error
                 )
 
-                if (
-                    not is_retryable_gemini_error(
-                        error
-                    )
+                if not is_retryable_gemini_error(
+                    error
                 ):
+
                     break
 
                 if (
@@ -566,7 +550,7 @@ def gemini_generate(
                     )
 
                     print(
-                        f"⏳ RETRY DALAM {wait_time} SAAT..."
+                        f"⏳ Tunggu {wait_time} saat..."
                     )
 
                     time.sleep(
@@ -585,7 +569,7 @@ def gemini_generate(
 
 
 # =========================================================
-# ARABIC QUERY
+# TRANSLATE TO ARABIC QUERY
 # =========================================================
 
 def translate_to_arabic_query(
@@ -599,6 +583,10 @@ def translate_to_arabic_query(
     if not question:
         return ""
 
+    if not gemini_client:
+
+        return question
+
     prompt = f"""
 Anda ialah enjin carian kitab fiqh Arab.
 
@@ -607,13 +595,36 @@ yang sesuai digunakan untuk mencari perbahasan fiqh
 dalam kitab-kitab turath.
 
 PENTING:
-- Kekalkan topik hukum.
-- Kekalkan konteks mazhab jika disebut.
-- Jangan jawab soalan.
-- Jangan beri penerangan.
-- Jangan beri terjemahan panjang.
-- Hanya keluarkan satu query Arab.
-- Gunakan istilah fiqh Arab yang lazim.
+
+1. Kekalkan maksud hukum.
+2. Kekalkan topik khusus.
+3. Kekalkan konteks mazhab jika disebut.
+4. Jangan jawab soalan.
+5. Jangan beri penerangan.
+6. Jangan beri senarai.
+7. Hanya keluarkan satu query Arab.
+8. Gunakan istilah fiqh Arab yang biasa digunakan
+   dalam kitab turath.
+
+Contoh:
+
+Soalan:
+Apa hukum qunut Subuh menurut mazhab Syafie?
+
+Query:
+حكم القنوت في صلاة الصبح عند الشافعية
+
+Soalan:
+Apa hukum mandi wajib?
+
+Query:
+أحكام الغسل من الجنابة
+
+Soalan:
+Apa rukun wuduk?
+
+Query:
+فرائض الوضوء
 
 Soalan:
 {question}
@@ -630,11 +641,10 @@ Query Arab:
         and FALLBACK_ARABIC_MODEL
         not in models
     ):
+
         models.append(
             FALLBACK_ARABIC_MODEL
         )
-
-    last_error = None
 
     for model in models:
 
@@ -666,20 +676,24 @@ Query Arab:
                 )
 
                 result = re.sub(
-                    r"^```.*?\n",
+                    r"^```(?:arabic|text)?\s*",
                     "",
-                    result
+                    result,
+                    flags=re.IGNORECASE
                 )
 
                 result = re.sub(
-                    r"\n```$",
+                    r"\s*```$",
                     "",
                     result
                 )
 
-                result = result.strip()
+                result = clean_text(
+                    result
+                )
 
                 if result:
+
                     print(
                         f"🇸🇦 ARABIC QUERY: {result}"
                     )
@@ -688,10 +702,9 @@ Query Arab:
 
             except Exception as error:
 
-                last_error = error
-
                 print(
-                    f"⚠️ ARABIC QUERY ERROR: {error}"
+                    "⚠️ ARABIC QUERY ERROR:",
+                    error
                 )
 
                 if (
@@ -714,14 +727,15 @@ Query Arab:
                     )
 
                 else:
+
                     break
 
     print(
-        "⚠️ Gemini gagal tukar query Arab."
+        "⚠️ Gagal menghasilkan query Arab."
     )
 
     print(
-        "➡️ Fallback kepada soalan asal."
+        "➡️ Menggunakan soalan asal."
     )
 
     return question
@@ -741,8 +755,7 @@ def check_turath_status():
         )
 
         print(
-            "📡 TURATH STATUS:",
-            response.status_code
+            f"📡 TURATH STATUS: {response.status_code}"
         )
 
         return (
@@ -778,6 +791,7 @@ def search_turath(
         return []
 
     if not arabic_query:
+
         arabic_query = (
             translate_to_arabic_query(
                 question
@@ -808,7 +822,7 @@ def search_turath(
     )
 
     print(
-        f"🇲🇾 QUESTION: {question}"
+        f"🇲🇾 SOALAN: {question}"
     )
 
     print(
@@ -832,8 +846,7 @@ def search_turath(
         )
 
         print(
-            "📡 TURATH HTTP:",
-            response.status_code
+            f"📡 TURATH HTTP: {response.status_code}"
         )
 
         if (
@@ -842,7 +855,7 @@ def search_turath(
         ):
 
             print(
-                "❌ TURATH ERROR:",
+                "❌ TURATH RESPONSE:",
                 response.text[:5000]
             )
 
@@ -851,9 +864,15 @@ def search_turath(
         data = response.json()
 
         passages = (
-            data.get("passages")
-            or data.get("results")
-            or data.get("data")
+            data.get(
+                "passages"
+            )
+            or data.get(
+                "results"
+            )
+            or data.get(
+                "data"
+            )
             or []
         )
 
@@ -861,10 +880,11 @@ def search_turath(
             passages,
             list
         ):
+
             passages = []
 
         print(
-            f"📚 TURATH PASSAGES: {len(passages)}"
+            f"📚 TURATH RAW RESULTS: {len(passages)}"
         )
 
         normalized = []
@@ -877,74 +897,147 @@ def search_turath(
                 item,
                 dict
             ):
+
                 continue
 
             content = clean_text(
-                item.get("text")
-                or item.get("content")
-                or item.get("passage")
-                or item.get("snippet")
-                or item.get("snip")
+                item.get(
+                    "text"
+                )
+                or item.get(
+                    "content"
+                )
+                or item.get(
+                    "passage"
+                )
+                or item.get(
+                    "snippet"
+                )
+                or item.get(
+                    "snip"
+                )
+                or item.get(
+                    "body"
+                )
             )
 
             if not content:
+
                 continue
 
-            source = clean_text(
-                item.get("source")
-                or item.get("book")
-                or item.get("book_title")
-                or item.get("book_name")
-                or item.get("title")
-            )
-
             book = clean_text(
-                item.get("book")
-                or item.get("book_title")
-                or item.get("book_name")
-                or item.get("title")
+                item.get(
+                    "book"
+                )
+                or item.get(
+                    "book_title"
+                )
+                or item.get(
+                    "book_name"
+                )
+                or item.get(
+                    "title"
+                )
             )
 
             author = clean_text(
-                item.get("author")
-                or item.get("book_author")
-                or item.get("author_name")
-                or item.get("authorName")
+                item.get(
+                    "author"
+                )
+                or item.get(
+                    "book_author"
+                )
+                or item.get(
+                    "author_name"
+                )
+                or item.get(
+                    "authorName"
+                )
             )
 
             page = clean_text(
-                item.get("page")
-                or item.get("page_number")
-                or item.get("pageNumber")
-                or item.get("page_no")
-                or item.get("pageNo")
-                or item.get("halaman")
+                item.get(
+                    "page"
+                )
+                or item.get(
+                    "page_number"
+                )
+                or item.get(
+                    "pageNumber"
+                )
+                or item.get(
+                    "page_no"
+                )
+                or item.get(
+                    "pageNo"
+                )
+                or item.get(
+                    "halaman"
+                )
             )
 
             category = clean_text(
-                item.get("category")
-                or item.get("category_name")
-                or item.get("mazhab")
+                item.get(
+                    "category"
+                )
+                or item.get(
+                    "category_name"
+                )
+                or item.get(
+                    "categoryName"
+                )
+                or item.get(
+                    "mazhab"
+                )
             )
 
             book_id = clean_text(
-                item.get("book_id")
-                or item.get("bookId")
-                or item.get("bookID")
-                or item.get("book_hash")
-                or item.get("bookHash")
+                item.get(
+                    "book_id"
+                )
+                or item.get(
+                    "bookId"
+                )
+                or item.get(
+                    "bookID"
+                )
+                or item.get(
+                    "book_hash"
+                )
+                or item.get(
+                    "bookHash"
+                )
             )
 
             result_id = clean_text(
-                item.get("id")
-                or item.get("chunk_id")
-                or item.get("chunkId")
+                item.get(
+                    "id"
+                )
+                or item.get(
+                    "chunk_id"
+                )
+                or item.get(
+                    "chunkId"
+                )
             )
 
             url = clean_text(
-                item.get("url")
-                or item.get("link")
-                or item.get("href")
+                item.get(
+                    "url"
+                )
+                or item.get(
+                    "link"
+                )
+                or item.get(
+                    "href"
+                )
+            )
+
+            source = clean_text(
+                item.get(
+                    "source"
+                )
+                or book
             )
 
             normalized.append({
@@ -1001,28 +1094,27 @@ def search_turath(
             )
 
             print(
-                "   Kitab:",
-                book or "TIADA"
+                f"   📚 Kitab: {book or 'TIADA'}"
             )
 
             print(
-                "   Pengarang:",
-                author or "TIADA"
+                f"   ✍️ Pengarang: {author or 'TIADA'}"
             )
 
             print(
-                "   Halaman:",
-                page or "TIADA"
+                f"   📄 Halaman: {page or 'TIADA'}"
             )
 
             print(
-                "   Book ID:",
-                book_id or "TIADA"
+                f"   🆔 Book ID: {book_id or 'TIADA'}"
             )
 
             print(
-                "   Kategori:",
-                category or "TIADA"
+                f"   ⚖️ Kategori: {category or 'TIADA'}"
+            )
+
+            print(
+                f"   🔗 URL: {url or 'TIADA'}"
             )
 
         print(
@@ -1041,10 +1133,18 @@ def search_turath(
             normalized
         )
 
+    except requests.Timeout:
+
+        print(
+            "❌ TURATH TIMEOUT"
+        )
+
+        return []
+
     except Exception as error:
 
         print(
-            "❌ TURATH REQUEST ERROR:",
+            "❌ TURATH SEARCH ERROR:",
             error
         )
 
@@ -1054,7 +1154,7 @@ def search_turath(
 
 
 # =========================================================
-# DEDUPLICATE TURATH
+# DEDUPLICATE
 # =========================================================
 
 def deduplicate_sources(
@@ -1062,6 +1162,7 @@ def deduplicate_sources(
 ):
 
     seen = set()
+
     output = []
 
     for source in sources:
@@ -1109,58 +1210,86 @@ def deduplicate_sources(
 
 
 # =========================================================
-# SORT TURATH
+# SORT SOURCES
 # =========================================================
 
 def sort_sources(
     sources
 ):
 
-    def score(source):
+    def source_score(
+        source
+    ):
 
-        value = 0
+        score = 0
 
         if source.get(
             "book"
         ):
-            value += 30
+            score += 30
 
         if source.get(
             "author"
         ):
-            value += 20
+            score += 20
 
         if source.get(
             "page"
         ):
-            value += 20
+            score += 20
 
         if source.get(
             "book_id"
         ):
-            value += 20
+            score += 20
 
         if source.get(
             "category"
         ):
-            value += 10
+            score += 10
 
         if source.get(
             "content"
         ):
-            value += 10
+            score += 10
 
-        return value
+        return score
 
     return sorted(
         sources,
-        key=score,
+        key=source_score,
         reverse=True
     )
 
 
 # =========================================================
-# BUILD TURATH CONTEXT
+# SOURCE VALIDATION
+# =========================================================
+
+def has_valid_turath_source(
+    sources
+):
+
+    if not sources:
+        return False
+
+    for source in sources:
+
+        content = clean_text(
+            source.get(
+                "content"
+            )
+        )
+
+        if len(content) >= 50:
+
+            return True
+
+    return False
+
+
+# =========================================================
+# BUILD CONTEXT
 # =========================================================
 
 def build_context(
@@ -1245,6 +1374,7 @@ Petikan kitab:
             + len(block)
             > CONTEXT_MAX_CHARS
         ):
+
             break
 
         blocks.append(
@@ -1269,6 +1399,7 @@ def format_references(
 ):
 
     if not sources:
+
         return (
             "📚 Rujukan Turath:\n"
             "• Tiada rujukan Turath ditemui."
@@ -1311,13 +1442,8 @@ def format_references(
             )
         )
 
-        url = clean_text(
-            source.get(
-                "url"
-            )
-        )
-
         if not book:
+
             book = "Kitab Turath"
 
         parts = [
@@ -1325,23 +1451,21 @@ def format_references(
         ]
 
         if author:
+
             parts.append(
-                f"— {author}"
+                f" — {author}"
             )
 
         if page:
+
             parts.append(
                 f", hlm. {page}"
             )
 
         if category:
+
             parts.append(
                 f" [{category}]"
-            )
-
-        if url:
-            parts.append(
-                f"\n{url}"
             )
 
         reference = "".join(
@@ -1365,7 +1489,7 @@ def format_references(
 
 
 # =========================================================
-# SOURCE FALLBACK
+# FALLBACK ANSWER
 # =========================================================
 
 def generate_source_fallback(
@@ -1377,7 +1501,7 @@ def generate_source_fallback(
         return (
             "⚠️ Sumber Turath tidak ditemui.\n\n"
             "Saya tidak dapat memberikan huraian "
-            "hukum berdasarkan rujukan Turath."
+            "berdasarkan rujukan Turath."
         )
 
     lines = [
@@ -1414,6 +1538,7 @@ def generate_source_fallback(
         if source.get(
             "author"
         ):
+
             lines.append(
                 f"Pengarang: {source['author']}"
             )
@@ -1421,6 +1546,7 @@ def generate_source_fallback(
         if source.get(
             "page"
         ):
+
             lines.append(
                 f"Halaman: {source['page']}"
             )
@@ -1432,34 +1558,6 @@ def generate_source_fallback(
     return "\n".join(
         lines
     )
-
-
-# =========================================================
-# CHECK SOURCE QUALITY
-# =========================================================
-
-def has_valid_turath_source(
-    sources
-):
-
-    if not sources:
-        return False
-
-    for source in sources:
-
-        content = clean_text(
-            source.get(
-                "content"
-            )
-        )
-
-        if (
-            len(content)
-            >= 50
-        ):
-            return True
-
-    return False
 
 
 # =========================================================
@@ -1477,10 +1575,9 @@ def generate_answer(
     ):
 
         return (
-            "⚠️ Sumber Turath tidak mencukupi untuk menjawab soalan ini.\n\n"
-            "Saya tidak akan menggunakan sumber luar atau "
-            "pengetahuan yang tidak disokong oleh petikan Turath."
-        ), False
+            "⚠️ Sumber Turath tidak mencukupi untuk menjawab soalan ini.",
+            False
+        )
 
     context = build_context(
         sources
@@ -1489,56 +1586,63 @@ def generate_answer(
     if not context:
 
         return (
-            "⚠️ Sumber Turath tidak mencukupi untuk menghasilkan huraian."
-        ), False
+            "⚠️ Sumber Turath tidak mencukupi untuk menghasilkan huraian.",
+            False
+        )
 
     comparison_instruction = ""
 
     if comparison:
 
         comparison_instruction = """
-SOALAN INI MEMINTA PERBANDINGAN MAZHAB.
+SOALAN INI MELIBATKAN PERBANDINGAN MAZHAB.
 
 Jika sumber menyediakan pandangan beberapa mazhab:
-- asingkan pandangan setiap mazhab;
-- nyatakan mazhab dengan jelas;
-- jangan campurkan pandangan antara mazhab;
-- jangan cipta pandangan mazhab yang tiada dalam sumber.
+
+- Asingkan pandangan setiap mazhab.
+- Nyatakan nama mazhab dengan jelas.
+- Jangan campurkan pandangan mazhab.
+- Jangan cipta pandangan mazhab.
+- Jika sumber sesuatu mazhab tidak mencukupi,
+  nyatakan perkara tersebut.
 """
 
     prompt = f"""
 Anda ialah pembantu fiqh berbahasa Melayu.
 
+TUGAS UTAMA:
 Jawab soalan pengguna HANYA berdasarkan petikan kitab Turath
-yang diberikan di bawah.
+yang diberikan.
 
-JANGAN menggunakan pengetahuan luar daripada sumber.
+SUMBER:
+Semua fakta hukum mesti datang daripada petikan Turath.
 
-JANGAN mencipta:
-- nama kitab;
-- nama pengarang;
-- nombor halaman;
-- hukum;
-- dalil;
-- pendapat ulama;
-- pandangan mazhab.
+JANGAN:
+- menggunakan pengetahuan luar;
+- mencipta hukum;
+- mencipta dalil;
+- mencipta nama kitab;
+- mencipta nama pengarang;
+- mencipta nombor halaman;
+- mencipta pandangan ulama;
+- mencipta pandangan mazhab.
 
-Jika petikan tidak benar-benar menjawab soalan,
-nyatakan bahawa sumber Turath yang ditemui tidak mencukupi.
+Jika sumber tidak membincangkan soalan dengan jelas,
+jangan cuba meneka.
 
-Sangat penting:
-Jika terdapat petikan yang membincangkan topik lain,
-JANGAN gunakan petikan tersebut untuk menjawab soalan.
+Jika sumber hanya membincangkan topik lain,
+anggap sumber tersebut TIDAK RELEVAN.
 
-Contohnya:
-Jika soalan mengenai mandi wajib tetapi petikan hanya mengenai
-rukun solat, jangan huraikan rukun solat sebagai jawapan.
+Contoh:
+Jika soalan mengenai mandi wajib tetapi petikan mengenai
+rukun solat, JANGAN gunakan petikan rukun solat sebagai
+jawapan kepada mandi wajib.
 
 {comparison_instruction}
 
-Gunakan Bahasa Melayu yang jelas.
+Gunakan Bahasa Melayu yang mudah difahami.
 
-Struktur jawapan:
+Struktur:
 
 Jawapan:
 ...
@@ -1549,19 +1653,20 @@ Penjelasan:
 Kesimpulan:
 ...
 
-Jangan masukkan bahagian "Rujukan" kerana rujukan akan ditambah
-oleh sistem secara automatik.
+Jangan masukkan bahagian "Rujukan".
+Sistem akan menambah rujukan secara automatik.
 
-SOALAN PENGGUNA:
+SOALAN:
 {question}
 
-PETIKAN KITAB TURATH:
+PETIKAN TURATH:
 {context}
 """.strip()
 
     answer, success = gemini_generate(
         LLM_MODEL,
-        prompt
+        prompt,
+        FALLBACK_LLM_MODEL
     )
 
     if success and answer:
@@ -1574,11 +1679,7 @@ PETIKAN KITAB TURATH:
         )
 
     print(
-        "⚠️ Gemini gagal menghasilkan jawapan."
-    )
-
-    print(
-        "➡️ Gunakan fallback petikan Turath."
+        "⚠️ Gemini gagal menghasilkan huraian."
     )
 
     return (
@@ -1663,6 +1764,10 @@ def answer_question(
         )
     )
 
+    print(
+        f"🇸🇦 FINAL SEARCH QUERY: {arabic_query}"
+    )
+
     # -----------------------------------------------------
     # TURATH ONLY
     # -----------------------------------------------------
@@ -1678,7 +1783,7 @@ def answer_question(
     )
 
     # -----------------------------------------------------
-    # NO TURATH
+    # NO SOURCE
     # -----------------------------------------------------
 
     if not has_valid_turath_source(
@@ -1686,24 +1791,22 @@ def answer_question(
     ):
 
         print(
-            "⚠️ TIADA SUMBER TURATH YANG SAH"
+            "⚠️ TIADA SUMBER TURATH YANG MENCUKUPI"
         )
 
         answer = (
-            "⚠️ Sumber Turath tidak mencukupi untuk menjawab soalan ini.\n\n"
-            "Saya tidak akan menggunakan sumber luar "
-            "atau pengetahuan yang tidak disokong oleh "
-            "petikan Turath."
+            "⚠️ Sumber Turath tidak mencukupi untuk "
+            "menjawab soalan ini.\n\n"
+            "Saya tidak menggunakan sumber luar "
+            "untuk menggantikan rujukan Turath."
         )
 
-        /*
-         * Jangan cache jawapan ini.
-         */
+        # Jangan cache jawapan gagal.
 
         return answer
 
     # -----------------------------------------------------
-    # GENERATE
+    # GENERATE ANSWER
     # -----------------------------------------------------
 
     answer, ai_success = generate_answer(
@@ -1726,7 +1829,7 @@ def answer_question(
     )
 
     # -----------------------------------------------------
-    # CACHE ONLY GOOD ANSWERS
+    # CACHE CONTROL
     # -----------------------------------------------------
 
     lower_answer = (
@@ -1782,7 +1885,7 @@ def answer_question(
     )
 
     print(
-        "✅ JAWAPAN SIAP"
+        "✅ JAWAPAN SELESAI"
     )
 
     print(
@@ -1793,7 +1896,7 @@ def answer_question(
 
 
 # =========================================================
-# TELEGRAM
+# TELEGRAM /START
 # =========================================================
 
 async def telegram_start(
@@ -1801,21 +1904,34 @@ async def telegram_start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    message = (
-        "Assalamualaikum 👋\n\n"
-        "Saya TanyaFiqihBot.\n"
-        "Tanya soalan berkaitan fiqh dan saya akan mencari "
-        "rujukan daripada kitab Turath.\n\n"
-        "Contoh:\n"
-        "• Apa hukum qunut Subuh menurut mazhab Syafie?\n"
-        "• Apa hukum mandi wajib?\n"
-        "• Bandingkan qunut antara mazhab Syafie dan Hanafi."
-    )
+    message = """
+Assalamualaikum 👋
+
+Saya TanyaFiqihBot.
+
+Saya mencari rujukan daripada kitab Turath untuk membantu menjawab soalan fiqh.
+
+Contoh soalan:
+
+• Apa hukum qunut Subuh menurut mazhab Syafie?
+
+• Apa hukum mandi wajib?
+
+• Apa rukun wuduk?
+
+• Bandingkan hukum qunut antara mazhab Syafie dan Hanafi.
+
+📚 Sumber rujukan: Turath sahaja.
+""".strip()
 
     await update.message.reply_text(
         message
     )
 
+
+# =========================================================
+# TELEGRAM MESSAGE
+# =========================================================
 
 async def telegram_message(
     update: Update,
@@ -1892,17 +2008,19 @@ async def telegram_error_handler(
         context.error
     )
 
-    traceback.print_exception(
-        type(
-            context.error
-        ),
-        context.error,
-        context.error.__traceback__
-    )
+    if context.error:
+
+        traceback.print_exception(
+            type(
+                context.error
+            ),
+            context.error,
+            context.error.__traceback__
+        )
 
 
 # =========================================================
-# START TELEGRAM
+# RUN TELEGRAM
 # =========================================================
 
 def run_telegram():
@@ -1968,14 +2086,12 @@ def run_telegram():
 
 
 # =========================================================
-# FLASK ROUTES
+# FLASK HOME
 # =========================================================
 
 @app.route(
     "/",
-    methods=[
-        "GET"
-    ]
+    methods=["GET"]
 )
 def home():
 
@@ -1990,23 +2106,22 @@ def home():
         "source":
             "Turath sahaja",
 
+        "status":
+            "running",
+
         "turath_service":
             TURATH_SERVICE_URL,
 
-        "status":
-            "running",
     })
 
 
 # =========================================================
-# HEALTH
+# FLASK HEALTH
 # =========================================================
 
 @app.route(
     "/health",
-    methods=[
-        "GET"
-    ]
+    methods=["GET"]
 )
 def health():
 
@@ -2032,6 +2147,10 @@ def health():
             bool(
                 gemini_client
             ),
+
+        "source":
+            "Turath sahaja",
+
     })
 
 
@@ -2041,9 +2160,7 @@ def health():
 
 @app.route(
     "/ask",
-    methods=[
-        "POST"
-    ]
+    methods=["POST"]
 )
 def ask():
 
@@ -2126,9 +2243,7 @@ def ask():
 
 @app.route(
     "/search",
-    methods=[
-        "POST"
-    ]
+    methods=["POST"]
 )
 def search_api():
 
@@ -2257,7 +2372,7 @@ def clear_cache_api():
 
 
 # =========================================================
-# BACKGROUND SERVICES
+# BACKGROUND SERVICE
 # =========================================================
 
 _background_started = False
@@ -2277,7 +2392,7 @@ def start_background_services():
         _background_started = True
 
     print(
-        "=============================================="
+        "\n=============================================="
     )
 
     print(
@@ -2285,23 +2400,27 @@ def start_background_services():
     )
 
     print(
-        f"📚 TURATH: {TURATH_SERVICE_URL}"
+        f"📚 SOURCE: TURATH SAHAJA"
     )
 
     print(
-        f"🤖 GEMINI: {LLM_MODEL}"
+        f"📚 TURATH SERVICE: {TURATH_SERVICE_URL}"
     )
 
     print(
-        "📖 SUMBER: TURATH SAHAJA"
+        f"🤖 LLM MODEL: {LLM_MODEL}"
     )
 
     print(
-        "=============================================="
+        f"🌐 ARABIC MODEL: {ARABIC_QUERY_MODEL}"
+    )
+
+    print(
+        "==============================================\n"
     )
 
     # -----------------------------------------------------
-    # Turath health
+    # TURATH HEALTH CHECK
     # -----------------------------------------------------
 
     try:
@@ -2316,7 +2435,7 @@ def start_background_services():
         )
 
     # -----------------------------------------------------
-    # Telegram
+    # TELEGRAM THREAD
     # -----------------------------------------------------
 
     telegram_thread = threading.Thread(
@@ -2333,7 +2452,7 @@ def start_background_services():
 
 
 # =========================================================
-# START BACKGROUND WHEN IMPORTED
+# START BACKGROUND SERVICES
 # =========================================================
 
 start_background_services()
@@ -2358,7 +2477,7 @@ if __name__ == "__main__":
     )
 
     print(
-        "=============================================="
+        "\n=============================================="
     )
 
     print(
@@ -2366,11 +2485,15 @@ if __name__ == "__main__":
     )
 
     print(
-        f"📡 http://{host}:{port}"
+        f"📡 HOST: {host}"
     )
 
     print(
-        "=============================================="
+        f"📡 PORT: {port}"
+    )
+
+    print(
+        "==============================================\n"
     )
 
     app.run(
@@ -2378,4 +2501,3 @@ if __name__ == "__main__":
         port=port,
         debug=False
     )
-```
