@@ -1,3 +1,4 @@
+```python
 import os
 import re
 import json
@@ -33,15 +34,37 @@ from telegram.ext import (
 # ENV
 # ============================================================
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+GOOGLE_API_KEY = os.getenv(
+    "GOOGLE_API_KEY",
+    ""
+).strip()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+TELEGRAM_TOKEN = os.getenv(
+    "TELEGRAM_TOKEN",
+    ""
+).strip()
 
-DATA_DIR = os.getenv("DATA_DIR", "/var/data")
+SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    ""
+).strip()
 
-OCR_WORKERS = int(os.getenv("OCR_WORKERS", "1"))
+SUPABASE_KEY = os.getenv(
+    "SUPABASE_KEY",
+    ""
+).strip()
+
+DATA_DIR = os.getenv(
+    "DATA_DIR",
+    "/var/data"
+)
+
+OCR_WORKERS = int(
+    os.getenv(
+        "OCR_WORKERS",
+        "1"
+    )
+)
 
 LLM_MODEL = os.getenv(
     "LLM_MODEL",
@@ -60,17 +83,35 @@ TURATH_SERVICE_URL = os.getenv(
 
 
 # ============================================================
+# CONSTANTS
+# ============================================================
+
+TELEGRAM_MAX_LENGTH = 4096
+
+# Kita guna sedikit ruang keselamatan.
+TELEGRAM_SAFE_LENGTH = 3900
+
+ANSWER_CACHE_MAX = 500
+
+
+# ============================================================
 # PATH
 # ============================================================
 
-DATA_PATH = Path(DATA_DIR)
+DATA_PATH = Path(
+    DATA_DIR
+)
 
 DATA_PATH.mkdir(
     parents=True,
     exist_ok=True
 )
 
-OCR_CACHE_DIR = DATA_PATH / "extracted_text" / "pages"
+OCR_CACHE_DIR = (
+    DATA_PATH
+    / "extracted_text"
+    / "pages"
+)
 
 OCR_CACHE_DIR.mkdir(
     parents=True,
@@ -82,7 +123,9 @@ OCR_CACHE_DIR.mkdir(
 # FLASK
 # ============================================================
 
-app = Flask(__name__)
+app = Flask(
+    __name__
+)
 
 
 # ============================================================
@@ -91,6 +134,7 @@ app = Flask(__name__)
 
 supabase = None
 gemini_client = None
+telegram_application = None
 
 
 # ============================================================
@@ -98,8 +142,6 @@ gemini_client = None
 # ============================================================
 
 ANSWER_CACHE = {}
-
-ANSWER_CACHE_MAX = 500
 
 
 # ============================================================
@@ -125,11 +167,15 @@ try:
             SUPABASE_KEY
         )
 
-        print("✅ SUPABASE CONNECTED")
+        print(
+            "✅ SUPABASE CONNECTED"
+        )
 
     else:
 
-        print("⚠️ SUPABASE ENV MISSING")
+        print(
+            "⚠️ SUPABASE ENV MISSING"
+        )
 
 except Exception as e:
 
@@ -153,11 +199,15 @@ try:
             api_key=GOOGLE_API_KEY
         )
 
-        print("✅ GEMINI CLIENT READY")
+        print(
+            "✅ GEMINI CLIENT READY"
+        )
 
     else:
 
-        print("⚠️ GOOGLE_API_KEY MISSING")
+        print(
+            "⚠️ GOOGLE_API_KEY MISSING"
+        )
 
 except Exception as e:
 
@@ -174,6 +224,53 @@ except Exception as e:
 # ============================================================
 
 def clean_text(text):
+    """
+    Membersihkan teks asas tanpa mengubah kandungan.
+    Sesuai untuk soalan, OCR dan petikan sumber.
+    """
+
+    if text is None:
+        return ""
+
+    text = str(text)
+
+    text = text.replace(
+        "\x00",
+        " "
+    )
+
+    # Normalisasi line ending
+    text = text.replace(
+        "\r\n",
+        "\n"
+    )
+
+    text = text.replace(
+        "\r",
+        "\n"
+    )
+
+    # Buang whitespace berlebihan
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
+
+    # Maksimum 2 newline berturut-turut
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
+
+    return text.strip()
+
+
+def clean_one_line(text):
+    """
+    Untuk data seperti nama kitab/kategori.
+    """
 
     if text is None:
         return ""
@@ -200,39 +297,67 @@ def normalize_question(question):
         question
     )
 
-    return question
+    question = re.sub(
+        r"\s+",
+        " ",
+        question
+    )
+
+    return question.strip()
 
 
-def short_text(text, max_chars=5000):
+def short_text(
+    text,
+    max_chars=5000
+):
 
-    text = clean_text(text)
+    text = clean_text(
+        text
+    )
 
     if len(text) <= max_chars:
         return text
 
-    return text[:max_chars] + "..."
+    return (
+        text[:max_chars]
+        + "..."
+    )
 
 
 # ============================================================
 # DETECT COMPARISON
 # ============================================================
 
-def is_madhhab_comparison(question):
+def is_madhhab_comparison(
+    question
+):
 
     q = question.lower()
 
     comparison_words = [
+
         "banding",
         "bandingkan",
         "perbandingan",
         "mazhab",
         "mazhab-mazhab",
+
         "syafie dan hanafi",
         "syafie dan maliki",
         "syafie dan hanbali",
+
         "hanafi dan syafie",
+        "hanafi dan maliki",
+        "hanafi dan hanbali",
+
         "maliki dan syafie",
+        "maliki dan hanafi",
+        "maliki dan hanbali",
+
         "hanbali dan syafie",
+        "hanbali dan hanafi",
+        "hanbali dan maliki",
+
         "keempat-empat mazhab",
         "empat mazhab",
         "semua mazhab",
@@ -242,9 +367,6 @@ def is_madhhab_comparison(question):
 
         if word in q:
             return True
-
-    # Jika soalan menyebut sekurang-kurangnya
-    # dua mazhab secara jelas
 
     madhhab_count = 0
 
@@ -289,8 +411,8 @@ def ocr_page(
 ):
 
     cache_dir = (
-        OCR_CACHE_DIR /
-        book_hash
+        OCR_CACHE_DIR
+        / book_hash
     )
 
     cache_dir.mkdir(
@@ -299,8 +421,8 @@ def ocr_page(
     )
 
     cache_file = (
-        cache_dir /
-        f"{page_number}.txt"
+        cache_dir
+        / f"{page_number}.txt"
     )
 
     # --------------------------------------------
@@ -316,6 +438,7 @@ def ocr_page(
             )
 
         except Exception:
+
             pass
 
     # --------------------------------------------
@@ -341,7 +464,9 @@ def ocr_page(
             lang="ara+msa+eng"
         )
 
-        text = clean_text(text)
+        text = clean_text(
+            text
+        )
 
         cache_file.write_text(
             text,
@@ -370,10 +495,11 @@ def get_local_book_metadata():
 
     result = []
 
-    kitab_dir = Path("kitab")
+    kitab_dir = Path(
+        "kitab"
+    )
 
     if not kitab_dir.exists():
-
         return result
 
     for path in kitab_dir.rglob("*"):
@@ -417,20 +543,28 @@ def search_local(
 
     """
     LOCAL:
+
         Maksimum 1 sumber.
 
     Supabase RPC:
+
         match_kitab_chunks
 
-    Gemini embedding hanya digunakan untuk
-    menghasilkan vector carian.
+    Gemini embedding hanya digunakan
+    untuk menghasilkan vector carian.
 
     Gemini TIDAK memilih rujukan.
     """
 
     print()
-    print("🔎 LOCAL SEARCH")
-    print("Question:", question)
+    print(
+        "🔎 LOCAL SEARCH"
+    )
+
+    print(
+        "Question:",
+        question
+    )
 
     if supabase is None:
 
@@ -515,7 +649,7 @@ def search_local(
             return []
 
         # ----------------------------------------
-        # Ambil hanya SATU
+        # Ambil hasil terbaik
         # ----------------------------------------
 
         best = rows[0]
@@ -527,7 +661,9 @@ def search_local(
             or ""
         )
 
-        text = clean_text(text)
+        text = clean_text(
+            text
+        )
 
         if not text:
 
@@ -568,8 +704,8 @@ def search_local(
 
         result = {
             "source": "local",
-            "book": book,
-            "category": category,
+            "book": clean_one_line(book),
+            "category": clean_one_line(category),
             "page": page,
             "book_hash": book_hash,
             "text": text,
@@ -605,7 +741,9 @@ def search_local(
 # TURATH SEARCH
 # ============================================================
 
-def search_turath(question):
+def search_turath(
+    question
+):
 
     """
     TURATH:
@@ -623,11 +761,19 @@ def search_turath(question):
     """
 
     print()
-    print("🔎 TURATH SEARCH")
-    print("Question:", question)
+    print(
+        "🔎 TURATH SEARCH"
+    )
 
-    comparison = is_madhhab_comparison(
+    print(
+        "Question:",
         question
+    )
+
+    comparison = (
+        is_madhhab_comparison(
+            question
+        )
     )
 
     print(
@@ -667,7 +813,10 @@ def search_turath(question):
             type(data).__name__
         )
 
-        if isinstance(data, dict):
+        if isinstance(
+            data,
+            dict
+        ):
 
             passages = (
                 data.get("passages")
@@ -676,7 +825,10 @@ def search_turath(question):
                 or []
             )
 
-        elif isinstance(data, list):
+        elif isinstance(
+            data,
+            list
+        ):
 
             passages = data
 
@@ -700,7 +852,7 @@ def search_turath(question):
                 continue
 
             # ------------------------------------
-            # Turath SDK fields
+            # TEXT
             # ------------------------------------
 
             text = (
@@ -711,18 +863,38 @@ def search_turath(question):
                 or ""
             )
 
-            text = clean_text(text)
+            text = clean_text(
+                text
+            )
 
             if not text:
                 continue
+
+            # ------------------------------------
+            # BOOK
+            # ------------------------------------
 
             book = (
                 passage.get("book")
                 or passage.get("book_name")
                 or passage.get("bookName")
-                or passage.get("meta")
                 or "Kitab Turath"
             )
+
+            if isinstance(
+                book,
+                dict
+            ):
+
+                book = (
+                    book.get("name")
+                    or book.get("title")
+                    or "Kitab Turath"
+                )
+
+            # ------------------------------------
+            # PAGE
+            # ------------------------------------
 
             page = (
                 passage.get("page")
@@ -730,6 +902,10 @@ def search_turath(question):
                 or passage.get("pageNumber")
                 or passage.get("pg")
             )
+
+            # ------------------------------------
+            # IDS
+            # ------------------------------------
 
             book_id = (
                 passage.get("book_id")
@@ -747,16 +923,15 @@ def search_turath(question):
                 or passage.get("categoryId")
             )
 
+            # ------------------------------------
+            # URL
+            # ------------------------------------
+
             url = (
                 passage.get("url")
                 or passage.get("link")
                 or ""
             )
-
-            # ------------------------------------
-            # Jika service tidak beri URL,
-            # bina URL berdasarkan book_id
-            # ------------------------------------
 
             if (
                 not url
@@ -768,15 +943,17 @@ def search_turath(question):
                     + str(book_id)
                 )
 
+            category = (
+                passage.get("category")
+                or passage.get("category_name")
+                or "Turath"
+            )
+
             results.append(
                 {
                     "source": "turath",
-                    "book": book,
-                    "category": (
-                        passage.get("category")
-                        or passage.get("category_name")
-                        or "Turath"
-                    ),
+                    "book": clean_one_line(book),
+                    "category": clean_one_line(category),
                     "category_id": category_id,
                     "book_id": book_id,
                     "author_id": author_id,
@@ -796,12 +973,6 @@ def search_turath(question):
         # ----------------------------------------
 
         if comparison:
-
-            # Service sepatutnya sudah
-            # memilih 10+2+2+2.
-            #
-            # Jangan potong kepada 10 di sini,
-            # kerana comparison memang 16.
 
             results = results[:16]
 
@@ -837,7 +1008,6 @@ def build_context(
 ):
 
     if not sources:
-
         return ""
 
     blocks = []
@@ -906,12 +1076,12 @@ def build_references(
     if not sources:
 
         return (
-            "📚 **Rujukan:**\n"
+            "📚 Rujukan:\n"
             "• Tiada rujukan ditemui."
         )
 
     lines = [
-        "📚 **Rujukan:**"
+        "📚 Rujukan:"
     ]
 
     for i, source in enumerate(
@@ -947,7 +1117,7 @@ def build_references(
 
             label = "Kitab tempatan"
 
-        title = book
+        title = str(book)
 
         if page:
 
@@ -955,11 +1125,20 @@ def build_references(
                 f" — halaman {page}"
             )
 
+        # ----------------------------------------
+        # PENTING:
+        #
+        # Jangan gunakan Markdown link Telegram.
+        # Paparkan URL sebagai teks biasa supaya
+        # tiada parse entity error.
+        # ----------------------------------------
+
         if url:
 
             lines.append(
                 f"• {i}. {label}: "
-                f"[{title}]({url})"
+                f"{title}\n"
+                f"  🔗 {url}"
             )
 
         else:
@@ -991,6 +1170,7 @@ def generate_answer(
         - memilih kitab
         - mencari URL
         - mencipta rujukan
+        - mencipta dalil
     """
 
     if not context:
@@ -1066,6 +1246,19 @@ ARAHAN JAWAPAN:
    nyatakan bahawa pandangan tersebut berdasarkan
    sumber yang diberikan.
 
+9. Gunakan format teks biasa yang mudah dibaca.
+
+10. Anda boleh menggunakan tajuk bernombor seperti:
+    1.
+    2.
+    3.
+
+11. Elakkan penggunaan Markdown seperti:
+    **
+    __
+    ```
+    [teks](url)
+
 Berikan jawapan yang mudah difahami.
 """
 
@@ -1077,7 +1270,9 @@ Berikan jawapan yang mudah difahami.
         )
 
         response = (
-            gemini_client.models.generate_content(
+            gemini_client
+            .models
+            .generate_content(
                 model=LLM_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -1201,8 +1396,10 @@ def answer_question(
         local_results[:1]
     )
 
-    comparison = is_madhhab_comparison(
-        question
+    comparison = (
+        is_madhhab_comparison(
+            question
+        )
     )
 
     if comparison:
@@ -1226,22 +1423,27 @@ def answer_question(
     print()
     print("=" * 70)
     print("📊 SOURCE SUMMARY")
+
     print(
         "LOCAL:",
         len(local_results)
     )
+
     print(
         "TURATH:",
         len(turath_results)
     )
+
     print(
         "TOTAL:",
         len(all_sources)
     )
+
     print(
         "COMPARISON:",
         comparison
     )
+
     print("=" * 70)
 
     # ========================================================
@@ -1255,15 +1457,14 @@ def answer_question(
         )
 
         return (
-            "⚠️ **Tiada rujukan ditemui.**\n\n"
-            "Saya tidak menemui kandungan kitab yang "
-            "mencukupi untuk menjawab soalan ini.\n\n"
-            "📚 **Rujukan:**\n"
+            "⚠️ Tiada kandungan sumber yang mencukupi "
+            "untuk menghasilkan huraian.\n\n"
+            "📚 Rujukan:\n"
             "• Tiada rujukan ditemui."
         )
 
     # ========================================================
-    # REFERENCES FIRST
+    # REFERENCES
     # ========================================================
 
     references = build_references(
@@ -1294,8 +1495,8 @@ def answer_question(
     if not explanation:
 
         explanation = (
-            "⚠️ **Huraian AI tidak dapat "
-            "dihasilkan buat masa ini.**\n\n"
+            "⚠️ Huraian AI tidak dapat "
+            "dihasilkan buat masa ini.\n\n"
             "Namun, rujukan kitab yang berkaitan "
             "telah ditemui dan dipaparkan di bawah."
         )
@@ -1340,11 +1541,123 @@ def answer_question(
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM HELPERS
 # ============================================================
 
-telegram_application = None
+def split_telegram_message(
+    text,
+    max_length=TELEGRAM_SAFE_LENGTH
+):
 
+    """
+    Pecahkan mesej Telegram dengan selamat.
+
+    Keutamaan:
+        1. newline
+        2. space
+        3. hard cut
+
+    Ini mengelakkan mesej terpotong di tengah
+    perkataan jika boleh.
+    """
+
+    if not text:
+
+        return [""]
+
+    if len(text) <= max_length:
+
+        return [text]
+
+    chunks = []
+
+    remaining = text
+
+    while len(remaining) > max_length:
+
+        cut = remaining.rfind(
+            "\n",
+            0,
+            max_length
+        )
+
+        # Jika newline terlalu awal,
+        # cuba cari space.
+        if cut < (
+            max_length // 2
+        ):
+
+            cut = remaining.rfind(
+                " ",
+                0,
+                max_length
+            )
+
+        # Jika masih tiada lokasi baik,
+        # hard cut.
+        if cut < (
+            max_length // 2
+        ):
+
+            cut = max_length
+
+        chunk = (
+            remaining[:cut]
+            .strip()
+        )
+
+        if chunk:
+
+            chunks.append(
+                chunk
+            )
+
+        remaining = (
+            remaining[cut:]
+            .strip()
+        )
+
+    if remaining:
+
+        chunks.append(
+            remaining
+        )
+
+    return chunks
+
+
+def telegram_safe_text(
+    text
+):
+
+    """
+    Telegram dihantar sebagai PLAIN TEXT.
+
+    Ini sengaja dibuat kerana jawapan Gemini
+    tidak boleh dipercayai untuk Markdown parsing.
+
+    Semua *, _, ` dan simbol Markdown dibiarkan
+    sebagai teks biasa. Telegram tidak akan cuba
+    mentafsirnya sebagai entity.
+    """
+
+    if not text:
+
+        return ""
+
+    text = str(text)
+
+    text = text.replace(
+        "\x00",
+        ""
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# TELEGRAM STARTUP
+# ============================================================
 
 async def telegram_startup():
 
@@ -1366,8 +1679,11 @@ async def telegram_startup():
         )
 
         telegram_application = (
-            Application.builder()
-            .token(TELEGRAM_TOKEN)
+            Application
+            .builder()
+            .token(
+                TELEGRAM_TOKEN
+            )
             .build()
         )
 
@@ -1401,14 +1717,19 @@ async def telegram_startup():
         # INITIALIZE
         # --------------------------------------------
 
-        await telegram_application.initialize()
+        await (
+            telegram_application
+            .initialize()
+        )
 
         # --------------------------------------------
         # CHECK BOT
         # --------------------------------------------
 
         me = (
-            await telegram_application.bot.get_me()
+            await telegram_application
+            .bot
+            .get_me()
         )
 
         print(
@@ -1420,7 +1741,10 @@ async def telegram_startup():
         # START APPLICATION
         # --------------------------------------------
 
-        await telegram_application.start()
+        await (
+            telegram_application
+            .start()
+        )
 
         # --------------------------------------------
         # START POLLING
@@ -1463,6 +1787,10 @@ async def telegram_startup():
         traceback.print_exc()
 
 
+# ============================================================
+# START TELEGRAM THREAD
+# ============================================================
+
 def start_telegram():
 
     print(
@@ -1495,7 +1823,7 @@ async def telegram_start(
 ):
 
     message = (
-        "🤖 **TanyaFiqihBot**\n\n"
+        "🤖 TanyaFiqihBot\n\n"
         "Assalamualaikum.\n\n"
         "Saya membantu mencari rujukan "
         "daripada kitab-kitab Islam.\n\n"
@@ -1510,8 +1838,7 @@ async def telegram_start(
     )
 
     await update.message.reply_text(
-        message,
-        parse_mode="Markdown"
+        message
     )
 
 
@@ -1524,12 +1851,16 @@ async def telegram_help(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    await update.message.reply_text(
+    message = (
         "Taip sahaja soalan agama anda.\n\n"
         "Contoh:\n"
         "• Apakah hukum membaca qunut Subuh?\n"
         "• Bagaimana cara solat jamak?\n"
         "• Apa perbezaan pendapat Syafie dan Hanafi?"
+    )
+
+    await update.message.reply_text(
+        message
     )
 
 
@@ -1573,44 +1904,68 @@ async def telegram_message(
 
     try:
 
+        # ----------------------------------------
+        # RUN ANSWER ENGINE
+        # ----------------------------------------
+
         answer = await asyncio.to_thread(
             answer_question,
             question
         )
 
-        # Telegram limit
-        # Pecahkan jika terlalu panjang
+        if not answer:
 
-        max_length = 3900
-
-        if len(answer) <= max_length:
-
-            await processing_message.edit_text(
-                answer,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
+            answer = (
+                "⚠️ Tiada jawapan dapat dihasilkan."
             )
 
-        else:
+        # ----------------------------------------
+        # TELEGRAM SAFE TEXT
+        # ----------------------------------------
 
-            await processing_message.delete()
+        answer = telegram_safe_text(
+            answer
+        )
 
-            chunks = [
-                answer[i:i + max_length]
-                for i in range(
-                    0,
-                    len(answer),
-                    max_length
-                )
-            ]
+        print(
+            "📤 TELEGRAM FINAL LENGTH:",
+            len(answer),
+            "chars"
+        )
 
-            for chunk in chunks:
+        # ----------------------------------------
+        # SPLIT
+        # ----------------------------------------
 
-                await update.message.reply_text(
-                    chunk,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True
-                )
+        chunks = split_telegram_message(
+            answer,
+            max_length=TELEGRAM_SAFE_LENGTH
+        )
+
+        print(
+            "📦 TELEGRAM CHUNKS:",
+            len(chunks)
+        )
+
+        # ----------------------------------------
+        # FIRST CHUNK
+        # ----------------------------------------
+
+        await processing_message.edit_text(
+            chunks[0],
+            disable_web_page_preview=True
+        )
+
+        # ----------------------------------------
+        # REMAINING CHUNKS
+        # ----------------------------------------
+
+        for chunk in chunks[1:]:
+
+            await update.message.reply_text(
+                chunk,
+                disable_web_page_preview=True
+            )
 
     except Exception as e:
 
@@ -1628,6 +1983,7 @@ async def telegram_message(
             )
 
         except Exception:
+
             pass
 
 
@@ -1640,8 +1996,7 @@ def startup_sync():
     """
     Fungsi sync kitab.
 
-    Nota:
-    Struktur ini dikekalkan supaya sistem lama
+    Struktur dikekalkan supaya sistem lama
     yang menggunakan fungsi sync_books()
     boleh terus digunakan.
     """
@@ -1652,18 +2007,16 @@ def startup_sync():
         print(
             "🔄 SYNC KITAB"
         )
-        print("=" * 60)
 
-        # ------------------------------------------------
-        # Jika fungsi sync_books wujud dalam versi
-        # app.py lama, panggil.
-        # ------------------------------------------------
+        print("=" * 60)
 
         sync_function = globals().get(
             "sync_books"
         )
 
-        if callable(sync_function):
+        if callable(
+            sync_function
+        ):
 
             sync_function()
 
@@ -1698,9 +2051,11 @@ def start_background_services():
     print(
         "=" * 60
     )
+
     print(
         "🚀 STARTING BACKGROUND SERVICES"
     )
+
     print(
         "=" * 60
     )
@@ -1882,7 +2237,8 @@ start_background_services()
 #
 # gunicorn ... app:app
 #
-# Jadi background service perlu dimulakan
+# Jadi background service dimulakan
 # ketika module ini diimport.
 #
 # ============================================================
+```
