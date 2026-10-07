@@ -72,8 +72,6 @@ OCR_WORKERS = int(
 # ============================================================
 # GEMINI MODELS
 # ============================================================
-# Model murah untuk query Arab + jawapan akhir.
-# Embedding menggunakan gemini-embedding-001.
 
 LLM_MODEL = os.getenv(
     "LLM_MODEL",
@@ -136,7 +134,6 @@ TELEGRAM_MAX_CHARS = int(
     )
 )
 
-# 2 kali lebih menjimatkan API berbanding 3 retry.
 GEMINI_RETRIES = int(
     os.getenv(
         "GEMINI_RETRIES",
@@ -211,40 +208,19 @@ print("=" * 65)
 print("🚀 TANYAFIQIHBOT STARTING")
 print("=" * 65)
 
-print(
-    "🤖 LLM MODEL:",
-    LLM_MODEL
-)
-
-print(
-    "🇸🇦 ARABIC QUERY MODEL:",
-    ARABIC_QUERY_MODEL
-)
-
+print("🤖 LLM MODEL:", LLM_MODEL)
+print("🇸🇦 ARABIC QUERY MODEL:", ARABIC_QUERY_MODEL)
 print(
     "🛟 FALLBACK LLM:",
     FALLBACK_LLM_MODEL or "DISABLED"
 )
-
 print(
     "🛟 FALLBACK ARABIC:",
     FALLBACK_ARABIC_MODEL or "DISABLED"
 )
-
-print(
-    "🧠 EMBEDDING:",
-    EMBEDDING_MODEL
-)
-
-print(
-    "📚 TURATH:",
-    TURATH_SERVICE_URL
-)
-
-print(
-    "🔄 GEMINI RETRIES:",
-    GEMINI_RETRIES
-)
+print("🧠 EMBEDDING:", EMBEDDING_MODEL)
+print("📚 TURATH:", TURATH_SERVICE_URL)
+print("🔄 GEMINI RETRIES:", GEMINI_RETRIES)
 
 print("=" * 65)
 
@@ -258,15 +234,11 @@ def init_supabase():
     global supabase
 
     if not SUPABASE_URL:
-        print(
-            "⚠️ SUPABASE_URL tidak ditetapkan"
-        )
+        print("⚠️ SUPABASE_URL tidak ditetapkan")
         return
 
     if not SUPABASE_KEY:
-        print(
-            "⚠️ SUPABASE_KEY tidak ditetapkan"
-        )
+        print("⚠️ SUPABASE_KEY tidak ditetapkan")
         return
 
     try:
@@ -276,16 +248,11 @@ def init_supabase():
             SUPABASE_KEY
         )
 
-        print(
-            "✅ SUPABASE INITIALIZED"
-        )
+        print("✅ SUPABASE INITIALIZED")
 
     except Exception:
 
-        print(
-            "❌ SUPABASE INIT ERROR"
-        )
-
+        print("❌ SUPABASE INIT ERROR")
         traceback.print_exc()
 
         supabase = None
@@ -333,7 +300,7 @@ init_gemini()
 
 
 # ============================================================
-# TEXT NORMALIZATION
+# TEXT
 # ============================================================
 
 def normalize_question(text):
@@ -442,10 +409,7 @@ def telegram_chunks(
     )
 
     if len(text) <= max_chars:
-
-        return [
-            text
-        ]
+        return [text]
 
     chunks = []
 
@@ -477,7 +441,6 @@ def telegram_chunks(
         else:
 
             if current:
-
                 chunks.append(
                     current
                 )
@@ -495,7 +458,6 @@ def telegram_chunks(
             current = paragraph
 
     if current:
-
         chunks.append(
             current
         )
@@ -527,7 +489,6 @@ def get_cached_answer(question):
     )
 
     with cache_lock:
-
         return answer_cache.get(
             key
         )
@@ -561,7 +522,327 @@ def set_cached_answer(
 
 
 # ============================================================
-# DETECT MADHHAB COMPARISON
+# FIqh QUERY MAP
+# ============================================================
+
+FIQH_QUERY_MAP = {
+
+    # ----------------------------
+    # TAHARAH
+    # ----------------------------
+
+    "mandi wajib":
+        "الغسل الواجب غسل الجنابة صفة الغسل فرائض الغسل",
+
+    "mandi junub":
+        "غسل الجنابة صفة الغسل",
+
+    "mandi janabah":
+        "غسل الجنابة",
+
+    "junub":
+        "الجنابة غسل الجنابة",
+
+    "hadas besar":
+        "الحدث الأكبر الغسل",
+
+    "wajib mandi":
+        "موجبات الغسل",
+
+    "sebab mandi wajib":
+        "موجبات الغسل",
+
+    "rukun mandi wajib":
+        "فرائض الغسل",
+
+    "cara mandi wajib":
+        "صفة الغسل",
+
+    "sifat mandi":
+        "صفة الغسل",
+
+    "mandi haid":
+        "غسل الحيض",
+
+    "mandi nifas":
+        "غسل النفاس",
+
+    "mandi wiladah":
+        "غسل الولادة",
+
+    "haid":
+        "الحيض",
+
+    "nifas":
+        "النفاس",
+
+    "istihadah":
+        "الاستحاضة",
+
+    "wuduk":
+        "الوضوء فرائض الوضوء",
+
+    "wudhu":
+        "الوضوء فرائض الوضوء",
+
+    "rukun wuduk":
+        "فرائض الوضوء",
+
+    "batal wuduk":
+        "نواقض الوضوء",
+
+    "batal air sembahyang":
+        "نواقض الوضوء",
+
+    "tayamum":
+        "التيمم فرائض التيمم",
+
+    "rukun tayamum":
+        "فرائض التيمم",
+
+    "najis":
+        "النجاسة أحكام النجاسة",
+
+    "bersuci":
+        "الطهارة",
+
+    "taharah":
+        "الطهارة",
+
+    "air mutlak":
+        "الماء الطهور",
+
+    "air":
+        "المياه أحكام الطهارة",
+
+    # ----------------------------
+    # SOLAT
+    # ----------------------------
+
+    "solat":
+        "الصلاة أحكام الصلاة",
+
+    "sembahyang":
+        "الصلاة أحكام الصلاة",
+
+    "rukun solat":
+        "أركان الصلاة",
+
+    "syarat solat":
+        "شروط الصلاة",
+
+    "batal solat":
+        "مبطلات الصلاة",
+
+    "qunut":
+        "القنوت في صلاة الصبح",
+
+    "qunut subuh":
+        "القنوت في صلاة الصبح",
+
+    "solat subuh":
+        "صلاة الصبح القنوت",
+
+    "solat jumaat":
+        "صلاة الجمعة",
+
+    "jumaat":
+        "صلاة الجمعة",
+
+    "jamak":
+        "الجمع بين الصلاتين",
+
+    "qasar":
+        "القصر في الصلاة",
+
+    "jamak qasar":
+        "الجمع والقصر",
+
+    "musafir":
+        "السفر أحكام صلاة المسافر",
+
+    "sujud sahwi":
+        "سجود السهو",
+
+    "sujud tilawah":
+        "سجود التلاوة",
+
+    "azan":
+        "الأذان",
+
+    "iqamah":
+        "الإقامة",
+
+    # ----------------------------
+    # PUASA
+    # ----------------------------
+
+    "puasa":
+        "الصيام أحكام الصيام",
+
+    "puasa ramadan":
+        "صيام رمضان",
+
+    "ramadan":
+        "صيام رمضان",
+
+    "rukun puasa":
+        "أركان الصيام",
+
+    "syarat puasa":
+        "شروط الصيام",
+
+    "batal puasa":
+        "مبطلات الصيام",
+
+    "qada puasa":
+        "قضاء الصيام",
+
+    "ganti puasa":
+        "قضاء الصيام",
+
+    "fidyah":
+        "الفدية",
+
+    "kaffarah puasa":
+        "كفارة الصيام",
+
+    # ----------------------------
+    # ZAKAT
+    # ----------------------------
+
+    "zakat":
+        "الزكاة أحكام الزكاة",
+
+    "zakat fitrah":
+        "زكاة الفطر",
+
+    "zakat harta":
+        "زكاة المال",
+
+    "zakat pendapatan":
+        "زكاة المال الكسب",
+
+    # ----------------------------
+    # HAJI / UMRAH
+    # ----------------------------
+
+    "haji":
+        "الحج أحكام الحج",
+
+    "umrah":
+        "العمرة أحكام العمرة",
+
+    "ihram":
+        "الإحرام",
+
+    "miqat":
+        "المواقيت",
+
+    "talbiyah":
+        "التلبية",
+
+    "korban":
+        "الأضحية",
+
+    "aqiqah":
+        "العقيقة",
+
+    "akikah":
+        "العقيقة",
+
+    # ----------------------------
+    # MUAMALAT
+    # ----------------------------
+
+    "jual beli":
+        "البيع أحكام البيع",
+
+    "jual-beli":
+        "البيع أحكام البيع",
+
+    "riba":
+        "الربا",
+
+    "hutang":
+        "الدين أحكام الدين",
+
+    "pinjaman":
+        "القرض",
+
+    "wakaf":
+        "الوقف",
+
+    "nazar":
+        "النذر",
+
+    "sumpah":
+        "اليمين",
+
+    # ----------------------------
+    # MUNAKAHAT
+    # ----------------------------
+
+    "nikah":
+        "النكاح أحكام النكاح",
+
+    "kahwin":
+        "النكاح",
+
+    "perkahwinan":
+        "النكاح",
+
+    "mahar":
+        "المهر",
+
+    "mas kahwin":
+        "المهر",
+
+    "talak":
+        "الطلاق",
+
+    "cerai":
+        "الطلاق",
+
+    "rujuk":
+        "الرجعة",
+
+    "iddah":
+        "العدة",
+
+    "nafkah":
+        "النفقة الزوجية",
+
+}
+
+
+def get_fiqh_mapped_query(
+    question
+):
+
+    q = normalize_question(
+        question
+    ).lower()
+
+    keys = sorted(
+        FIQH_QUERY_MAP.keys(),
+        key=len,
+        reverse=True
+    )
+
+    for key in keys:
+
+        if key in q:
+
+            return FIQH_QUERY_MAP[
+                key
+            ]
+
+    return ""
+
+
+# ============================================================
+# MADHHAB DETECTION
 # ============================================================
 
 def is_madhhab_comparison(question):
@@ -595,7 +876,6 @@ def is_madhhab_comparison(question):
         "compare madhhab",
         "compare madhhabs",
         "madhhab comparison",
-        "comparison",
 
         "قارن",
         "مقارنة",
@@ -607,10 +887,9 @@ def is_madhhab_comparison(question):
         phrase in q
         for phrase in explicit_phrases
     ):
-
         return True
 
-    madhhab_patterns = [
+    patterns = [
 
         r"\bsyafie\b",
         r"\bsyafi['’]i\b",
@@ -631,14 +910,55 @@ def is_madhhab_comparison(question):
                 q
             )
         )
-        for pattern in madhhab_patterns
+        for pattern in patterns
     )
 
     return count >= 2
 
 
 # ============================================================
-# GEMINI ERROR DETECTOR
+# GET REQUESTED MADHHAB
+# ============================================================
+
+def detect_requested_madhhab(
+    question
+):
+
+    q = normalize_question(
+        question
+    ).lower()
+
+    if (
+        "syafie" in q
+        or "syafi'i" in q
+        or "syafi’i" in q
+        or "شافعية" in q
+    ):
+        return "syafii"
+
+    if (
+        "hanafi" in q
+        or "حنفية" in q
+    ):
+        return "hanafi"
+
+    if (
+        "maliki" in q
+        or "مالكية" in q
+    ):
+        return "maliki"
+
+    if (
+        "hanbali" in q
+        or "حنابلة" in q
+    ):
+        return "hanbali"
+
+    return ""
+
+
+# ============================================================
+# GEMINI ERROR
 # ============================================================
 
 def is_retryable_gemini_error(
@@ -673,7 +993,7 @@ def is_retryable_gemini_error(
 
 
 # ============================================================
-# GEMINI GENERATE WITH RETRY
+# GEMINI GENERATE
 # ============================================================
 
 def gemini_generate_with_retry(
@@ -685,8 +1005,7 @@ def gemini_generate_with_retry(
     if not gemini_client:
 
         print(
-            f"❌ {label}: "
-            "Gemini client tidak tersedia"
+            f"❌ {label}: Gemini client tidak tersedia"
         )
 
         return None
@@ -708,8 +1027,7 @@ def gemini_generate_with_retry(
             print(
                 f"🤖 {label}: "
                 f"model={model} "
-                f"attempt={attempt}/"
-                f"{retries}"
+                f"attempt={attempt}/{retries}"
             )
 
             response = (
@@ -732,15 +1050,13 @@ def gemini_generate_with_retry(
                 if text:
 
                     print(
-                        f"✅ {label}: "
-                        "SUCCESS"
+                        f"✅ {label}: SUCCESS"
                     )
 
                     return text.strip()
 
             print(
-                f"⚠️ {label}: "
-                "response kosong"
+                f"⚠️ {label}: response kosong"
             )
 
         except Exception as e:
@@ -748,8 +1064,7 @@ def gemini_generate_with_retry(
             last_error = e
 
             print(
-                f"⚠️ {label} ERROR "
-                f"attempt {attempt}:"
+                f"⚠️ {label} ERROR attempt {attempt}:"
             )
 
             print(
@@ -777,9 +1092,7 @@ def gemini_generate_with_retry(
                 )
 
                 print(
-                    f"⏳ Gemini busy/error. "
-                    f"Retry dalam "
-                    f"{wait_seconds}s..."
+                    f"⏳ Retry dalam {wait_seconds}s..."
                 )
 
                 time.sleep(
@@ -787,8 +1100,7 @@ def gemini_generate_with_retry(
                 )
 
     print(
-        f"❌ {label}: "
-        "SEMUA RETRY GAGAL"
+        f"❌ {label}: SEMUA RETRY GAGAL"
     )
 
     if last_error:
@@ -800,10 +1112,6 @@ def gemini_generate_with_retry(
 
     return None
 
-
-# ============================================================
-# GEMINI RESILIENT
-# ============================================================
 
 def gemini_generate_resilient(
     primary_model,
@@ -819,19 +1127,12 @@ def gemini_generate_resilient(
     )
 
     if result:
-
         return result
 
     if (
         fallback_model
         and fallback_model != primary_model
     ):
-
-        print(
-            f"🛟 {label}: "
-            f"TRY FALLBACK MODEL "
-            f"{fallback_model}"
-        )
 
         result = gemini_generate_with_retry(
             model=fallback_model,
@@ -840,37 +1141,63 @@ def gemini_generate_resilient(
         )
 
         if result:
-
             return result
 
     return None
 
 
 # ============================================================
-# TRANSLATE TO ARABIC QUERY
+# ARABIC QUERY
 # ============================================================
 
 def translate_to_arabic_query(
     question
 ):
 
-    if not gemini_client:
-
-        print(
-            "⚠️ Gemini tidak tersedia."
-        )
-
-        print(
-            "➡️ Gunakan soalan asal."
-        )
-
-        return question
-
     question = normalize_question(
         question
     )
 
-    if not question:
+    # --------------------------------------------------------
+    # FIRST: SPECIAL FIqh MAP
+    # --------------------------------------------------------
+
+    mapped_query = get_fiqh_mapped_query(
+        question
+    )
+
+    if mapped_query:
+
+        print(
+            "🗺️ FIqh QUERY MAP:",
+            mapped_query
+        )
+
+        # Jika soalan menyebut mazhab,
+        # tambah mazhab ke query.
+        madhhab = detect_requested_madhhab(
+            question
+        )
+
+        if madhhab == "syafii":
+            mapped_query += " الشافعية"
+
+        elif madhhab == "hanafi":
+            mapped_query += " الحنفية"
+
+        elif madhhab == "maliki":
+            mapped_query += " المالكية"
+
+        elif madhhab == "hanbali":
+            mapped_query += " الحنابلة"
+
+        return mapped_query
+
+    # --------------------------------------------------------
+    # GEMINI TRANSLATION
+    # --------------------------------------------------------
+
+    if not gemini_client:
 
         return question
 
@@ -885,12 +1212,10 @@ def translate_to_arabic_query(
 2. لا تشرح.
 3. أخرج استعلام البحث العربي فقط.
 4. استخدم المصطلحات الفقهية العربية الدقيقة.
-5. إذا ذكر المستخدم مذهباً فاذكره في الاستعلام.
-6. إذا كان السؤال عن مسألة فقهية محددة، اجعل الاستعلام مركزاً عليها.
-7. لا تضف حكماً أو معلومة غير موجودة في السؤال.
-8. لا تكتب مقدمة.
-9. لا تستخدم علامات اقتباس.
-10. اجعل الاستعلام واضحاً ومفيداً لمحرك البحث.
+5. إذا ذكر المستخدم مذهباً فاذكره.
+6. ركّز على المسألة الفقهية المحددة.
+7. لا تضف حكماً غير موجود في السؤال.
+8. لا تستخدم علامات اقتباس.
 
 سؤال المستخدم:
 {question}
@@ -906,14 +1231,6 @@ def translate_to_arabic_query(
     )
 
     if not result:
-
-        print(
-            "⚠️ GAGAL TRANSLATE ARABIC"
-        )
-
-        print(
-            "➡️ FALLBACK KE SOALAN ASAL"
-        )
 
         return question
 
@@ -934,10 +1251,6 @@ def translate_to_arabic_query(
 
     if not arabic_query:
 
-        print(
-            "⚠️ Arabic query kosong."
-        )
-
         return question
 
     print(
@@ -949,7 +1262,7 @@ def translate_to_arabic_query(
 
 
 # ============================================================
-# EMBEDDING WITH RETRY
+# EMBEDDING
 # ============================================================
 
 def create_embedding_with_retry(
@@ -957,10 +1270,7 @@ def create_embedding_with_retry(
 ):
 
     if not gemini_client:
-
         return None
-
-    last_error = None
 
     retries = max(
         1,
@@ -976,8 +1286,7 @@ def create_embedding_with_retry(
 
             print(
                 f"🧠 EMBEDDING ATTEMPT "
-                f"{attempt}/"
-                f"{retries}"
+                f"{attempt}/{retries}"
             )
 
             result = (
@@ -1013,8 +1322,6 @@ def create_embedding_with_retry(
 
         except Exception as e:
 
-            last_error = e
-
             print(
                 "⚠️ EMBEDDING ERROR:",
                 str(e)
@@ -1023,7 +1330,6 @@ def create_embedding_with_retry(
             if not is_retryable_gemini_error(
                 e
             ):
-
                 break
 
             if attempt < retries:
@@ -1038,21 +1344,9 @@ def create_embedding_with_retry(
                     )
                 )
 
-                print(
-                    f"⏳ Retry embedding "
-                    f"dalam {wait_seconds}s"
-                )
-
                 time.sleep(
                     wait_seconds
                 )
-
-    if last_error:
-
-        print(
-            "❌ EMBEDDING FAILED:",
-            str(last_error)
-        )
 
     return None
 
@@ -1067,21 +1361,9 @@ def search_local(
 ):
 
     if not supabase:
-
-        print(
-            "⚠️ LOCAL SEARCH SKIPPED: "
-            "Supabase tidak tersedia"
-        )
-
         return []
 
     if not gemini_client:
-
-        print(
-            "⚠️ LOCAL SEARCH SKIPPED: "
-            "Gemini tidak tersedia"
-        )
-
         return []
 
     print(
@@ -1093,11 +1375,6 @@ def search_local(
     )
 
     if not vector:
-
-        print(
-            "⚠️ Tiada embedding."
-        )
-
         return []
 
     try:
@@ -1151,8 +1428,6 @@ def search_local(
             if not content:
                 continue
 
-            # Jangan guna "Sumber tempatan" sebagai
-            # nama kitab jika ada metadata lain.
             source = (
                 row.get("source")
                 or row.get("book")
@@ -1204,9 +1479,7 @@ def search_local(
 
             normalized.append(
                 {
-                    "source": str(
-                        source
-                    ),
+                    "source": str(source),
                     "book": str(
                         row.get("book")
                         or ""
@@ -1216,27 +1489,13 @@ def search_local(
                         or row.get("book_name")
                         or ""
                     ),
-                    "author": str(
-                        author
-                    ),
-                    "category": str(
-                        category
-                    ),
-                    "page": str(
-                        page
-                    ),
-                    "page_number": str(
-                        page
-                    ),
-                    "book_hash": str(
-                        book_hash
-                    ),
-                    "book_id": str(
-                        book_hash
-                    ),
-                    "url": str(
-                        url
-                    ),
+                    "author": str(author),
+                    "category": str(category),
+                    "page": str(page),
+                    "page_number": str(page),
+                    "book_hash": str(book_hash),
+                    "book_id": str(book_hash),
+                    "url": str(url),
                     "similarity": similarity,
                     "content": content[
                         :SOURCE_MAX_CHARS
@@ -1244,11 +1503,6 @@ def search_local(
                     "origin": "local",
                 }
             )
-
-        print(
-            "📚 LOCAL NORMALIZED:",
-            len(normalized)
-        )
 
         return normalized
 
@@ -1282,20 +1536,10 @@ def search_turath(
         "⚖️ Comparison:",
         comparison
     )
-    print(
-        "🌐 URL:",
-        TURATH_SERVICE_URL + "/search"
-    )
     print("=" * 55)
 
-    # --------------------------------------------------------
-    # TERJEMAH KE ARAB
-    # --------------------------------------------------------
-
-    arabic_query = (
-        translate_to_arabic_query(
-            question
-        )
+    arabic_query = translate_to_arabic_query(
+        question
     )
 
     print(
@@ -1309,11 +1553,8 @@ def search_turath(
     )
 
     payload = {
-
         "query": arabic_query,
-
         "question": question,
-
         "comparison": comparison,
     }
 
@@ -1338,17 +1579,7 @@ def search_turath(
             data,
             dict
         ):
-
-            print(
-                "⚠️ TURATH RESPONSE bukan dict"
-            )
-
             return []
-
-        print(
-            "📦 TURATH RESPONSE KEYS:",
-            list(data.keys())
-        )
 
         raw_results = (
             data.get("passages")
@@ -1361,7 +1592,6 @@ def search_turath(
             raw_results,
             list
         ):
-
             raw_results = []
 
         print(
@@ -1394,17 +1624,13 @@ def search_turath(
             if not content:
                 continue
 
-            # ------------------------------------------------
-            # TURATH METADATA
-            # ------------------------------------------------
-
             source = (
                 item.get("source")
                 or item.get("book")
                 or item.get("book_name")
                 or item.get("book_title")
                 or item.get("title")
-                or "Kitab Turath"
+                or ""
             )
 
             book = (
@@ -1471,49 +1697,23 @@ def search_turath(
                 or ""
             )
 
-            query_used = (
-                item.get("query")
-                or item.get("_query")
-                or arabic_query
-            )
-
             results.append(
                 {
-                    "source": str(
-                        source
-                    ),
-                    "book": str(
-                        book
-                    ),
-                    "book_title": str(
-                        book_title
-                    ),
-                    "author": str(
-                        author
-                    ),
-                    "page": str(
-                        page
-                    ),
-                    "page_number": str(
-                        page
-                    ),
-                    "book_id": str(
-                        book_id
-                    ),
-                    "id": str(
-                        result_id
-                    ),
-                    "url": str(
-                        url
-                    ),
-                    "category": str(
-                        category
-                    ),
-                    "category_id": str(
-                        category_id
-                    ),
+                    "source": str(source),
+                    "book": str(book),
+                    "book_title": str(book_title),
+                    "author": str(author),
+                    "page": str(page),
+                    "page_number": str(page),
+                    "book_id": str(book_id),
+                    "id": str(result_id),
+                    "url": str(url),
+                    "category": str(category),
+                    "category_id": str(category_id),
                     "query": str(
-                        query_used
+                        item.get("query")
+                        or item.get("_query")
+                        or arabic_query
                     ),
                     "content": content[
                         :SOURCE_MAX_CHARS
@@ -1524,11 +1724,9 @@ def search_turath(
 
         print(
             "📚 TURATH NORMALIZED:",
-            len(results),
-            "sumber"
+            len(results)
         )
 
-        # Debug metadata sumber pertama
         if results:
 
             print(
@@ -1545,16 +1743,6 @@ def search_turath(
 
         return results
 
-    except requests.exceptions.RequestException:
-
-        print(
-            "❌ TURATH REQUEST ERROR:"
-        )
-
-        traceback.print_exc()
-
-        return []
-
     except Exception:
 
         print(
@@ -1564,6 +1752,455 @@ def search_turath(
         traceback.print_exc()
 
         return []
+
+
+# ============================================================
+# RELEVANCE FILTER
+# ============================================================
+
+def relevance_score(
+    question,
+    source
+):
+
+    q = normalize_question(
+        question
+    ).lower()
+
+    content = clean_text(
+        source.get(
+            "content",
+            ""
+        )
+    ).lower()
+
+    metadata = " ".join(
+        [
+            str(
+                source.get(
+                    "source",
+                    ""
+                )
+            ),
+            str(
+                source.get(
+                    "book",
+                    ""
+                )
+            ),
+            str(
+                source.get(
+                    "book_title",
+                    ""
+                )
+            ),
+            str(
+                source.get(
+                    "category",
+                    ""
+                )
+            ),
+        ]
+    ).lower()
+
+    text = (
+        content
+        + " "
+        + metadata
+    )
+
+    score = 0
+
+    # --------------------------------------------------------
+    # TOPIC KEYWORDS
+    # --------------------------------------------------------
+
+    topic_groups = {
+
+        "mandi": [
+            "غسل",
+            "الجنابة",
+            "الغسل",
+            "موجبات الغسل",
+            "فرائض الغسل",
+            "صفة الغسل",
+        ],
+
+        "wuduk": [
+            "وضوء",
+            "الوضوء",
+            "فرائض الوضوء",
+            "نواقض الوضوء",
+        ],
+
+        "solat": [
+            "صلاة",
+            "الصلاة",
+            "أركان الصلاة",
+            "مبطلات الصلاة",
+        ],
+
+        "qunut": [
+            "قنوت",
+            "القنوت",
+        ],
+
+        "puasa": [
+            "صيام",
+            "الصيام",
+            "رمضان",
+        ],
+
+        "zakat": [
+            "زكاة",
+            "الزكاة",
+        ],
+
+        "haji": [
+            "حج",
+            "الحج",
+            "إحرام",
+        ],
+
+        "nikah": [
+            "نكاح",
+            "النكاح",
+            "زواج",
+        ],
+
+        "talak": [
+            "طلاق",
+            "الطلاق",
+        ],
+
+        "riba": [
+            "ربا",
+            "الربا",
+        ],
+    }
+
+    detected_topics = []
+
+    if any(
+        x in q
+        for x in [
+            "mandi wajib",
+            "mandi junub",
+            "junub",
+            "hadas besar",
+            "wajib mandi",
+            "cara mandi"
+        ]
+    ):
+        detected_topics.append(
+            "mandi"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "wuduk",
+            "wudhu",
+            "batal wuduk"
+        ]
+    ):
+        detected_topics.append(
+            "wuduk"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "qunut"
+        ]
+    ):
+        detected_topics.append(
+            "qunut"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "solat",
+            "sembahyang"
+        ]
+    ):
+        detected_topics.append(
+            "solat"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "puasa",
+            "ramadan"
+        ]
+    ):
+        detected_topics.append(
+            "puasa"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "zakat"
+        ]
+    ):
+        detected_topics.append(
+            "zakat"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "haji",
+            "umrah",
+            "ihram"
+        ]
+    ):
+        detected_topics.append(
+            "haji"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "nikah",
+            "kahwin",
+            "perkahwinan"
+        ]
+    ):
+        detected_topics.append(
+            "nikah"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "talak",
+            "cerai"
+        ]
+    ):
+        detected_topics.append(
+            "talak"
+        )
+
+    if any(
+        x in q
+        for x in [
+            "riba"
+        ]
+    ):
+        detected_topics.append(
+            "riba"
+        )
+
+    for topic in detected_topics:
+
+        keywords = topic_groups.get(
+            topic,
+            []
+        )
+
+        matched = sum(
+            1
+            for keyword in keywords
+            if keyword in text
+        )
+
+        if matched:
+            score += (
+                matched * 25
+            )
+
+    # --------------------------------------------------------
+    # MALAY TOPIC TERMS
+    # --------------------------------------------------------
+
+    malay_terms = {
+
+        "mandi": [
+            "mandi",
+            "junub",
+            "hadas besar",
+        ],
+
+        "wuduk": [
+            "wuduk",
+            "wudhu",
+        ],
+
+        "solat": [
+            "solat",
+            "sembahyang",
+        ],
+
+        "qunut": [
+            "qunut",
+        ],
+
+        "puasa": [
+            "puasa",
+            "ramadan",
+        ],
+
+        "zakat": [
+            "zakat",
+        ],
+
+        "haji": [
+            "haji",
+            "umrah",
+        ],
+
+        "nikah": [
+            "nikah",
+            "kahwin",
+        ],
+
+        "talak": [
+            "talak",
+            "cerai",
+        ],
+    }
+
+    for terms in malay_terms.values():
+
+        for term in terms:
+
+            if term in q:
+
+                # Tidak terlalu tinggi kerana content
+                # biasanya Arab.
+                if term in text:
+                    score += 10
+
+    # --------------------------------------------------------
+    # MADHHAB
+    # --------------------------------------------------------
+
+    madhhab = detect_requested_madhhab(
+        question
+    )
+
+    if madhhab == "syafii":
+
+        if (
+            "الشافعية" in text
+            or "شافعية" in text
+        ):
+            score += 30
+
+    elif madhhab == "hanafi":
+
+        if "الحنفية" in text:
+            score += 30
+
+    elif madhhab == "maliki":
+
+        if "المالكية" in text:
+            score += 30
+
+    elif madhhab == "hanbali":
+
+        if "الحنابلة" in text:
+            score += 30
+
+    # --------------------------------------------------------
+    # METADATA
+    # --------------------------------------------------------
+
+    if source.get("book_id"):
+        score += 5
+
+    if source.get("author"):
+        score += 5
+
+    if source.get("page"):
+        score += 5
+
+    return score
+
+
+def filter_relevant_sources(
+    question,
+    sources,
+    minimum_score=10
+):
+
+    if not sources:
+        return []
+
+    scored = []
+
+    for source in sources:
+
+        score = relevance_score(
+            question,
+            source
+        )
+
+        source = dict(
+            source
+        )
+
+        source[
+            "_relevance_score"
+        ] = score
+
+        scored.append(
+            source
+        )
+
+    scored.sort(
+        key=lambda x: (
+            x.get(
+                "_relevance_score",
+                0
+            ),
+            1
+            if x.get(
+                "origin"
+            ) == "turath"
+            else 0,
+        ),
+        reverse=True
+    )
+
+    relevant = [
+        x
+        for x in scored
+        if x.get(
+            "_relevance_score",
+            0
+        ) >= minimum_score
+    ]
+
+    print(
+        "🎯 RELEVANT SOURCES:",
+        len(relevant),
+        "/",
+        len(sources)
+    )
+
+    for source in scored[:10]:
+
+        print(
+            "   SCORE:",
+            source.get(
+                "_relevance_score"
+            ),
+            "|",
+            source.get(
+                "source"
+            )
+            or source.get(
+                "book"
+            )
+            or "TIADA"
+        )
+
+    return relevant
 
 
 # ============================================================
@@ -1578,9 +2215,6 @@ def deduplicate_sources(
 
     seen = set()
 
-    # Turath diutamakan.
-    # Jika sumber yang sama muncul dari local + Turath,
-    # Turath akan dikekalkan dahulu.
     sorted_sources = sorted(
         sources,
         key=lambda x: (
@@ -1602,8 +2236,28 @@ def deduplicate_sources(
         if not content:
             continue
 
-        key = hashlib.sha256(
+        # Buang duplicate berdasarkan
+        # kandungan dan metadata.
+        key_text = (
             content[:3000]
+            + "|"
+            + str(
+                source.get(
+                    "book_id",
+                    ""
+                )
+            )
+            + "|"
+            + str(
+                source.get(
+                    "page",
+                    ""
+                )
+            )
+        )
+
+        key = hashlib.sha256(
+            key_text
             .lower()
             .encode(
                 "utf-8"
@@ -1625,7 +2279,7 @@ def deduplicate_sources(
 
 
 # ============================================================
-# SOURCE SORT
+# SORT SOURCES
 # ============================================================
 
 def sort_sources(
@@ -1634,30 +2288,165 @@ def sort_sources(
 
     def score(source):
 
-        score_value = 0
+        value = 0
 
-        if source.get("origin") == "turath":
-            score_value += 100
+        if (
+            source.get(
+                "origin"
+            )
+            == "turath"
+        ):
+            value += 100
 
-        if source.get("source"):
-            score_value += 20
+        value += int(
+            source.get(
+                "_relevance_score",
+                0
+            )
+            or 0
+        )
 
-        if source.get("author"):
-            score_value += 10
+        if source.get(
+            "source"
+        ):
+            value += 20
 
-        if source.get("page"):
-            score_value += 10
+        if source.get(
+            "author"
+        ):
+            value += 10
 
-        if source.get("book_id"):
-            score_value += 10
+        if source.get(
+            "page"
+        ):
+            value += 10
 
-        return score_value
+        if source.get(
+            "book_id"
+        ):
+            value += 10
+
+        return value
 
     return sorted(
         sources,
         key=score,
         reverse=True
     )
+
+
+# ============================================================
+# SELECT BEST SOURCES
+# ============================================================
+
+def select_sources(
+    question,
+    turath_sources,
+    local_sources,
+    comparison=False
+):
+
+    # --------------------------------------------------------
+    # DEDUP TURATH
+    # --------------------------------------------------------
+
+    turath_sources = deduplicate_sources(
+        turath_sources
+    )
+
+    # --------------------------------------------------------
+    # FILTER TURATH
+    # --------------------------------------------------------
+
+    relevant_turath = filter_relevant_sources(
+        question,
+        turath_sources,
+        minimum_score=10
+    )
+
+    relevant_turath = sort_sources(
+        relevant_turath
+    )
+
+    # --------------------------------------------------------
+    # NORMAL QUESTION
+    # --------------------------------------------------------
+
+    if not comparison:
+
+        # Jika Turath ada sumber yang relevan,
+        # JANGAN campurkan local.
+        if relevant_turath:
+
+            print(
+                "📚 MODE: TURATH ONLY"
+            )
+
+            return relevant_turath[:10]
+
+        # Turath ada tetapi tidak relevan.
+        # Cuba local sebagai fallback.
+        print(
+            "⚠️ TURATH TIADA SUMBER RELEVAN"
+        )
+
+        relevant_local = filter_relevant_sources(
+            question,
+            local_sources,
+            minimum_score=10
+        )
+
+        if relevant_local:
+
+            print(
+                "📚 MODE: LOCAL FALLBACK"
+            )
+
+            return sort_sources(
+                relevant_local
+            )[:5]
+
+        # Jika filter terlalu ketat,
+        # guna Turath dahulu.
+        if turath_sources:
+
+            print(
+                "📚 MODE: TURATH FALLBACK"
+            )
+
+            return sort_sources(
+                turath_sources
+            )[:5]
+
+        return sort_sources(
+            local_sources
+        )[:5]
+
+    # --------------------------------------------------------
+    # COMPARISON
+    # --------------------------------------------------------
+
+    if comparison:
+
+        # Untuk comparison, Turath semua mazhab
+        # lebih utama.
+        if relevant_turath:
+
+            print(
+                "⚖️ MODE: TURATH COMPARISON"
+            )
+
+            return relevant_turath[:16]
+
+        relevant_local = filter_relevant_sources(
+            question,
+            local_sources,
+            minimum_score=10
+        )
+
+        return sort_sources(
+            relevant_local
+        )[:8]
 
 
 # ============================================================
@@ -1669,7 +2458,6 @@ def build_context(
 ):
 
     if not sources:
-
         return ""
 
     sources = sort_sources(
@@ -1707,7 +2495,9 @@ def build_context(
             )
             or (
                 "Kitab Turath"
-                if source.get("origin") == "turath"
+                if source.get(
+                    "origin"
+                ) == "turath"
                 else "Sumber tempatan"
             )
         )
@@ -1743,33 +2533,41 @@ def build_context(
             or ""
         )
 
+        relevance = (
+            source.get(
+                "_relevance_score",
+                ""
+            )
+        )
+
         header = (
             f"[SUMBER {index}]\n"
             f"Kitab: {source_name}"
         )
 
         if author:
-
             header += (
                 f"\nPengarang: {author}"
             )
 
         if page:
-
             header += (
                 f"\nHalaman: {page}"
             )
 
         if category:
-
             header += (
                 f"\nMazhab/Kategori: {category}"
             )
 
         if origin:
-
             header += (
                 f"\nAsal: {origin}"
+            )
+
+        if relevance != "":
+            header += (
+                f"\nSkor relevansi: {relevance}"
             )
 
         block = (
@@ -1916,26 +2714,21 @@ def format_references(
         )
 
         if author:
-
             line += (
                 f" — {author}"
             )
 
         if page:
-
             line += (
                 f", hlm. {page}"
             )
 
         if category:
-
-            # Hanya tambah jika kategori memang ada.
             line += (
                 f" [{category}]"
             )
 
         if url:
-
             line += (
                 f"\n  {url}"
             )
@@ -1957,7 +2750,7 @@ def format_references(
 
 
 # ============================================================
-# SOURCE FALLBACK ANSWER
+# SOURCE FALLBACK
 # ============================================================
 
 def generate_source_fallback(
@@ -1966,22 +2759,11 @@ def generate_source_fallback(
     comparison=False
 ):
 
-    """
-    Digunakan apabila Gemini gagal.
-
-    Bot masih akan memberikan petikan sebenar
-    daripada Turath/local supaya pengguna tidak
-    mendapat jawapan kosong.
-    """
-
     if not sources:
 
         return (
-            "⚠️ Maaf, model AI sedang sibuk "
-            "atau tidak dapat dihubungi buat "
-            "sementara waktu.\n\n"
-            "Tiada sumber yang berjaya ditemui "
-            "untuk soalan ini."
+            "⚠️ Tiada sumber yang berjaya "
+            "ditemui untuk soalan ini."
         )
 
     ordered = sort_sources(
@@ -1991,23 +2773,18 @@ def generate_source_fallback(
     lines = []
 
     lines.append(
-        "⚠️ Model AI sedang sibuk buat sementara waktu."
+        "⚠️ Model AI tidak dapat menghasilkan "
+        "huraian buat sementara waktu."
     )
 
     lines.append(
-        "Namun, sumber fiqh yang ditemui masih dipaparkan di bawah."
+        "Berikut ialah petikan sumber yang ditemui:"
     )
 
     lines.append("")
 
-    lines.append(
-        "📖 Petikan sumber:"
-    )
-
-    max_sources = 5
-
     for index, source in enumerate(
-        ordered[:max_sources],
+        ordered[:5],
         start=1
     ):
 
@@ -2015,21 +2792,20 @@ def generate_source_fallback(
             source.get("source")
             or source.get("book")
             or source.get("book_title")
-            or (
-                "Kitab Turath"
-                if source.get("origin") == "turath"
-                else "Sumber tempatan"
-            )
+            or "Kitab Turath"
         )
 
         author = (
-            source.get("author")
+            source.get(
+                "author"
+            )
             or ""
         )
 
         page = (
-            source.get("page")
-            or source.get("page_number")
+            source.get(
+                "page"
+            )
             or ""
         )
 
@@ -2040,36 +2816,32 @@ def generate_source_fallback(
             )
         )
 
-        lines.append("")
-
         header = (
             f"{index}. {source_name}"
         )
 
         if author:
-            header += f" — {author}"
+            header += (
+                f" — {author}"
+            )
 
         if page:
-            header += f", hlm. {page}"
+            header += (
+                f", hlm. {page}"
+            )
 
         lines.append(
             header
         )
 
-        if content:
+        lines.append(
+            f"“{content[:1200]}”"
+        )
 
-            # Hadkan petikan supaya Telegram tidak terlalu panjang.
-            excerpt = content[:1200]
-
-            lines.append(
-                f"“{excerpt}”"
-            )
-
-    lines.append("")
+        lines.append("")
 
     lines.append(
-        "Sila cuba semula sebentar lagi untuk mendapatkan "
-        "huraian AI berdasarkan sumber-sumber tersebut."
+        "Sila cuba semula sebentar lagi."
     )
 
     return "\n".join(
@@ -2092,8 +2864,9 @@ def generate_answer(
         return (
             "⚠️ Tiada kandungan sumber yang "
             "mencukupi untuk menghasilkan "
-            "huraian."
-        ), False
+            "huraian.",
+            False
+        )
 
     if not gemini_client:
 
@@ -2121,73 +2894,111 @@ def generate_answer(
             False
         )
 
+    requested_madhhab = (
+        detect_requested_madhhab(
+            question
+        )
+    )
+
     if comparison:
 
         instruction = """
-Soalan ini meminta perbandingan mazhab.
+Soalan meminta perbandingan mazhab.
 
-Bandingkan hanya berdasarkan sumber yang
-diberikan.
+Bandingkan hanya pandangan yang benar-benar
+disokong oleh sumber.
 
-Jangan mereka-reka pandangan mazhab
-yang tidak terdapat dalam sumber.
+Jangan mereka-reka pandangan mazhab.
 
-Jika sumber bagi sesuatu mazhab tidak
-mencukupi, nyatakan bahawa sumber yang
-diberikan tidak mencukupi.
+Jika sumber bagi mazhab tertentu tiada,
+nyatakan sumber tersebut tidak mencukupi.
 """
 
     else:
 
-        instruction = """
-Soalan ini bukan permintaan perbandingan
-antara semua mazhab.
+        if requested_madhhab == "syafii":
 
-Jawab berdasarkan mazhab atau konteks
-yang diminta oleh pengguna.
+            instruction = """
+Pengguna meminta pandangan mazhab Syafie.
 
-Jika pengguna menyebut mazhab Syafie,
-utamakan sumber mazhab Syafie.
+WAJIB utamakan sumber berlabel Syafie
+dan jangan mencampurkan pandangan mazhab
+lain kecuali perlu untuk menjelaskan khilaf.
+"""
+
+        elif requested_madhhab == "hanafi":
+
+            instruction = """
+Pengguna meminta pandangan mazhab Hanafi.
+
+Utamakan sumber Hanafi.
+"""
+
+        elif requested_madhhab == "maliki":
+
+            instruction = """
+Pengguna meminta pandangan mazhab Maliki.
+
+Utamakan sumber Maliki.
+"""
+
+        elif requested_madhhab == "hanbali":
+
+            instruction = """
+Pengguna meminta pandangan mazhab Hanbali.
+
+Utamakan sumber Hanbali.
+"""
+
+        else:
+
+            instruction = """
+Jawab berdasarkan sumber fiqh yang diberikan.
 """
 
     prompt = f"""
 Anda ialah pembantu ilmu fiqh.
 
-Jawab soalan pengguna dalam Bahasa Melayu
-yang jelas, tepat dan mudah difahami.
+Jawab soalan pengguna dalam Bahasa Melayu.
 
-SOALAN PENGGUNA:
+SOALAN:
 {question}
 
 {instruction}
 
-SUMBER KITAB:
+SUMBER YANG DIBENARKAN:
 {context}
 
-PERATURAN:
+PERATURAN SANGAT PENTING:
 
-1. Jawab berdasarkan sumber yang diberikan.
-2. Jangan mereka-reka fakta.
-3. Jangan mencipta rujukan.
-4. Jika sumber tidak mencukupi, nyatakan
-   dengan jelas.
-5. Jika terdapat khilaf, jelaskan khilaf.
-6. Jika pengguna bertanya menurut mazhab
-   tertentu, utamakan mazhab tersebut.
-7. Jangan anggap semua mazhab sama.
-8. Bezakan wajib, sunat, makruh, harus
-   dan haram dengan tepat.
-9. Jika ada dalil, sebut secara ringkas.
-10. Jawapan hendaklah dalam Bahasa Melayu.
-11. Jangan gunakan jadual Markdown.
-12. Jangan tulis rujukan di bahagian akhir.
-    Sistem akan tambah rujukan secara automatik.
-13. Jangan menyebut bahawa anda ialah AI.
-14. Jangan mengatakan anda telah membuka kitab
-    secara langsung jika sumber yang diberi
-    hanyalah petikan.
-15. Jika terdapat perbezaan antara sumber,
-    jangan sembunyikannya.
+1. Gunakan HANYA sumber yang diberikan.
+2. Jangan reka nama kitab.
+3. Jangan reka pengarang.
+4. Jangan reka halaman.
+5. Jangan gunakan pengetahuan luar untuk
+   mengisi kekosongan sumber.
+6. Jika sumber tidak mencukupi, nyatakan
+   bahawa sumber tidak mencukupi.
+7. Jangan gunakan sumber yang tidak berkaitan.
+8. Jangan campurkan hukum solat jika soalan
+   sebenarnya tentang mandi wajib.
+9. Jika soalan tentang mandi wajib, fokus
+   kepada الغسل / غسل الجنابة / فرائض الغسل /
+   صفة الغسل.
+10. Jika soalan tentang wuduk, fokus kepada
+    الوضوء.
+11. Jika soalan tentang puasa, fokus kepada
+    الصيام.
+12. Jika soalan tentang qunut, fokus kepada
+    القنوت.
+13. Jika pengguna menyebut mazhab Syafie,
+    jawab berdasarkan sumber Syafie.
+14. Jika terdapat khilaf, jelaskan hanya jika
+    disokong oleh sumber.
+15. Jangan tulis bahagian "Rujukan".
+    Sistem akan menambahnya.
+16. Jangan gunakan Markdown yang kompleks.
+17. Jangan sebut bahawa anda ialah AI.
 
 FORMAT:
 
@@ -2199,8 +3010,6 @@ Penjelasan:
 
 Kesimpulan:
 ...
-
-Gunakan Kesimpulan hanya jika sesuai.
 """
 
     result = gemini_generate_resilient(
@@ -2211,10 +3020,6 @@ Gunakan Kesimpulan hanya jika sesuai.
     )
 
     if not result:
-
-        print(
-            "⚠️ FINAL ANSWER GAGAL"
-        )
 
         return (
             generate_source_fallback(
@@ -2265,9 +3070,7 @@ def answer_question(
 
     print("=" * 65)
     print(
-        "❓ QUESTION:"
-    )
-    print(
+        "❓ QUESTION:",
         question
     )
     print("=" * 65)
@@ -2277,21 +3080,12 @@ def answer_question(
     )
 
     print(
-        "⚖️ Comparison:",
+        "⚖️ COMPARISON:",
         comparison
     )
 
     # --------------------------------------------------------
-    # LOCAL SEARCH
-    # --------------------------------------------------------
-
-    local_sources = search_local(
-        question,
-        limit=5
-    )
-
-    # --------------------------------------------------------
-    # TURATH SEARCH
+    # TURATH FIRST
     # --------------------------------------------------------
 
     turath_sources = search_turath(
@@ -2299,36 +3093,96 @@ def answer_question(
         comparison=comparison
     )
 
-    # --------------------------------------------------------
-    # TURATH DIUTAMAKAN
-    # --------------------------------------------------------
-
-    all_sources = (
-        turath_sources
-        + local_sources
-    )
-
-    all_sources = deduplicate_sources(
-        all_sources
-    )
-
-    all_sources = sort_sources(
-        all_sources
-    )
-
     print(
-        "📚 TOTAL SOURCES:",
-        len(all_sources)
-    )
-
-    print(
-        "📚 TURATH SOURCES:",
+        "📚 TURATH FOUND:",
         len(turath_sources)
     )
 
+    # --------------------------------------------------------
+    # LOCAL SEARCH
+    # --------------------------------------------------------
+    # Local hanya digunakan sebagai fallback.
+    # Untuk kurangkan API call, kita masih ambil local
+    # selepas Turath.
+
+    local_sources = []
+
+    if not turath_sources:
+
+        print(
+            "⚠️ TURATH KOSONG → SEARCH LOCAL"
+        )
+
+        local_sources = search_local(
+            question,
+            limit=5
+        )
+
+    # --------------------------------------------------------
+    # SELECT
+    # --------------------------------------------------------
+
+    selected_sources = select_sources(
+        question,
+        turath_sources,
+        local_sources,
+        comparison=comparison
+    )
+
+    selected_sources = deduplicate_sources(
+        selected_sources
+    )
+
+    selected_sources = sort_sources(
+        selected_sources
+    )
+
     print(
-        "📚 LOCAL SOURCES:",
-        len(local_sources)
+        "=========================================="
+    )
+
+    print(
+        "📚 SELECTED SOURCES:",
+        len(selected_sources)
+    )
+
+    print(
+        "📚 TURATH SELECTED:",
+        sum(
+            1
+            for x in selected_sources
+            if x.get("origin") == "turath"
+        )
+    )
+
+    print(
+        "📚 LOCAL SELECTED:",
+        sum(
+            1
+            for x in selected_sources
+            if x.get("origin") == "local"
+        )
+    )
+
+    for source in selected_sources[:10]:
+
+        print(
+            "   •",
+            source.get(
+                "source"
+            )
+            or source.get(
+                "book"
+            )
+            or "TIADA",
+            "| score=",
+            source.get(
+                "_relevance_score"
+            )
+        )
+
+    print(
+        "=========================================="
     )
 
     # --------------------------------------------------------
@@ -2337,7 +3191,7 @@ def answer_question(
 
     answer, ai_success = generate_answer(
         question,
-        all_sources,
+        selected_sources,
         comparison=comparison
     )
 
@@ -2346,7 +3200,7 @@ def answer_question(
     # --------------------------------------------------------
 
     references = format_references(
-        all_sources
+        selected_sources
     )
 
     final_answer = (
@@ -2360,10 +3214,8 @@ def answer_question(
     )
 
     # --------------------------------------------------------
-    # CACHE ONLY VALID ANSWER
+    # CACHE
     # --------------------------------------------------------
-    # Jangan cache mesej model busy supaya cubaan seterusnya
-    # masih boleh memanggil Gemini.
 
     if ai_success:
 
@@ -2376,7 +3228,7 @@ def answer_question(
 
 
 # ============================================================
-# TELEGRAM /START
+# TELEGRAM START
 # ============================================================
 
 async def telegram_start(
@@ -2399,7 +3251,7 @@ async def telegram_start(
 
 
 # ============================================================
-# TELEGRAM /HELP
+# TELEGRAM HELP
 # ============================================================
 
 async def telegram_help(
@@ -2416,6 +3268,7 @@ async def telegram_help(
 
     await message.reply_text(
         "Contoh soalan:\n\n"
+        "• Apa hukum mandi wajib menurut mazhab Syafie?\n"
         "• Apa hukum qunut Subuh menurut mazhab Syafie?\n"
         "• Adakah sentuh perempuan membatalkan wuduk?\n"
         "• Apa hukum jamak solat ketika musafir?\n"
@@ -2491,8 +3344,6 @@ async def telegram_message(
 
             try:
 
-                # Jangan guna parse_mode.
-                # Ini elakkan Telegram Markdown/HTML error.
                 await message.reply_text(
                     chunk,
                     disable_web_page_preview=True
@@ -2669,7 +3520,7 @@ def run_optional_book_sync():
 
 
 # ============================================================
-# BACKGROUND SERVICES
+# BACKGROUND
 # ============================================================
 
 def start_background_services():
@@ -2679,7 +3530,6 @@ def start_background_services():
     with background_lock:
 
         if background_started:
-
             return
 
         background_started = True
@@ -2691,10 +3541,6 @@ def start_background_services():
         )
 
         return
-
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
 
     if TELEGRAM_TOKEN:
 
@@ -2708,10 +3554,6 @@ def start_background_services():
 
         telegram_thread.start()
 
-    # --------------------------------------------------------
-    # BOOK SYNC
-    # --------------------------------------------------------
-
     sync_thread = (
         threading.Thread(
             target=run_optional_book_sync,
@@ -2724,7 +3566,7 @@ def start_background_services():
 
 
 # ============================================================
-# FLASK HOME
+# HOME
 # ============================================================
 
 @app.route(
@@ -2916,13 +3758,6 @@ def search_endpoint():
             )
         )
 
-        local_sources = (
-            search_local(
-                question,
-                limit=5
-            )
-        )
-
         turath_sources = (
             search_turath(
                 question,
@@ -2930,9 +3765,24 @@ def search_endpoint():
             )
         )
 
+        local_sources = []
+
+        if not turath_sources:
+
+            local_sources = search_local(
+                question,
+                limit=5
+            )
+
+        sources = select_sources(
+            question,
+            turath_sources,
+            local_sources,
+            comparison=comparison
+        )
+
         sources = deduplicate_sources(
-            turath_sources
-            + local_sources
+            sources
         )
 
         sources = sort_sources(
@@ -2995,24 +3845,19 @@ def main():
         "🚀 TANYAFIQIHBOT READY"
     )
     print(
-        f"🌐 Flask: "
-        f"http://{host}:{port}"
+        f"🌐 Flask: http://{host}:{port}"
     )
     print(
-        f"📚 Turath: "
-        f"{TURATH_SERVICE_URL}"
+        f"📚 Turath: {TURATH_SERVICE_URL}"
     )
     print(
-        f"🤖 LLM: "
-        f"{LLM_MODEL}"
+        f"🤖 LLM: {LLM_MODEL}"
     )
     print(
-        f"🇸🇦 Arabic Query: "
-        f"{ARABIC_QUERY_MODEL}"
+        f"🇸🇦 Arabic Query: {ARABIC_QUERY_MODEL}"
     )
     print(
-        f"🧠 Embedding: "
-        f"{EMBEDDING_MODEL}"
+        f"🧠 Embedding: {EMBEDDING_MODEL}"
     )
     print("=" * 65)
 
@@ -3033,5 +3878,4 @@ if __name__ == "__main__":
 
 else:
 
-    # Gunicorn import app:app
     start_background_services()
