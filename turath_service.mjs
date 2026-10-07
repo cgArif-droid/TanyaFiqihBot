@@ -10,33 +10,30 @@ import {
 |--------------------------------------------------------------------------
 | SERVER CONFIG
 |--------------------------------------------------------------------------
+|
+| PENTING:
+|
+| Render menggunakan process.env.PORT untuk server utama.
+| Tetapi Turath berjalan sebagai server dalaman dalam
+| container yang sama.
+|
+| Oleh itu:
+|
+| Gunakan TURATH_PORT untuk Turath.
+| Default = 8765
+|
+| Jangan gunakan process.env.PORT di sini kerana
+| Render akan memberikan PORT seperti 10000.
+|--------------------------------------------------------------------------
 */
 
 const PORT = Number(
-    process.env.PORT || 8765
+    process.env.TURATH_PORT || 8765
 );
 
-/*
- * PENTING:
- *
- * Jika Python app.py dan service Turath berada
- * DALAM CONTAINER YANG SAMA:
- *
- *     127.0.0.1
- *
- * boleh digunakan.
- *
- * Jika Turath service berada pada Render Web Service
- * yang BERASINGAN daripada app.py, gunakan:
- *
- *     HOST = "0.0.0.0"
- *
- * dan app.py perlu menggunakan URL service tersebut.
- */
-
 const HOST =
-    process.env.HOST ||
-    "0.0.0.0";
+    process.env.TURATH_HOST ||
+    "127.0.0.1";
 
 
 /*
@@ -57,19 +54,6 @@ const RESULTS_PER_PAGE = Number(
 /*
 |--------------------------------------------------------------------------
 | FINAL RESULT LIMIT
-|--------------------------------------------------------------------------
-|
-| Soalan biasa:
-|
-|   Syafie = 10
-|
-| Perbandingan:
-|
-|   Syafie = 10
-|   Hanafi = 2
-|   Maliki = 2
-|   Hanbali = 2
-|
 |--------------------------------------------------------------------------
 */
 
@@ -430,6 +414,7 @@ function arabicQueries(
 
     const results = [];
 
+
     /*
      * Jika pengguna bertanya dalam Arab,
      * masukkan soalan asal.
@@ -444,12 +429,14 @@ function arabicQueries(
         );
     }
 
+
     /*
      * Mapping Bahasa Melayu → Arab.
      */
 
     const lower =
         query.toLowerCase();
+
 
     for (
         const [
@@ -473,6 +460,7 @@ function arabicQueries(
         }
     }
 
+
     /*
      * Jika tiada mapping,
      * cuba query asal.
@@ -486,6 +474,7 @@ function arabicQueries(
             query
         );
     }
+
 
     return uniqueArray(
         results
@@ -507,6 +496,7 @@ function isMadhhabComparison(
         String(
             text || ""
         ).toLowerCase();
+
 
     const terms = [
 
@@ -537,6 +527,7 @@ function isMadhhabComparison(
         "maliki dan hanbali"
     ];
 
+
     if (
         terms.some(
             term =>
@@ -561,7 +552,9 @@ function isMadhhabComparison(
         "hanbali"
     ];
 
+
     let count = 0;
+
 
     for (
         const madhhab
@@ -577,6 +570,7 @@ function isMadhhabComparison(
             count++;
         }
     }
+
 
     if (
         count >= 2
@@ -601,11 +595,6 @@ function isMadhhabComparison(
 
     ) {
 
-        /*
-         * Jangan anggap semua soalan yang hanya
-         * menyebut satu mazhab sebagai comparison.
-         */
-
         const arabicMadhhabs = [
 
             "الحنفي",
@@ -614,11 +603,13 @@ function isMadhhabComparison(
             "الحنبلي"
         ];
 
+
         const arabicCount =
             arabicMadhhabs.filter(
                 term =>
                     q.includes(term)
             ).length;
+
 
         if (
             q.includes("مقارنة") ||
@@ -629,6 +620,7 @@ function isMadhhabComparison(
             return true;
         }
     }
+
 
     return false;
 }
@@ -649,6 +641,7 @@ function validateCategory(
             categoryKey
         ];
 
+
     if (
         !Number.isFinite(
             categoryId
@@ -661,6 +654,7 @@ function validateCategory(
         );
     }
 
+
     return categoryId;
 }
 
@@ -668,10 +662,6 @@ function validateCategory(
 /*
 |--------------------------------------------------------------------------
 | EXTRACT FIELD
-|--------------------------------------------------------------------------
-|
-| SDK mungkin menggunakan nama field yang sedikit berbeza.
-| Kita cuba beberapa kemungkinan.
 |--------------------------------------------------------------------------
 */
 
@@ -687,6 +677,7 @@ function firstValue(
         const value =
             object?.[key];
 
+
         if (
             value !== undefined &&
             value !== null &&
@@ -696,6 +687,7 @@ function firstValue(
             return value;
         }
     }
+
 
     return "";
 }
@@ -723,10 +715,6 @@ function normalizeHit(
     }
 
 
-    /*
-     * BOOK ID
-     */
-
     const bookId =
         firstValue(
             hit,
@@ -738,10 +726,6 @@ function normalizeHit(
         );
 
 
-    /*
-     * AUTHOR ID
-     */
-
     const authorId =
         firstValue(
             hit,
@@ -751,10 +735,6 @@ function normalizeHit(
             ]
         );
 
-
-    /*
-     * CATEGORY
-     */
 
     const categoryId =
         firstValue(
@@ -770,10 +750,6 @@ function normalizeHit(
         ];
 
 
-    /*
-     * META / BOOK NAME
-     */
-
     const meta =
         firstValue(
             hit,
@@ -787,10 +763,6 @@ function normalizeHit(
         );
 
 
-    /*
-     * TEXT
-     */
-
     const text =
         firstValue(
             hit,
@@ -802,10 +774,6 @@ function normalizeHit(
             ]
         );
 
-
-    /*
-     * SNIPPET
-     */
 
     const snippet =
         firstValue(
@@ -819,10 +787,6 @@ function normalizeHit(
         );
 
 
-    /*
-     * PAGE
-     */
-
     const resultPage =
         firstValue(
             hit,
@@ -835,10 +799,6 @@ function normalizeHit(
         );
 
 
-    /*
-     * URL
-     */
-
     let url =
         firstValue(
             hit,
@@ -848,11 +808,6 @@ function normalizeHit(
             ]
         );
 
-
-    /*
-     * Jika SDK ada book_id tetapi tiada URL,
-     * bina URL Turath.
-     */
 
     if (
         !url &&
@@ -864,11 +819,6 @@ function normalizeHit(
     }
 
 
-    /*
-     * Pastikan sekurang-kurangnya
-     * text atau snippet wujud.
-     */
-
     if (
         !text &&
         !snippet
@@ -878,15 +828,7 @@ function normalizeHit(
     }
 
 
-    /*
-     * RETURN FORMAT YANG SERASI DENGAN app.py
-     */
-
     return {
-
-        /*
-         * ID
-         */
 
         book_id:
             safeString(
@@ -903,10 +845,6 @@ function normalizeHit(
                 categoryId
             ),
 
-        /*
-         * Nama kategori
-         */
-
         category:
             CATEGORY_NAMES[
                 categoryKey
@@ -916,10 +854,6 @@ function normalizeHit(
             CATEGORY_NAMES[
                 categoryKey
             ],
-
-        /*
-         * Metadata kitab
-         */
 
         meta:
             safeString(
@@ -940,10 +874,6 @@ function normalizeHit(
             safeString(
                 meta
             ),
-
-        /*
-         * Petikan
-         */
 
         snippet:
             safeString(
@@ -967,10 +897,6 @@ function normalizeHit(
                 snippet
             ),
 
-        /*
-         * Page
-         */
-
         page:
             safeString(
                 resultPage
@@ -981,10 +907,6 @@ function normalizeHit(
                 resultPage
             ),
 
-        /*
-         * URL
-         */
-
         url:
             safeString(
                 url
@@ -994,10 +916,6 @@ function normalizeHit(
             safeString(
                 url
             ),
-
-        /*
-         * Search info
-         */
 
         search_query:
             query,
@@ -1069,25 +987,11 @@ async function searchOnePage(
 
                     page,
 
-                    /*
-                     * Sesetengah SDK mungkin
-                     * mengabaikan limit.
-                     * Kita masih hantar.
-                     */
-
                     limit:
                         RESULTS_PER_PAGE
                 }
             );
 
-
-        /*
-         * SDK biasanya:
-         *
-         * {
-         *   data: [...]
-         * }
-         */
 
         let data = [];
 
@@ -1154,6 +1058,7 @@ async function searchOnePage(
             error
         );
 
+
         return [];
     }
 }
@@ -1192,11 +1097,6 @@ async function searchCategoryMany(
                 page
             );
 
-
-        /*
-         * Tiada data bermaksud
-         * kemungkinan sudah sampai page terakhir.
-         */
 
         if (
             data.length === 0
@@ -1369,10 +1269,6 @@ function scoreResult(
             .join(" ");
 
 
-    /*
-     * Arabic search terms.
-     */
-
     const arabicQs =
         arabicQueries(
             originalQuery
@@ -1410,10 +1306,6 @@ function scoreResult(
     }
 
 
-    /*
-     * Keyword Melayu.
-     */
-
     const malayWords =
         query
             .split(/\s+/)
@@ -1439,11 +1331,6 @@ function scoreResult(
     }
 
 
-    /*
-     * Text panjang biasanya lebih berguna
-     * daripada snippet sahaja.
-     */
-
     if (
         safeString(
             item.text
@@ -1454,10 +1341,6 @@ function scoreResult(
     }
 
 
-    /*
-     * Metadata kitab wujud.
-     */
-
     if (
         item.book
     ) {
@@ -1465,10 +1348,6 @@ function scoreResult(
         score += 1;
     }
 
-
-    /*
-     * Page awal sedikit keutamaan.
-     */
 
     if (
         Number(
@@ -1524,11 +1403,6 @@ function rankAndLimit(
                 );
             }
 
-
-            /*
-             * Kalau score sama,
-             * text lebih panjang dahulu.
-             */
 
             return (
                 safeString(
@@ -1606,10 +1480,6 @@ async function searchComparison(
     const categoryResults = {};
 
 
-    /*
-     * Cari semua mazhab.
-     */
-
     const categories = [
         "shafii",
         "hanafi",
@@ -1646,10 +1516,6 @@ async function searchComparison(
         }
     }
 
-
-    /*
-     * Pilih jumlah akhir.
-     */
 
     const final = [];
 
@@ -1735,12 +1601,15 @@ async function performSearch(
     console.log(
         "================================================"
     );
+
     console.log(
         "📚 TURATH SEARCH"
     );
+
     console.log(
         `❓ ${query}`
     );
+
     console.log(
         `🧭 MODE = ${
             comparison
@@ -1748,6 +1617,7 @@ async function performSearch(
                 : "SHAFII"
         }`
     );
+
     console.log(
         "================================================"
     );
@@ -1779,10 +1649,6 @@ async function performSearch(
     );
 
 
-    /*
-     * Debug ringkas.
-     */
-
     for (
         let i = 0;
         i < Math.min(
@@ -1794,6 +1660,7 @@ async function performSearch(
 
         const item =
             passages[i];
+
 
         console.log(
             `📖 RESULT ${i + 1}:`,
@@ -1911,10 +1778,6 @@ function readBody(
                         );
 
 
-                    /*
-                     * Elak body terlalu besar.
-                     */
-
                     if (
                         body.length >
                         1024 * 1024
@@ -1953,9 +1816,7 @@ function readBody(
                             )
                         );
 
-                    } catch (
-                        error
-                    ) {
+                    } catch {
 
                         reject(
                             new Error(
@@ -2022,9 +1883,7 @@ const server =
             try {
 
                 /*
-                 * --------------------------------------------------------
                  * ROOT
-                 * --------------------------------------------------------
                  */
 
                 if (
@@ -2042,16 +1901,20 @@ const server =
                                 "turath",
 
                             message:
-                                "Turath search service is running."
+                                "Turath search service is running.",
+
+                            host:
+                                HOST,
+
+                            port:
+                                PORT
                         }
                     );
                 }
 
 
                 /*
-                 * --------------------------------------------------------
                  * HEALTH
-                 * --------------------------------------------------------
                  */
 
                 if (
@@ -2097,9 +1960,7 @@ const server =
 
 
                 /*
-                 * --------------------------------------------------------
                  * CATEGORIES
-                 * --------------------------------------------------------
                  */
 
                 if (
@@ -2122,9 +1983,7 @@ const server =
 
 
                 /*
-                 * --------------------------------------------------------
                  * SEARCH
-                 * --------------------------------------------------------
                  */
 
                 if (
@@ -2162,19 +2021,6 @@ const server =
                     }
 
 
-                    /*
-                     * Python app.py menghantar:
-                     *
-                     * {
-                     *   query: "...",
-                     *   comparison: true/false
-                     * }
-                     *
-                     * Kita masih detect sendiri supaya
-                     * service tidak bergantung kepada
-                     * client.
-                     */
-
                     const result =
                         await performSearch(
                             query
@@ -2190,9 +2036,7 @@ const server =
 
 
                 /*
-                 * --------------------------------------------------------
                  * BOOK INFO
-                 * --------------------------------------------------------
                  */
 
                 if (
@@ -2255,9 +2099,7 @@ const server =
 
 
                 /*
-                 * --------------------------------------------------------
                  * PAGE
-                 * --------------------------------------------------------
                  */
 
                 if (
@@ -2330,9 +2172,7 @@ const server =
 
 
                 /*
-                 * --------------------------------------------------------
                  * 404
-                 * --------------------------------------------------------
                  */
 
                 return sendJson(
@@ -2350,9 +2190,7 @@ const server =
                 );
 
 
-            } catch (
-                error
-            ) {
+            } catch (error) {
 
                 console.error(
                     "❌ TURATH SERVICE ERROR:"
