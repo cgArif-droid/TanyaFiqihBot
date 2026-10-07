@@ -1,0 +1,17 @@
+.git
+.gitignore
+
+__pycache__
+*.pyc
+*.pyo
+
+.venv
+venv
+env
+
+.env
+
+data/chroma
+data/extracted_text
+
+*.log
