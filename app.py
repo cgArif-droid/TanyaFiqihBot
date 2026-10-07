@@ -26,8 +26,15 @@ from telegram.ext import (
 # CONFIG
 # =========================================================
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+GOOGLE_API_KEY = os.getenv(
+    "GOOGLE_API_KEY",
+    ""
+).strip()
+
+TELEGRAM_TOKEN = os.getenv(
+    "TELEGRAM_TOKEN",
+    ""
+).strip()
 
 LLM_MODEL = os.getenv(
     "LLM_MODEL",
@@ -45,35 +52,51 @@ TURATH_SERVICE_URL = os.getenv(
 ).rstrip("/")
 
 GEMINI_RETRIES = int(
-    os.getenv("GEMINI_RETRIES", "2")
+    os.getenv(
+        "GEMINI_RETRIES",
+        "2"
+    )
 )
 
 GEMINI_INITIAL_WAIT = float(
-    os.getenv("GEMINI_INITIAL_WAIT", "2")
+    os.getenv(
+        "GEMINI_INITIAL_WAIT",
+        "2"
+    )
 )
 
 SOURCE_MAX_CHARS = int(
-    os.getenv("SOURCE_MAX_CHARS", "4500")
+    os.getenv(
+        "SOURCE_MAX_CHARS",
+        "4500"
+    )
 )
 
 CONTEXT_MAX_CHARS = int(
-    os.getenv("CONTEXT_MAX_CHARS", "30000")
+    os.getenv(
+        "CONTEXT_MAX_CHARS",
+        "30000"
+    )
 )
 
 TELEGRAM_MAX_CHARS = int(
-    os.getenv("TELEGRAM_MAX_CHARS", "3900")
+    os.getenv(
+        "TELEGRAM_MAX_CHARS",
+        "3900"
+    )
 )
 
 TARGET_SOURCES = 10
 
 
 # =========================================================
-# GEMINI
+# GEMINI CLIENT
 # =========================================================
 
 client = None
 
 if GOOGLE_API_KEY:
+
     client = genai.Client(
         api_key=GOOGLE_API_KEY
     )
@@ -84,7 +107,9 @@ def gemini_generate(
     model=None,
     temperature=0.2
 ):
+
     if not client:
+
         raise RuntimeError(
             "GOOGLE_API_KEY belum ditetapkan."
         )
@@ -96,7 +121,9 @@ def gemini_generate(
     for attempt in range(
         GEMINI_RETRIES + 1
     ):
+
         try:
+
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
@@ -112,9 +139,11 @@ def gemini_generate(
             )
 
             if text and text.strip():
+
                 return text.strip()
 
         except Exception as e:
+
             last_error = e
 
             print(
@@ -123,6 +152,7 @@ def gemini_generate(
             )
 
             if attempt < GEMINI_RETRIES:
+
                 time.sleep(
                     GEMINI_INITIAL_WAIT
                     * (attempt + 1)
@@ -134,83 +164,416 @@ def gemini_generate(
 
 
 # =========================================================
+# GEMINI 0
+# FAHAM JENIS MESEJ DAHULU
+# =========================================================
+
+def build_message_classifier_prompt(
+    message
+):
+
+    return f"""
+Anda ialah pengklasifikasi mesej untuk TanyaFiqihBot.
+
+MESEJ PENGGUNA:
+{message}
+
+Tentukan jenis mesej pengguna.
+
+Kategori yang dibenarkan:
+
+1. greeting
+   - hi
+   - hello
+   - hai
+   - assalamualaikum
+   - salam
+   - terima kasih
+   - sapaan biasa
+   - perbualan ringkas
+
+2. fiqh
+   - soalan hukum Islam
+   - ibadah
+   - muamalat
+   - munakahat
+   - faraid
+   - taharah
+   - solat
+   - puasa
+   - zakat
+   - haji
+   - aurat
+   - najis
+   - nikah
+   - talak
+   - jual beli
+   - dan persoalan fiqh lain
+
+3. other
+   - bukan soalan fiqh
+   - soalan umum yang tidak berkaitan fiqh
+   - mesej yang tidak jelas
+
+Jika mesej merupakan soalan fiqh walaupun pendek,
+pilih "fiqh".
+
+Contoh:
+
+"hi"
+=> greeting
+
+"assalamualaikum"
+=> greeting
+
+"apa khabar"
+=> greeting
+
+"hukum makan ketika puasa"
+=> fiqh
+
+"batal ke puasa kalau terlupa makan"
+=> fiqh
+
+"macam mana nak masak nasi"
+=> other
+
+HANYA keluarkan JSON:
+
+{{
+  "type": "greeting",
+  "confidence": 0.99
+}}
+
+atau
+
+{{
+  "type": "fiqh",
+  "confidence": 0.99
+}}
+
+atau
+
+{{
+  "type": "other",
+  "confidence": 0.99
+}}
+"""
+
+
+def classify_message(
+    message
+):
+
+    try:
+
+        prompt =
+            build_message_classifier_prompt(
+                message
+            )
+
+        raw = gemini_generate(
+            prompt,
+            model=LLM_MODEL,
+            temperature=0.0
+        )
+
+        print(
+            "\n🧠 MESSAGE CLASSIFIER:"
+        )
+
+        print(
+            raw
+        )
+
+        data = parse_json_response(
+            raw
+        )
+
+        message_type = str(
+            data.get(
+                "type",
+                "other"
+            )
+        ).lower().strip()
+
+        if message_type not in [
+            "greeting",
+            "fiqh",
+            "other",
+        ]:
+
+            message_type = "other"
+
+        return message_type
+
+    except Exception as e:
+
+        print(
+            "⚠️ CLASSIFIER ERROR:",
+            e
+        )
+
+        # Fallback berdasarkan kata-kata fiqh
+        lower = message.lower()
+
+        fiqh_words = [
+            "hukum",
+            "halal",
+            "haram",
+            "wajib",
+            "sunat",
+            "sah",
+            "batal",
+            "puasa",
+            "solat",
+            "sembahyang",
+            "wuduk",
+            "wudhu",
+            "zakat",
+            "haid",
+            "nifas",
+            "junub",
+            "najis",
+            "aurat",
+            "nikah",
+            "cerai",
+            "talak",
+            "faraid",
+            "haji",
+            "umrah",
+            "korban",
+            "riba",
+            "wakaf",
+            "nazar",
+            "sumpah",
+        ]
+
+        for word in fiqh_words:
+
+            if word in lower:
+
+                return "fiqh"
+
+        greeting_words = [
+            "hi",
+            "hai",
+            "hello",
+            "salam",
+            "assalamualaikum",
+            "terima kasih",
+            "thanks",
+        ]
+
+        if lower in greeting_words:
+
+            return "greeting"
+
+        return "other"
+
+
+# =========================================================
+# NON-FIQH RESPONSES
+# =========================================================
+
+def greeting_response():
+
+    return (
+        "👋 Hai! Saya TanyaFiqihBot.\n\n"
+        "Saya boleh membantu menjawab persoalan "
+        "fiqh berdasarkan rujukan kitab Turath.\n\n"
+        "Contohnya, anda boleh tanya:\n"
+        "• Adakah makan kerana terlupa membatalkan puasa?\n"
+        "• Apakah syarat sah wuduk?\n"
+        "• Apakah hukum qunut Subuh?\n"
+        "• Adakah tidur selepas Subuh membatalkan puasa?\n\n"
+        "Silakan ajukan soalan fiqh anda. 😊"
+    )
+
+
+def other_response():
+
+    return (
+        "😊 Saya khusus untuk persoalan fiqh Islam "
+        "dan akan merujuk kitab-kitab Turath.\n\n"
+        "Cuba ajukan soalan seperti:\n"
+        "• Apa hukum makan ketika terlupa semasa puasa?\n"
+        "• Bagaimana syarat sah solat?\n"
+        "• Apa hukum menggunakan air mutlak untuk wuduk?"
+    )
+
+
+# =========================================================
 # QUERY MAP
 # =========================================================
 
 QUERY_MAP = {
-    "puasa": "الصيام",
-    "puasa ramadan": "صيام رمضان",
-    "zakat": "الزكاة",
-    "zakat fitrah": "زكاة الفطر",
 
-    "solat": "الصلاة",
-    "sembahyang": "الصلاة",
+    "puasa":
+        "الصيام",
 
-    "wuduk": "الوضوء",
-    "wudhu": "الوضوء",
+    "puasa ramadan":
+        "صيام رمضان",
 
-    "taharah": "الطهارة",
-    "bersuci": "الطهارة",
+    "hukum puasa":
+        "أحكام الصيام",
 
-    "tayamum": "التيمم",
+    "batal puasa":
+        "مفسدات الصيام",
 
-    "mandi wajib": "الغسل",
-    "mandi junub": "غسل الجنابة",
-    "mandi haid": "غسل الحيض",
+    "membatalkan puasa":
+        "مفسدات الصيام",
 
-    "junub": "الجنابة",
-    "haid": "الحيض",
-    "nifas": "النفاس",
-    "istihadah": "الاستحاضة",
+    "zakat":
+        "الزكاة",
 
-    "qunut": "القنوت",
-    "qunut subuh": "القنوت في صلاة الصبح",
+    "zakat fitrah":
+        "زكاة الفطر",
 
-    "solat subuh": "صلاة الصبح",
-    "solat jumaat": "صلاة الجمعة",
-    "jumaat": "صلاة الجمعة",
+    "solat":
+        "الصلاة",
 
-    "azan": "الأذان",
-    "iqamah": "الإقامة",
+    "sembahyang":
+        "الصلاة",
 
-    "nikah": "النكاح",
-    "perkahwinan": "النكاح",
+    "wuduk":
+        "الوضوء",
 
-    "talak": "الطلاق",
-    "cerai": "الطلاق",
+    "wudhu":
+        "الوضوء",
 
-    "faraid": "الفرائض",
-    "pusaka": "المواريث",
+    "taharah":
+        "الطهارة",
 
-    "haji": "الحج",
-    "umrah": "العمرة",
+    "bersuci":
+        "الطهارة",
 
-    "korban": "الأضحية",
-    "akikah": "العقيقة",
+    "tayamum":
+        "التيمم",
 
-    "sembelihan": "الذبائح",
-    "najis": "النجاسة",
-    "aurat": "العورة",
+    "mandi wajib":
+        "الغسل",
 
-    "mahar": "المهر",
-    "mas kahwin": "المهر",
+    "mandi junub":
+        "غسل الجنابة",
 
-    "jual beli": "البيع",
-    "riba": "الربا",
+    "mandi haid":
+        "غسل الحيض",
 
-    "hutang": "الدين",
-    "pinjaman": "القرض",
+    "mandi nifas":
+        "غسل النفاس",
 
-    "wakaf": "الوقف",
-    "nazar": "النذر",
-    "sumpah": "اليمين",
+    "junub":
+        "الجنابة",
 
-    "kaffarah": "الكفارة",
-    "kafarah": "الكفارة",
+    "haid":
+        "الحيض",
+
+    "nifas":
+        "النفاس",
+
+    "istihadah":
+        "الاستحاضة",
+
+    "qunut":
+        "القنوت",
+
+    "qunut subuh":
+        "القنوت في صلاة الصبح",
+
+    "solat subuh":
+        "صلاة الصبح",
+
+    "solat jumaat":
+        "صلاة الجمعة",
+
+    "jumaat":
+        "صلاة الجمعة",
+
+    "azan":
+        "الأذان",
+
+    "iqamah":
+        "الإقامة",
+
+    "nikah":
+        "النكاح",
+
+    "perkahwinan":
+        "النكاح",
+
+    "talak":
+        "الطلاق",
+
+    "cerai":
+        "الطلاق",
+
+    "faraid":
+        "الفرائض",
+
+    "pusaka":
+        "المواريث",
+
+    "haji":
+        "الحج",
+
+    "umrah":
+        "العمرة",
+
+    "korban":
+        "الأضحية",
+
+    "akikah":
+        "العقيقة",
+
+    "sembelihan":
+        "الذبائح",
+
+    "najis":
+        "النجاسة",
+
+    "aurat":
+        "العورة",
+
+    "mahar":
+        "المهر",
+
+    "mas kahwin":
+        "المهر",
+
+    "jual beli":
+        "البيع",
+
+    "riba":
+        "الربا",
+
+    "hutang":
+        "الدين",
+
+    "pinjaman":
+        "القرض",
+
+    "wakaf":
+        "الوقف",
+
+    "nazar":
+        "النذر",
+
+    "sumpah":
+        "اليمين",
+
+    "kaffarah":
+        "الكفارة",
+
+    "kafarah":
+        "الكفارة",
 }
 
 
-def apply_query_map(text):
+def apply_query_map(
+    text
+):
+
     result = text
 
     for malay, arabic in sorted(
@@ -218,6 +581,7 @@ def apply_query_map(text):
         key=lambda x: len(x[0]),
         reverse=True
     ):
+
         result = re.sub(
             rf"\b{re.escape(malay)}\b",
             f" {arabic} ",
@@ -229,38 +593,41 @@ def apply_query_map(text):
 
 
 # =========================================================
-# GEMINI 1
-# ANALISIS SOALAN + MULTI QUERY
+# QUERY PLANNER
 # =========================================================
 
-def build_query_planner_prompt(question):
+def build_query_planner_prompt(
+    question
+):
 
     return f"""
 Anda ialah perancang carian untuk bot fiqh Islam.
 
-Soalan pengguna:
+SOALAN PENGGUNA:
 
 {question}
 
 Tugas anda BUKAN menjawab soalan.
 
 Anda mesti:
-1. Fahami isu fiqh sebenar.
-2. Kenal pasti hukum yang ingin dicari.
-3. Kenal pasti istilah fiqh Arab yang paling tepat.
+
+1. Fahami maksud sebenar soalan.
+2. Kenal pasti isu fiqh utama.
+3. Kenal pasti istilah fiqh Arab yang tepat.
 4. Pecahkan isu kepada beberapa aspek carian.
-5. Hasilkan 3 hingga 8 query Arab yang sesuai untuk mencari
-   kitab-kitab fiqh turath.
-6. Jika terdapat kemungkinan khilaf, masukkan query untuk:
-   - hukum utama
-   - syarat
-   - perkara yang membatalkan/tidak memadai
-   - khilaf ulama
-   - mazhab lain jika relevan.
+5. Hasilkan 3 hingga 8 query Arab.
+6. Query mestilah sesuai untuk mencari kitab fiqh Turath.
+7. Jika ada kemungkinan khilaf, masukkan query berkaitan khilaf.
+8. Jika soalan meminta hukum sesuatu perkara,
+   cari hukum khusus perkara tersebut,
+   bukan sekadar topik umum.
 
 Jangan jawab soalan.
+
 Jangan cipta nama kitab.
+
 Jangan cipta URL.
+
 Jangan cipta halaman.
 
 HANYA keluarkan JSON:
@@ -280,7 +647,9 @@ HANYA keluarkan JSON:
 """
 
 
-def parse_json_response(text):
+def parse_json_response(
+    text
+):
 
     text = text.strip()
 
@@ -315,7 +684,9 @@ def parse_json_response(text):
     return json.loads(text)
 
 
-def plan_turath_queries(question):
+def plan_turath_queries(
+    question
+):
 
     prompt = build_query_planner_prompt(
         question
@@ -327,13 +698,22 @@ def plan_turath_queries(question):
         temperature=0.1
     )
 
-    print("\n🧠 GEMINI QUERY PLANNER:")
-    print(raw)
+    print(
+        "\n🧠 GEMINI QUERY PLANNER:"
+    )
+
+    print(
+        raw
+    )
 
     try:
-        data = parse_json_response(raw)
+
+        data = parse_json_response(
+            raw
+        )
 
     except Exception as e:
+
         print(
             f"⚠️ JSON PLANNER ERROR: {e}"
         )
@@ -344,7 +724,9 @@ def plan_turath_queries(question):
 
         return {
             "isu": question,
+
             "kata_kunci": [],
+
             "queries": [
                 fallback,
                 question
@@ -360,29 +742,44 @@ def plan_turath_queries(question):
         queries,
         list
     ):
+
         queries = []
 
     cleaned = []
 
     for q in queries:
-        if not isinstance(q, str):
+
+        if not isinstance(
+            q,
+            str
+        ):
             continue
 
         q = q.strip()
 
-        if q and q not in cleaned:
+        if (
+            q and
+            q not in cleaned
+        ):
+
             cleaned.append(q)
 
-    # Pastikan sekurang-kurangnya query
-    # daripada istilah yang diketahui.
     mapped = apply_query_map(
         question
     )
 
-    if mapped and mapped not in cleaned:
-        cleaned.append(mapped)
+    if (
+        mapped and
+        mapped not in cleaned
+    ):
 
-    cleaned = cleaned[:8]
+        cleaned.append(
+            mapped
+        )
+
+    cleaned = cleaned[
+        :8
+    ]
 
     data["queries"] = cleaned
 
@@ -394,6 +791,7 @@ def plan_turath_queries(question):
         cleaned,
         1
     ):
+
         print(
             f"{i}. {q}"
         )
@@ -435,6 +833,7 @@ def turath_search(
     )
 
     try:
+
         response = requests.post(
             url,
             json=payload,
@@ -451,9 +850,11 @@ def turath_search(
         data = response.json()
 
     except Exception as e:
+
         print(
             f"❌ TURATH REQUEST ERROR: {e}"
         )
+
         return []
 
     results = []
@@ -465,15 +866,20 @@ def turath_search(
         "items",
         "hits",
     ]:
-        value = data.get(key)
+
+        value = data.get(
+            key
+        )
 
         if isinstance(
             value,
             list
         ):
-            results.extend(value)
 
-    # Deduplicate response arrays
+            results.extend(
+                value
+            )
+
     unique = []
 
     seen = set()
@@ -497,15 +903,25 @@ def turath_search(
             continue
 
         key = (
-            source.get("book_id", ""),
-            source.get("page", ""),
+            source.get(
+                "book_id",
+                ""
+            ),
+
+            source.get(
+                "page",
+                ""
+            ),
+
             text[:250],
         )
 
         if key in seen:
             continue
 
-        seen.add(key)
+        seen.add(
+            key
+        )
 
         unique.append(
             source
@@ -516,14 +932,18 @@ def turath_search(
         f"{len(unique)}"
     )
 
-    return unique[:TARGET_SOURCES]
+    return unique[
+        :TARGET_SOURCES
+    ]
 
 
 # =========================================================
 # SOURCE RANKING
 # =========================================================
 
-def source_score(source):
+def source_score(
+    source
+):
 
     score = 0
 
@@ -560,22 +980,33 @@ def source_score(source):
     if author:
         score += 2
 
-    if source.get("page") not in [
+    if source.get(
+        "page"
+    ) not in [
         "",
         None,
     ]:
+
         score += 2
 
-    if source.get("book_id"):
+    if source.get(
+        "book_id"
+    ):
+
         score += 1
 
-    if source.get("url"):
+    if source.get(
+        "url"
+    ):
+
         score += 1
 
     return score
 
 
-def rank_sources(sources):
+def rank_sources(
+    sources
+):
 
     ranked = sorted(
         sources,
@@ -637,13 +1068,16 @@ PETIKAN:
             >
             CONTEXT_MAX_CHARS
         ):
+
             break
 
         blocks.append(
             block.strip()
         )
 
-        total_chars += len(block)
+        total_chars += len(
+            block
+        )
 
     return "\n\n".join(
         blocks
@@ -651,8 +1085,7 @@ PETIKAN:
 
 
 # =========================================================
-# GEMINI 2
-# JAWAPAN BERDASARKAN TURATH
+# FINAL ANSWER
 # =========================================================
 
 def build_answer_prompt(
@@ -679,49 +1112,61 @@ SUMBER TURATH:
 
 TUGAS:
 
-Jawab soalan pengguna dalam Bahasa Melayu.
+Jawab soalan pengguna dalam Bahasa Melayu yang natural,
+jelas dan mudah difahami.
+
+Jangan terus menyalin gaya kitab.
+
+Terangkan dahulu hukum yang paling penting,
+kemudian huraikan berdasarkan sumber.
 
 WAJIB:
-1. Gunakan HANYA maklumat daripada SUMBER TURATH di atas.
+
+1. Gunakan HANYA maklumat daripada SUMBER TURATH.
 2. Jangan gunakan pengetahuan luar sebagai sumber.
 3. Jangan reka nama kitab.
 4. Jangan reka nama pengarang.
-5. Jangan reka nombor halaman.
+5. Jangan reka halaman.
 6. Jangan reka URL.
-7. Jika sesuatu pandangan tidak terdapat dalam sumber, jangan dakwa ia terdapat.
-8. Jika terdapat khilaf yang disokong sumber, jelaskan.
-9. Jika sumber tidak mencukupi untuk sesuatu dakwaan, nyatakan keterbatasan.
-10. Setiap dakwaan penting yang berasal daripada sumber mesti disertakan
-    tag seperti [S1], [S2], [S3].
-11. Jangan buat bahagian "Rujukan Turath" sendiri.
-    Sistem akan membinanya secara automatik.
+7. Jangan membuat dakwaan yang tiada sokongan sumber.
+8. Jika terdapat khilaf, nyatakan hanya jika disokong oleh sumber.
+9. Jika sumber tidak mencukupi, nyatakan dengan jujur.
+10. Setiap fakta penting daripada sumber mesti mempunyai tag
+    [S1], [S2], [S3] dan seterusnya.
+11. Jangan buat bahagian rujukan sendiri.
 12. Jangan tulis URL.
+13. Jangan tulis "(Kitab Turath)".
+14. Jangan tulis nama kitab jika sumber tidak mempunyai nama kitab.
 
 FORMAT:
 
 📖 JAWAPAN
 
-Jawapan hukum yang paling penting.
+[Tulis jawapan utama secara terus dan natural.]
 
 📚 HURAIAN
 
-Huraian berdasarkan kitab Turath.
+[Terangkan sebab dan asas hukum berdasarkan sumber.]
 
 🔹 PERINCIAN
 
-1. ...
-   ...
+1. **[Aspek pertama]**
+   [Huraian]
 
-2. ...
-   ...
+2. **[Aspek kedua]**
+   [Huraian]
+
+3. **[Aspek ketiga]**
+   [Huraian]
 
 ⚖️ PERBEZAAN PANDANGAN
 
-Hanya jika benar-benar terdapat khilaf dalam sumber.
+[Hanya jika terdapat khilaf yang benar-benar disokong oleh sumber.]
 
 PENTING:
+
 Tag [S1], [S2] dan seterusnya mesti dikekalkan tepat.
-Jangan ubah tag tersebut.
+Jangan ubah tag.
 """
 
 
@@ -732,6 +1177,7 @@ def generate_final_answer(
 ):
 
     if not sources:
+
         return (
             "⚠️ Tiada kandungan Turath "
             "yang mencukupi untuk menghasilkan "
@@ -754,7 +1200,7 @@ def generate_final_answer(
 
 
 # =========================================================
-# REPLACE [S1]
+# REPLACE SOURCE TAGS
 # =========================================================
 
 def replace_source_tags(
@@ -762,7 +1208,9 @@ def replace_source_tags(
     sources
 ):
 
-    def replace(match):
+    def replace(
+        match
+    ):
 
         number = int(
             match.group(1)
@@ -774,13 +1222,16 @@ def replace_source_tags(
             index < 0
             or index >= len(sources)
         ):
+
             return match.group(0)
 
-        source = sources[index]
+        source = sources[
+            index
+        ]
 
         book = source.get(
             "book",
-            "Kitab Turath"
+            ""
         )
 
         page = source.get(
@@ -788,11 +1239,18 @@ def replace_source_tags(
             ""
         )
 
+        if not book:
+
+            book = (
+                "rujukan Turath"
+            )
+
         citation = (
             f"({book}"
         )
 
         if page:
+
             citation += (
                 f", hlm. {page}"
             )
@@ -817,6 +1275,7 @@ def build_references(
 ):
 
     if not sources:
+
         return (
             "📚 RUJUKAN TURATH\n"
             "• Tiada rujukan ditemui."
@@ -862,25 +1321,29 @@ def build_references(
         ).strip()
 
         if not book:
-            book = "Kitab Turath"
+
+            book = (
+                "Maklumat kitab tidak tersedia"
+            )
 
         lines.append(
             f"{index}. {book}"
         )
 
         if author:
+
             lines.append(
                 f"   ✍️ {author}"
             )
 
         if page:
+
             lines.append(
                 f"   📄 Hlm. {page}"
             )
 
-        # URL hanya dipaparkan jika ada.
-        # Jangan tulis URL palsu.
         if url:
+
             lines.append(
                 f"   🔗 {url}"
             )
@@ -900,6 +1363,8 @@ def answer_question(
     question
 ):
 
+    question = question.strip()
+
     print(
         "\n========================================"
     )
@@ -909,9 +1374,38 @@ def answer_question(
         question
     )
 
-    # -------------------------------------
-    # 1. GEMINI ANALYSE
-    # -------------------------------------
+    # =====================================================
+    # 0. FAHAM JENIS MESEJ
+    # =====================================================
+
+    message_type = classify_message(
+        question
+    )
+
+    print(
+        "🧠 MESSAGE TYPE:",
+        message_type
+    )
+
+    # =====================================================
+    # GREETING
+    # =====================================================
+
+    if message_type == "greeting":
+
+        return greeting_response()
+
+    # =====================================================
+    # OTHER
+    # =====================================================
+
+    if message_type == "other":
+
+        return other_response()
+
+    # =====================================================
+    # 1. GEMINI QUERY PLANNER
+    # =====================================================
 
     planner = plan_turath_queries(
         question
@@ -922,18 +1416,26 @@ def answer_question(
         []
     )
 
-    # -------------------------------------
+    if not queries:
+
+        return (
+            "⚠️ Saya tidak dapat mengenal pasti "
+            "isu fiqh dalam soalan tersebut.\n\n"
+            "Cuba tulis soalan dengan lebih jelas."
+        )
+
+    # =====================================================
     # 2. TURATH
-    # -------------------------------------
+    # =====================================================
 
     sources = turath_search(
         queries,
         category="shafii"
     )
 
-    # -------------------------------------
+    # =====================================================
     # 3. RANK
-    # -------------------------------------
+    # =====================================================
 
     sources = rank_sources(
         sources
@@ -944,18 +1446,23 @@ def answer_question(
         f"{len(sources)}"
     )
 
-    # -------------------------------------
-    # 4. GEMINI ANSWER
-    # -------------------------------------
+    # =====================================================
+    # 4. TIADA SUMBER
+    # =====================================================
 
     if not sources:
+
         return (
-            "⚠️ Tiada kandungan sumber yang "
-            "mencukupi untuk menghasilkan "
-            "huraian.\n\n"
+            "⚠️ Tiada kandungan sumber Turath "
+            "yang mencukupi untuk menjawab "
+            "soalan ini dengan yakin.\n\n"
             "📚 RUJUKAN TURATH\n"
             "• Tiada rujukan ditemui."
         )
+
+    # =====================================================
+    # 5. GEMINI ANSWER
+    # =====================================================
 
     answer = generate_final_answer(
         question,
@@ -963,18 +1470,18 @@ def answer_question(
         sources
     )
 
-    # -------------------------------------
-    # 5. REPLACE [S#]
-    # -------------------------------------
+    # =====================================================
+    # 6. REPLACE SOURCE TAGS
+    # =====================================================
 
     answer = replace_source_tags(
         answer,
         sources
     )
 
-    # -------------------------------------
-    # 6. REFERENCES
-    # -------------------------------------
+    # =====================================================
+    # 7. REFERENCES
+    # =====================================================
 
     references = build_references(
         sources
@@ -990,7 +1497,9 @@ def answer_question(
         "\n========================================"
     )
 
-    print(final)
+    print(
+        final
+    )
 
     print(
         "========================================"
@@ -1021,8 +1530,32 @@ async def telegram_answer(
     if not question:
         return
 
+    # =====================================================
+    # JANGAN PAPAR "SEDANG CARI TURATH"
+    # UNTUK GREETING
+    # =====================================================
+
+    lower = question.lower()
+
+    quick_greetings = [
+        "hi",
+        "hai",
+        "hello",
+        "salam",
+        "assalamualaikum",
+    ]
+
+    if lower in quick_greetings:
+
+        await update.message.reply_text(
+            greeting_response()
+        )
+
+        return
+
     await update.message.reply_text(
-        "🔎 Sedang memahami soalan dan mencari rujukan Turath..."
+        "🔎 Sedang memahami soalan dan mencari "
+        "rujukan Turath..."
     )
 
     try:
@@ -1032,10 +1565,10 @@ async def telegram_answer(
             question
         )
 
-        # Telegram limit
         chunks = []
 
         while len(answer) > TELEGRAM_MAX_CHARS:
+
             cut = answer.rfind(
                 "\n",
                 0,
@@ -1043,16 +1576,22 @@ async def telegram_answer(
             )
 
             if cut <= 0:
+
                 cut = TELEGRAM_MAX_CHARS
 
             chunks.append(
                 answer[:cut]
             )
 
-            answer = answer[cut:].lstrip()
+            answer = answer[
+                cut:
+            ].lstrip()
 
         if answer:
-            chunks.append(answer)
+
+            chunks.append(
+                answer
+            )
 
         for chunk in chunks:
 
@@ -1081,8 +1620,10 @@ async def telegram_start(
 
     await update.message.reply_text(
         "Assalamualaikum 👋\n\n"
-        "Selamat datang ke TanyaFiqihBot.\n"
-        "Sila ajukan soalan fiqh anda."
+        "Selamat datang ke TanyaFiqihBot.\n\n"
+        "Saya boleh membantu menjawab persoalan "
+        "fiqh berdasarkan rujukan kitab Turath.\n\n"
+        "Silakan ajukan soalan fiqh anda."
     )
 
 
@@ -1091,14 +1632,18 @@ def start_telegram():
     global telegram_app
 
     if not TELEGRAM_TOKEN:
+
         print(
             "⚠️ TELEGRAM_TOKEN tiada."
         )
+
         return
 
     telegram_app = (
         Application.builder()
-        .token(TELEGRAM_TOKEN)
+        .token(
+            TELEGRAM_TOKEN
+        )
         .build()
     )
 
@@ -1140,8 +1685,10 @@ def home():
     return jsonify({
         "ok": True,
         "service": "TanyaFiqihBot",
-        "turath": TURATH_SERVICE_URL,
-        "target_sources": TARGET_SOURCES,
+        "turath":
+            TURATH_SERVICE_URL,
+        "target_sources":
+            TARGET_SOURCES,
     })
 
 
@@ -1162,16 +1709,21 @@ def health():
         )
 
     except Exception:
+
         turath_ok = False
 
     return jsonify({
         "ok": True,
         "turath": turath_ok,
-        "target_sources": TARGET_SOURCES,
+        "target_sources":
+            TARGET_SOURCES,
     })
 
 
-@app.route("/ask", methods=["POST"])
+@app.route(
+    "/ask",
+    methods=["POST"]
+)
 def ask():
 
     data = request.get_json(
@@ -1186,9 +1738,11 @@ def ask():
     ).strip()
 
     if not question:
+
         return jsonify({
             "ok": False,
-            "error": "question diperlukan",
+            "error":
+                "question diperlukan",
         }), 400
 
     try:
@@ -1199,8 +1753,10 @@ def ask():
 
         return jsonify({
             "ok": True,
-            "question": question,
-            "answer": answer,
+            "question":
+                question,
+            "answer":
+                answer,
         })
 
     except Exception as e:
@@ -1209,11 +1765,15 @@ def ask():
 
         return jsonify({
             "ok": False,
-            "error": str(e),
+            "error":
+                str(e),
         }), 500
 
 
-@app.route("/search", methods=["POST"])
+@app.route(
+    "/search",
+    methods=["POST"]
+)
 def search_route():
 
     data = request.get_json(
@@ -1228,10 +1788,30 @@ def search_route():
     ).strip()
 
     if not question:
+
         return jsonify({
             "ok": False,
-            "error": "question diperlukan",
+            "error":
+                "question diperlukan",
         }), 400
+
+    message_type = classify_message(
+        question
+    )
+
+    if message_type != "fiqh":
+
+        return jsonify({
+            "ok": True,
+            "type":
+                message_type,
+            "question":
+                question,
+            "count":
+                0,
+            "sources":
+                [],
+        })
 
     planner = plan_turath_queries(
         question
@@ -1247,15 +1827,21 @@ def search_route():
 
     return jsonify({
         "ok": True,
-        "question": question,
-        "planner": planner,
-        "count": len(sources),
-        "sources": sources,
+        "type":
+            "fiqh",
+        "question":
+            question,
+        "planner":
+            planner,
+        "count":
+            len(sources),
+        "sources":
+            sources,
     })
 
 
 # =========================================================
-# START TELEGRAM WHEN GUNICORN IMPORTS APP
+# START TELEGRAM
 # =========================================================
 
 if TELEGRAM_TOKEN:
