@@ -1,6 +1,18 @@
 {
+  "name": "tanyafiqihbot-turath",
+  "version": "1.0.0",
+  "private": true,
   "type": "module",
+  "description": "Turath service untuk TanyaFiqihBot",
+  "main": "turath_service.mjs",
+  "scripts": {
+    "start": "node turath_service.mjs",
+    "dev": "node turath_service.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
-    "turath-sdk": "latest"
+    "turath-sdk": "1.1.0"
   }
 }
