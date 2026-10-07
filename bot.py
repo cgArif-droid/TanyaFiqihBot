@@ -53,8 +53,8 @@ if len(splits) == 0:
     dummy_text = "Makluman: Sistem bot berjaya dihidupkan, TETAPI kitab PDF yang dimasukkan adalah kosong atau berbentuk imbasan gambar (scanned). Sila muat naik fail kitab PDF berformat teks digital atau fail .txt ke dalam folder kitab."
     splits = text_splitter.create_documents([dummy_text])
 
-# Masukkan ke dalam pangkalan data (Chroma) - Menggunakan model TERBARU Google
-embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+# Masukkan ke dalam pangkalan data (Chroma) - Menggunakan model embedding yang betul
+embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
