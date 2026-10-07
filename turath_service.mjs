@@ -26,6 +26,11 @@ const RESULTS_PER_PAGE = Number(
   process.env.TURATH_RESULTS_PER_PAGE || 20
 );
 
+// Berapa banyak maklumat kitab boleh dipanggil serentak
+const BOOK_INFO_CONCURRENCY = Number(
+  process.env.TURATH_BOOK_INFO_CONCURRENCY || 3
+);
+
 // ============================================================
 // CATEGORY IDS
 // ============================================================
@@ -359,6 +364,455 @@ const QUERY_MAP = {
 };
 
 // ============================================================
+// BOOK INFO CACHE
+// ============================================================
+
+const bookInfoCache = new Map();
+
+// ============================================================
+// GENERIC VALUE HELPERS
+// ============================================================
+
+function firstValue(...values) {
+
+  for (const value of values) {
+
+    if (
+      value === undefined ||
+      value === null
+    ) {
+      continue;
+    }
+
+    if (
+      typeof value === "string" &&
+      value.trim() === ""
+    ) {
+      continue;
+    }
+
+    return value;
+  }
+
+  return "";
+}
+
+// ============================================================
+// STRING VALUE
+// ============================================================
+
+function stringValue(...values) {
+
+  const value =
+    firstValue(...values);
+
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return "";
+  }
+
+  if (
+    typeof value === "object"
+  ) {
+
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "";
+    }
+  }
+
+  return String(value).trim();
+}
+
+// ============================================================
+// EXTRACT TEXT
+// ============================================================
+
+function extractText(item) {
+
+  if (!item) {
+    return "";
+  }
+
+  return stringValue(
+    item.text,
+    item.content,
+    item.passage,
+    item.snippet,
+    item.snip,
+    item.highlight,
+    item.body,
+    item.textContent
+  );
+}
+
+// ============================================================
+// EXTRACT BOOK ID
+// ============================================================
+
+function extractBookId(item) {
+
+  if (!item) {
+    return "";
+  }
+
+  const direct = firstValue(
+    item.book_id,
+    item.bookId,
+    item.bookID,
+    item.bookid,
+    item.volume_id,
+    item.volumeId
+  );
+
+  if (
+    direct !== undefined &&
+    direct !== null &&
+    String(direct).trim() !== ""
+  ) {
+    return String(direct).trim();
+  }
+
+  // ----------------------------------------------------------
+  // Nested book object
+  // ----------------------------------------------------------
+
+  if (
+    item.book &&
+    typeof item.book === "object"
+  ) {
+
+    const nested =
+      firstValue(
+        item.book.id,
+        item.book.book_id,
+        item.book.bookId
+      );
+
+    if (
+      nested !== undefined &&
+      nested !== null &&
+      String(nested).trim() !== ""
+    ) {
+      return String(nested).trim();
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Nested metadata
+  // ----------------------------------------------------------
+
+  if (
+    item.metadata &&
+    typeof item.metadata === "object"
+  ) {
+
+    const metadata =
+      firstValue(
+        item.metadata.book_id,
+        item.metadata.bookId,
+        item.metadata.volume_id,
+        item.metadata.volumeId
+      );
+
+    if (
+      metadata !== undefined &&
+      metadata !== null &&
+      String(metadata).trim() !== ""
+    ) {
+      return String(metadata).trim();
+    }
+  }
+
+  return "";
+}
+
+// ============================================================
+// EXTRACT PAGE
+// ============================================================
+
+function extractPage(item) {
+
+  if (!item) {
+    return "";
+  }
+
+  const page =
+    firstValue(
+      item.page,
+      item.page_number,
+      item.pageNumber,
+      item.pageno,
+      item.pageNo,
+      item.pagination
+    );
+
+  if (
+    page !== undefined &&
+    page !== null &&
+    String(page).trim() !== ""
+  ) {
+    return String(page).trim();
+  }
+
+  // ----------------------------------------------------------
+  // Nested page
+  // ----------------------------------------------------------
+
+  if (
+    item.metadata &&
+    typeof item.metadata === "object"
+  ) {
+
+    const metadataPage =
+      firstValue(
+        item.metadata.page,
+        item.metadata.page_number,
+        item.metadata.pageNumber
+      );
+
+    if (
+      metadataPage !== undefined &&
+      metadataPage !== null &&
+      String(metadataPage).trim() !== ""
+    ) {
+      return String(metadataPage).trim();
+    }
+  }
+
+  return "";
+}
+
+// ============================================================
+// EXTRACT BOOK TITLE
+// ============================================================
+
+function extractBookTitle(item) {
+
+  if (!item) {
+    return "";
+  }
+
+  const title =
+    firstValue(
+      item.book_title,
+      item.bookTitle,
+      item.book_name,
+      item.bookName,
+      item.title,
+      item.source
+    );
+
+  if (
+    title &&
+    typeof title !== "object"
+  ) {
+    return String(title).trim();
+  }
+
+  // ----------------------------------------------------------
+  // Nested book object
+  // ----------------------------------------------------------
+
+  if (
+    item.book &&
+    typeof item.book === "object"
+  ) {
+
+    const nested =
+      firstValue(
+        item.book.title,
+        item.book.name,
+        item.book.book_title,
+        item.book.book_name
+      );
+
+    if (
+      nested &&
+      typeof nested !== "object"
+    ) {
+      return String(nested).trim();
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Metadata
+  // ----------------------------------------------------------
+
+  if (
+    item.metadata &&
+    typeof item.metadata === "object"
+  ) {
+
+    const metadataTitle =
+      firstValue(
+        item.metadata.book_title,
+        item.metadata.bookTitle,
+        item.metadata.book_name,
+        item.metadata.bookName,
+        item.metadata.title
+      );
+
+    if (
+      metadataTitle &&
+      typeof metadataTitle !== "object"
+    ) {
+      return String(metadataTitle).trim();
+    }
+  }
+
+  return "";
+}
+
+// ============================================================
+// EXTRACT AUTHOR
+// ============================================================
+
+function extractAuthor(item) {
+
+  if (!item) {
+    return "";
+  }
+
+  const author =
+    firstValue(
+      item.author,
+      item.book_author,
+      item.bookAuthor,
+      item.author_name,
+      item.authorName
+    );
+
+  if (
+    author &&
+    typeof author !== "object"
+  ) {
+    return String(author).trim();
+  }
+
+  // ----------------------------------------------------------
+  // Nested book
+  // ----------------------------------------------------------
+
+  if (
+    item.book &&
+    typeof item.book === "object"
+  ) {
+
+    const nested =
+      firstValue(
+        item.book.author,
+        item.book.book_author,
+        item.book.author_name,
+        item.book.authorName
+      );
+
+    if (
+      nested &&
+      typeof nested !== "object"
+    ) {
+      return String(nested).trim();
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Metadata
+  // ----------------------------------------------------------
+
+  if (
+    item.metadata &&
+    typeof item.metadata === "object"
+  ) {
+
+    const metadataAuthor =
+      firstValue(
+        item.metadata.author,
+        item.metadata.book_author,
+        item.metadata.author_name,
+        item.metadata.authorName
+      );
+
+    if (
+      metadataAuthor &&
+      typeof metadataAuthor !== "object"
+    ) {
+      return String(metadataAuthor).trim();
+    }
+  }
+
+  return "";
+}
+
+// ============================================================
+// EXTRACT URL
+// ============================================================
+
+function extractUrl(item) {
+
+  if (!item) {
+    return "";
+  }
+
+  const url =
+    firstValue(
+      item.url,
+      item.link,
+      item.href
+    );
+
+  if (
+    url &&
+    typeof url !== "object"
+  ) {
+    return String(url).trim();
+  }
+
+  if (
+    item.metadata &&
+    typeof item.metadata === "object"
+  ) {
+
+    const metadataUrl =
+      firstValue(
+        item.metadata.url,
+        item.metadata.link,
+        item.metadata.href
+      );
+
+    if (
+      metadataUrl &&
+      typeof metadataUrl !== "object"
+    ) {
+      return String(metadataUrl).trim();
+    }
+  }
+
+  return "";
+}
+
+// ============================================================
+// EXTRACT RESULT ID
+// ============================================================
+
+function extractId(item) {
+
+  if (!item) {
+    return "";
+  }
+
+  return stringValue(
+    item.id,
+    item.chunk_id,
+    item.chunkId,
+    item.result_id,
+    item.resultId
+  );
+}
+
+// ============================================================
 // MADHHAB COMPARISON
 // ============================================================
 
@@ -386,6 +840,9 @@ function isMadhhabComparison(text) {
     "compare mazhab",
     "compare madhhab",
     "madhhab comparison",
+    "مقارنة المذاهب",
+    "المذاهب الأربعة",
+    "الفرق بين المذاهب",
   ];
 
   if (
@@ -397,10 +854,33 @@ function isMadhhabComparison(text) {
   }
 
   const madhhabNames = [
-    ["syafie", "syafii", "syafi'i", "shafii", "shafi'i", "شافعي"],
-    ["hanafi", "حنفي"],
-    ["maliki", "مالكي"],
-    ["hanbali", "حنبلي"],
+    [
+      "syafie",
+      "syafii",
+      "syafi'i",
+      "shafii",
+      "shafi'i",
+      "شافعي",
+      "الشافعية",
+    ],
+
+    [
+      "hanafi",
+      "حنفي",
+      "الحنفية",
+    ],
+
+    [
+      "maliki",
+      "مالكي",
+      "المالكية",
+    ],
+
+    [
+      "hanbali",
+      "حنبلي",
+      "الحنابلة",
+    ],
   ];
 
   let count = 0;
@@ -433,14 +913,9 @@ function arabicQueries(originalQuery) {
 
   const queries = [];
 
-  // Original query
   if (original) {
     queries.push(original);
   }
-
-  // ----------------------------------------------------------
-  // Detect mapped Malay keywords
-  // ----------------------------------------------------------
 
   for (const [
     keyword,
@@ -457,10 +932,6 @@ function arabicQueries(originalQuery) {
       }
     }
   }
-
-  // ----------------------------------------------------------
-  // If original already contains Arabic
-  // ----------------------------------------------------------
 
   const hasArabic =
     /[\u0600-\u06FF]/.test(original);
@@ -487,14 +958,15 @@ async function searchOnePage(
 
   try {
 
-    const response = await search(
-      query,
-      {
-        category: categoryId,
-        page,
-        limit: RESULTS_PER_PAGE,
-      }
-    );
+    const response =
+      await search(
+        query,
+        {
+          category: categoryId,
+          page,
+          limit: RESULTS_PER_PAGE,
+        }
+      );
 
     let results = [];
 
@@ -526,6 +998,28 @@ async function searchOnePage(
     console.log(
       `🔎 ${categoryId} | "${query}" | page=${page} | ${results.length} results`
     );
+
+    // --------------------------------------------------------
+    // Debug first result supaya kita tahu struktur SDK sebenar
+    // --------------------------------------------------------
+
+    if (
+      results.length > 0 &&
+      page === 1
+    ) {
+
+      console.log(
+        "🧪 FIRST RAW TURATH RESULT:"
+      );
+
+      console.log(
+        JSON.stringify(
+          results[0],
+          null,
+          2
+        ).slice(0, 12000)
+      );
+    }
 
     return results;
 
@@ -580,8 +1074,12 @@ async function searchCategoryMany(
 
         collected.push({
           ...result,
-          _query: query,
-          _categoryId: categoryId,
+
+          _query:
+            query,
+
+          _categoryId:
+            categoryId,
         });
 
         if (
@@ -666,7 +1164,7 @@ async function searchNormal(
     );
 
   console.log(
-    `📦 shafii TOTAL UNIQUE = ${results.length}`
+    `📦 shafii TOTAL = ${results.length}`
   );
 
   return results;
@@ -721,7 +1219,9 @@ async function searchComparison(
 
       allResults.push({
         ...result,
+
         madhhab,
+
         madhhab_name:
           CATEGORY_NAMES[madhhab],
       });
@@ -729,6 +1229,392 @@ async function searchComparison(
   }
 
   return allResults;
+}
+
+// ============================================================
+// FETCH BOOK INFO
+// ============================================================
+
+async function fetchBookInfo(
+  bookId
+) {
+
+  if (!bookId) {
+    return null;
+  }
+
+  const key =
+    String(bookId);
+
+  // ----------------------------------------------------------
+  // CACHE
+  // ----------------------------------------------------------
+
+  if (
+    bookInfoCache.has(key)
+  ) {
+
+    return bookInfoCache.get(key);
+  }
+
+  try {
+
+    console.log(
+      `📖 GET BOOK INFO: ${key}`
+    );
+
+    const info =
+      await getBookInfo(key);
+
+    // Simpan walaupun kosong
+    bookInfoCache.set(
+      key,
+      info || null
+    );
+
+    console.log(
+      `✅ BOOK INFO LOADED: ${key}`
+    );
+
+    return info || null;
+
+  } catch (error) {
+
+    console.error(
+      `⚠️ GET BOOK INFO FAILED: ${key}`
+    );
+
+    console.error(
+      error?.message ||
+      error
+    );
+
+    bookInfoCache.set(
+      key,
+      null
+    );
+
+    return null;
+  }
+}
+
+// ============================================================
+// ENRICH BOOK METADATA
+// ============================================================
+
+async function enrichBookMetadata(
+  items
+) {
+
+  if (!items.length) {
+    return items;
+  }
+
+  // ----------------------------------------------------------
+  // Cari semua book ID
+  // ----------------------------------------------------------
+
+  const bookIds = [];
+
+  for (
+    const item of items
+  ) {
+
+    const bookId =
+      extractBookId(item);
+
+    if (
+      bookId &&
+      !bookIds.includes(bookId)
+    ) {
+
+      bookIds.push(bookId);
+    }
+  }
+
+  if (!bookIds.length) {
+
+    console.log(
+      "⚠️ NO BOOK IDS FOUND IN SEARCH RESULTS"
+    );
+
+    return items;
+  }
+
+  console.log(
+    `📚 UNIQUE BOOK IDS = ${bookIds.length}`
+  );
+
+  // ----------------------------------------------------------
+  // Fetch book info secara terkawal
+  // ----------------------------------------------------------
+
+  const infoMap = new Map();
+
+  for (
+    let i = 0;
+    i < bookIds.length;
+    i += BOOK_INFO_CONCURRENCY
+  ) {
+
+    const batch =
+      bookIds.slice(
+        i,
+        i + BOOK_INFO_CONCURRENCY
+      );
+
+    const results =
+      await Promise.all(
+        batch.map(
+          async bookId => {
+
+            const info =
+              await fetchBookInfo(
+                bookId
+              );
+
+            return [
+              bookId,
+              info,
+            ];
+          }
+        )
+      );
+
+    for (
+      const [bookId, info]
+      of results
+    ) {
+
+      infoMap.set(
+        bookId,
+        info
+      );
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Gabungkan metadata
+  // ----------------------------------------------------------
+
+  return items.map(
+    item => {
+
+      const bookId =
+        extractBookId(item);
+
+      const bookInfo =
+        infoMap.get(bookId);
+
+      return {
+        ...item,
+
+        _bookInfo:
+          bookInfo || null,
+      };
+    }
+  );
+}
+
+// ============================================================
+// NORMALIZE BOOK INFO
+// ============================================================
+
+function normalizeBookInfo(
+  bookInfo
+) {
+
+  if (!bookInfo) {
+    return {};
+  }
+
+  // ----------------------------------------------------------
+  // Kalau info ada nested "book"
+  // ----------------------------------------------------------
+
+  let source =
+    bookInfo;
+
+  if (
+    bookInfo.book &&
+    typeof bookInfo.book === "object"
+  ) {
+
+    source =
+      {
+        ...bookInfo,
+        ...bookInfo.book,
+      };
+  }
+
+  return {
+    book:
+      stringValue(
+        source.title,
+        source.name,
+        source.book_title,
+        source.bookTitle,
+        source.book_name,
+        source.bookName
+      ),
+
+    author:
+      stringValue(
+        source.author,
+        source.author_name,
+        source.authorName,
+        source.book_author,
+        source.bookAuthor
+      ),
+
+    book_id:
+      stringValue(
+        source.id,
+        source.book_id,
+        source.bookId
+      ),
+
+    url:
+      stringValue(
+        source.url,
+        source.link,
+        source.href
+      ),
+  };
+}
+
+// ============================================================
+// NORMALIZE RESULT
+// ============================================================
+
+function normalizeResult(
+  item,
+  fallbackCategory = null
+) {
+
+  if (!item) {
+    return null;
+  }
+
+  const bookInfo =
+    normalizeBookInfo(
+      item._bookInfo
+    );
+
+  const text =
+    extractText(item);
+
+  if (!text) {
+    return null;
+  }
+
+  const bookId =
+    firstValue(
+      extractBookId(item),
+      bookInfo.book_id
+    );
+
+  const book =
+    firstValue(
+      extractBookTitle(item),
+      bookInfo.book
+    );
+
+  const author =
+    firstValue(
+      extractAuthor(item),
+      bookInfo.author
+    );
+
+  const page =
+    extractPage(item);
+
+  const url =
+    firstValue(
+      extractUrl(item),
+      bookInfo.url
+    );
+
+  const category =
+    firstValue(
+      item.category,
+      item.category_name,
+      item.mazhab,
+      item.madhhab_name,
+      fallbackCategory
+    );
+
+  return {
+
+    // --------------------------------------------------------
+    // Content
+    // --------------------------------------------------------
+
+    text,
+
+    content:
+      text,
+
+    // --------------------------------------------------------
+    // Book
+    // --------------------------------------------------------
+
+    book:
+      String(book || "").trim(),
+
+    book_title:
+      String(book || "").trim(),
+
+    source:
+      String(book || "").trim(),
+
+    author:
+      String(author || "").trim(),
+
+    // --------------------------------------------------------
+    // Page
+    // --------------------------------------------------------
+
+    page:
+      String(page || "").trim(),
+
+    page_number:
+      String(page || "").trim(),
+
+    // --------------------------------------------------------
+    // Category / Madhhab
+    // --------------------------------------------------------
+
+    category:
+      String(category || "").trim(),
+
+    // --------------------------------------------------------
+    // IDs
+    // --------------------------------------------------------
+
+    book_id:
+      String(bookId || "").trim(),
+
+    id:
+      extractId(item),
+
+    // --------------------------------------------------------
+    // URL
+    // --------------------------------------------------------
+
+    url:
+      String(url || "").trim(),
+
+    // --------------------------------------------------------
+    // Search info
+    // --------------------------------------------------------
+
+    query:
+      item._query || "",
+
+    category_id:
+      item._categoryId || "",
+  };
 }
 
 // ============================================================
@@ -750,7 +1636,6 @@ function deduplicateResults(
       String(
         item.text ||
         item.content ||
-        item.snippet ||
         ""
       ).trim();
 
@@ -758,7 +1643,13 @@ function deduplicateResults(
       String(
         item.book ||
         item.book_title ||
-        item.title ||
+        item.source ||
+        ""
+      ).trim();
+
+    const author =
+      String(
+        item.author ||
         ""
       ).trim();
 
@@ -769,10 +1660,18 @@ function deduplicateResults(
         ""
       ).trim();
 
-    const key =
-      `${book}|${page}|${text.slice(0, 300)}`;
+    const bookId =
+      String(
+        item.book_id ||
+        ""
+      ).trim();
 
-    if (seen.has(key)) {
+    const key =
+      `${bookId}|${book}|${author}|${page}|${text.slice(0, 300)}`;
+
+    if (
+      seen.has(key)
+    ) {
       continue;
     }
 
@@ -785,66 +1684,127 @@ function deduplicateResults(
 }
 
 // ============================================================
-// NORMALIZE RESULT
+// ENRICH + NORMALIZE + DEDUPLICATE
 // ============================================================
 
-function normalizeResult(
-  item,
-  fallbackCategory = null
+async function prepareResults(
+  rawResults
 ) {
 
-  if (!item) {
-    return null;
+  if (!rawResults.length) {
+    return [];
   }
 
-  const text =
-    String(
-      item.text ||
-      item.content ||
-      item.snippet ||
-      item.snip ||
-      ""
-    ).trim();
+  console.log(
+    `🔧 PREPARING ${rawResults.length} RAW RESULTS`
+  );
 
-  if (!text) {
-    return null;
+  // ----------------------------------------------------------
+  // Ambil metadata kitab
+  // ----------------------------------------------------------
+
+  const enriched =
+    await enrichBookMetadata(
+      rawResults
+    );
+
+  // ----------------------------------------------------------
+  // Normalize
+  // ----------------------------------------------------------
+
+  const normalized =
+    enriched
+      .map(
+        item =>
+          normalizeResult(
+            item,
+            item.madhhab_name ||
+            item.category ||
+            ""
+          )
+      )
+      .filter(Boolean);
+
+  // ----------------------------------------------------------
+  // Deduplicate
+  // ----------------------------------------------------------
+
+  const unique =
+    deduplicateResults(
+      normalized
+    );
+
+  console.log(
+    `🏁 FINAL NORMALIZED RESULTS = ${unique.length}`
+  );
+
+  // ----------------------------------------------------------
+  // Debug metadata
+  // ----------------------------------------------------------
+
+  if (unique.length > 0) {
+
+    console.log(
+      "📚 FIRST NORMALIZED RESULT:"
+    );
+
+    console.log(
+      JSON.stringify(
+        unique[0],
+        null,
+        2
+      ).slice(0, 12000)
+    );
   }
 
-  return {
-    text,
+  return unique;
+}
 
-    book:
-      item.book ||
-      item.book_title ||
-      item.title ||
-      "",
+// ============================================================
+// READ REQUEST BODY
+// ============================================================
 
-    page:
-      item.page ||
-      item.page_number ||
-      "",
+function readRequestBody(
+  req
+) {
 
-    category:
-      item.category ||
-      item.category_name ||
-      item.mazhab ||
-      fallbackCategory ||
-      "",
+  return new Promise(
+    (resolve, reject) => {
 
-    book_id:
-      item.book_id ||
-      item.bookId ||
-      "",
+      let body = "";
 
-    id:
-      item.id ||
-      item.chunk_id ||
-      "",
+      req.on(
+        "data",
+        chunk => {
+          body += chunk.toString();
+        }
+      );
 
-    url:
-      item.url ||
-      "",
-  };
+      req.on(
+        "end",
+        () => {
+
+          try {
+
+            resolve(
+              JSON.parse(
+                body || "{}"
+              )
+            );
+
+          } catch (error) {
+
+            reject(error);
+          }
+        }
+      );
+
+      req.on(
+        "error",
+        reject
+      );
+    }
+  );
 }
 
 // ============================================================
@@ -870,9 +1830,29 @@ const server =
       );
 
       res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET,POST,OPTIONS"
+      );
+
+      res.setHeader(
         "Content-Type",
         "application/json; charset=utf-8"
       );
+
+      // --------------------------------------------------------
+      // OPTIONS
+      // --------------------------------------------------------
+
+      if (
+        req.method === "OPTIONS"
+      ) {
+
+        res.writeHead(204);
+
+        res.end();
+
+        return;
+      }
 
       // --------------------------------------------------------
       // ROOT
@@ -888,8 +1868,10 @@ const server =
         res.end(
           JSON.stringify({
             success: true,
-            service: "Turath Search Service",
-            status: "running",
+            service:
+              "Turath Search Service",
+            status:
+              "running",
           })
         );
 
@@ -913,6 +1895,8 @@ const server =
             status: "ok",
             port: PORT,
             host: HOST,
+            categories:
+              CATEGORY_IDS,
           })
         );
 
@@ -935,6 +1919,8 @@ const server =
             success: true,
             categories:
               CATEGORY_IDS,
+            names:
+              CATEGORY_NAMES,
           })
         );
 
@@ -952,163 +1938,135 @@ const server =
 
         try {
 
-          let body = "";
+          const payload =
+            await readRequestBody(
+              req
+            );
 
-          req.on(
-            "data",
-            chunk => {
-              body += chunk.toString();
-            }
+          const query =
+            String(
+              payload.query ||
+              payload.question ||
+              ""
+            ).trim();
+
+          const comparison =
+            typeof payload.comparison === "boolean"
+              ? payload.comparison
+              : isMadhhabComparison(
+                  query
+                );
+
+          console.log("");
+
+          console.log(
+            "================================================"
           );
 
-          req.on(
-            "end",
-            async () => {
-
-              try {
-
-                const payload =
-                  JSON.parse(body || "{}");
-
-                const query =
-                  String(
-                    payload.query ||
-                    payload.question ||
-                    ""
-                  ).trim();
-
-                const comparison =
-                  typeof payload.comparison === "boolean"
-                    ? payload.comparison
-                    : isMadhhabComparison(
-                        query
-                      );
-
-                console.log("");
-                console.log("================================================");
-                console.log("📚 TURATH SEARCH");
-                console.log(`❓ ${query}`);
-                console.log(
-                  `🧭 MODE = ${
-                    comparison
-                      ? "COMPARISON"
-                      : "SHAFII"
-                  }`
-                );
-                console.log("================================================");
-
-                if (!query) {
-
-                  res.writeHead(400);
-
-                  res.end(
-                    JSON.stringify({
-                      success: false,
-                      error: "Query kosong",
-                    })
-                  );
-
-                  return;
-                }
-
-                let rawResults = [];
-
-                // ------------------------------------------------
-                // SEARCH MODE
-                // ------------------------------------------------
-
-                if (comparison) {
-
-                  rawResults =
-                    await searchComparison(
-                      query
-                    );
-
-                } else {
-
-                  rawResults =
-                    await searchNormal(
-                      query
-                    );
-                }
-
-                // ------------------------------------------------
-                // NORMALIZE
-                // ------------------------------------------------
-
-                const normalized =
-                  rawResults
-                    .map(item =>
-                      normalizeResult(
-                        item,
-                        item.madhhab_name ||
-                        item.category ||
-                        ""
-                      )
-                    )
-                    .filter(Boolean);
-
-                // ------------------------------------------------
-                // DEDUPLICATE
-                // ------------------------------------------------
-
-                const finalResults =
-                  deduplicateResults(
-                    normalized
-                  );
-
-                console.log(
-                  `🏁 FINAL TURATH RESULTS = ${finalResults.length}`
-                );
-
-                res.writeHead(200);
-
-                res.end(
-                  JSON.stringify({
-                    success: true,
-
-                    mode:
-                      comparison
-                        ? "comparison"
-                        : "shafii",
-
-                    requested: query,
-
-                    count:
-                      finalResults.length,
-
-                    passages:
-                      finalResults,
-                  })
-                );
-
-              } catch (error) {
-
-                console.error(
-                  "❌ REQUEST ERROR:"
-                );
-
-                console.error(error);
-
-                res.writeHead(500);
-
-                res.end(
-                  JSON.stringify({
-                    success: false,
-                    error:
-                      error.message ||
-                      String(error),
-                  })
-                );
-              }
-            }
+          console.log(
+            "📚 TURATH SEARCH"
           );
 
-          return;
+          console.log(
+            `❓ ${query}`
+          );
+
+          console.log(
+            `🧭 MODE = ${
+              comparison
+                ? "COMPARISON"
+                : "SHAFII"
+            }`
+          );
+
+          console.log(
+            "================================================"
+          );
+
+          if (!query) {
+
+            res.writeHead(400);
+
+            res.end(
+              JSON.stringify({
+                success: false,
+                error:
+                  "Query kosong",
+              })
+            );
+
+            return;
+          }
+
+          let rawResults = [];
+
+          // ----------------------------------------------------
+          // SEARCH
+          // ----------------------------------------------------
+
+          if (comparison) {
+
+            rawResults =
+              await searchComparison(
+                query
+              );
+
+          } else {
+
+            rawResults =
+              await searchNormal(
+                query
+              );
+          }
+
+          console.log(
+            `📦 RAW RESULTS = ${rawResults.length}`
+          );
+
+          // ----------------------------------------------------
+          // PREPARE
+          // ----------------------------------------------------
+
+          const finalResults =
+            await prepareResults(
+              rawResults
+            );
+
+          // ----------------------------------------------------
+          // RESPONSE
+          // ----------------------------------------------------
+
+          res.writeHead(200);
+
+          res.end(
+            JSON.stringify({
+              success: true,
+
+              mode:
+                comparison
+                  ? "comparison"
+                  : "shafii",
+
+              requested:
+                query,
+
+              count:
+                finalResults.length,
+
+              passages:
+                finalResults,
+            })
+          );
 
         } catch (error) {
 
-          console.error(error);
+          console.error(
+            "❌ REQUEST ERROR:"
+          );
+
+          console.error(
+            error
+          );
 
           res.writeHead(500);
 
@@ -1120,9 +2078,9 @@ const server =
                 String(error),
             })
           );
-
-          return;
         }
+
+        return;
       }
 
       // --------------------------------------------------------
@@ -1141,6 +2099,21 @@ const server =
               .split("/book/")[1]
               .split("?")[0];
 
+          if (!id) {
+
+            res.writeHead(400);
+
+            res.end(
+              JSON.stringify({
+                success: false,
+                error:
+                  "Book ID kosong",
+              })
+            );
+
+            return;
+          }
+
           const book =
             await getBookInfo(id);
 
@@ -1149,11 +2122,20 @@ const server =
           res.end(
             JSON.stringify({
               success: true,
+
               book,
             })
           );
 
         } catch (error) {
+
+          console.error(
+            "❌ GET BOOK ERROR:"
+          );
+
+          console.error(
+            error
+          );
 
           res.writeHead(500);
 
@@ -1186,8 +2168,29 @@ const server =
               .split("/page/")[1]
               .split("/");
 
-          const bookId = parts[0];
-          const page = Number(parts[1]);
+          const bookId =
+            parts[0];
+
+          const page =
+            Number(parts[1]);
+
+          if (
+            !bookId ||
+            !Number.isFinite(page)
+          ) {
+
+            res.writeHead(400);
+
+            res.end(
+              JSON.stringify({
+                success: false,
+                error:
+                  "Book ID atau page tidak sah",
+              })
+            );
+
+            return;
+          }
 
           const result =
             await getPage(
@@ -1200,11 +2203,25 @@ const server =
           res.end(
             JSON.stringify({
               success: true,
+
+              book_id:
+                bookId,
+
+              page,
+
               result,
             })
           );
 
         } catch (error) {
+
+          console.error(
+            "❌ GET PAGE ERROR:"
+          );
+
+          console.error(
+            error
+          );
 
           res.writeHead(500);
 
@@ -1230,7 +2247,8 @@ const server =
       res.end(
         JSON.stringify({
           success: false,
-          error: "Not found",
+          error:
+            "Not found",
         })
       );
     }
@@ -1246,6 +2264,7 @@ server.listen(
   () => {
 
     console.log("");
+
     console.log(
       "=============================================="
     );
@@ -1261,6 +2280,18 @@ server.listen(
     console.log(
       "📚 CATEGORY IDS:",
       CATEGORY_IDS
+    );
+
+    console.log(
+      `📄 SEARCH PAGES: ${SEARCH_PAGES}`
+    );
+
+    console.log(
+      `🔎 RESULTS/PAGE: ${RESULTS_PER_PAGE}`
+    );
+
+    console.log(
+      `📖 BOOK INFO CONCURRENCY: ${BOOK_INFO_CONCURRENCY}`
     );
 
     console.log(
