@@ -5,6 +5,7 @@ import time
 import asyncio
 import hashlib
 import threading
+import traceback
 from pathlib import Path
 
 import requests
@@ -14,6 +15,7 @@ from pdf2image import convert_from_path
 from flask import Flask, request, jsonify
 
 from supabase import create_client
+
 from google import genai
 from google.genai import types
 
@@ -28,7 +30,7 @@ from telegram.ext import (
 
 
 # ============================================================
-# ENVIRONMENT
+# ENV
 # ============================================================
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
@@ -37,32 +39,24 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 
-DATA_DIR = os.getenv(
-    "DATA_DIR",
-    "/var/data"
-).strip()
+DATA_DIR = os.getenv("DATA_DIR", "/var/data")
 
-OCR_WORKERS = int(
-    os.getenv(
-        "OCR_WORKERS",
-        "1"
-    )
-)
+OCR_WORKERS = int(os.getenv("OCR_WORKERS", "1"))
 
 LLM_MODEL = os.getenv(
     "LLM_MODEL",
     "gemini-3.8-flash"
-).strip()
+)
 
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
     "gemini-embedding-001"
-).strip()
+)
 
 TURATH_SERVICE_URL = os.getenv(
     "TURATH_SERVICE_URL",
     "http://127.0.0.1:8765"
-).strip().rstrip("/")
+).rstrip("/")
 
 
 # ============================================================
@@ -71,20 +65,14 @@ TURATH_SERVICE_URL = os.getenv(
 
 DATA_PATH = Path(DATA_DIR)
 
-EXTRACTED_TEXT_DIR = (
-    DATA_PATH / "extracted_text"
-)
-
-PAGE_CACHE_DIR = (
-    EXTRACTED_TEXT_DIR / "pages"
-)
-
-EXTRACTED_TEXT_DIR.mkdir(
+DATA_PATH.mkdir(
     parents=True,
     exist_ok=True
 )
 
-PAGE_CACHE_DIR.mkdir(
+OCR_CACHE_DIR = DATA_PATH / "extracted_text" / "pages"
+
+OCR_CACHE_DIR.mkdir(
     parents=True,
     exist_ok=True
 )
@@ -98,72 +86,11 @@ app = Flask(__name__)
 
 
 # ============================================================
-# SUPABASE
+# GLOBAL CLIENTS
 # ============================================================
 
 supabase = None
-
-if SUPABASE_URL and SUPABASE_KEY:
-
-    try:
-
-        supabase = create_client(
-            SUPABASE_URL,
-            SUPABASE_KEY
-        )
-
-        print(
-            "✅ SUPABASE CONNECTED"
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ SUPABASE CONNECTION ERROR:",
-            e
-        )
-
-        supabase = None
-
-else:
-
-    print(
-        "⚠️ SUPABASE ENV BELUM LENGKAP"
-    )
-
-
-# ============================================================
-# GEMINI
-# ============================================================
-
 gemini_client = None
-
-if GOOGLE_API_KEY:
-
-    try:
-
-        gemini_client = genai.Client(
-            api_key=GOOGLE_API_KEY
-        )
-
-        print(
-            "✅ GEMINI CLIENT READY"
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ GEMINI CLIENT ERROR:",
-            e
-        )
-
-        gemini_client = None
-
-else:
-
-    print(
-        "⚠️ GOOGLE_API_KEY BELUM ADA"
-    )
 
 
 # ============================================================
@@ -172,89 +99,78 @@ else:
 
 ANSWER_CACHE = {}
 
-MAX_CACHE = 500
-
-CACHE_LOCK = threading.Lock()
-
-
-def normalize_question(question):
-
-    if not question:
-        return ""
-
-    question = str(
-        question
-    ).strip()
-
-    question = re.sub(
-        r"\s+",
-        " ",
-        question
-    )
-
-    return question
-
-
-def cache_key(question):
-
-    question = normalize_question(
-        question
-    )
-
-    return hashlib.sha256(
-        question.lower().encode(
-            "utf-8"
-        )
-    ).hexdigest()
-
-
-def get_cached_answer(question):
-
-    key = cache_key(
-        question
-    )
-
-    with CACHE_LOCK:
-
-        return ANSWER_CACHE.get(
-            key
-        )
-
-
-def set_cached_answer(
-    question,
-    answer
-):
-
-    key = cache_key(
-        question
-    )
-
-    with CACHE_LOCK:
-
-        if len(ANSWER_CACHE) >= MAX_CACHE:
-
-            try:
-
-                first_key = next(
-                    iter(
-                        ANSWER_CACHE
-                    )
-                )
-
-                ANSWER_CACHE.pop(
-                    first_key,
-                    None
-                )
-
-            except Exception:
-                pass
-
-        ANSWER_CACHE[key] = answer
+ANSWER_CACHE_MAX = 500
 
 
 # ============================================================
-# TEXT UTILITIES
+# STARTUP
+# ============================================================
+
+print()
+print("=" * 60)
+print("🤖 TanyaFiqihBot STARTING")
+print("=" * 60)
+
+
+# ============================================================
+# CONNECT SUPABASE
+# ============================================================
+
+try:
+
+    if SUPABASE_URL and SUPABASE_KEY:
+
+        supabase = create_client(
+            SUPABASE_URL,
+            SUPABASE_KEY
+        )
+
+        print("✅ SUPABASE CONNECTED")
+
+    else:
+
+        print("⚠️ SUPABASE ENV MISSING")
+
+except Exception as e:
+
+    print(
+        "❌ SUPABASE CONNECTION ERROR:",
+        repr(e)
+    )
+
+    traceback.print_exc()
+
+
+# ============================================================
+# CONNECT GEMINI
+# ============================================================
+
+try:
+
+    if GOOGLE_API_KEY:
+
+        gemini_client = genai.Client(
+            api_key=GOOGLE_API_KEY
+        )
+
+        print("✅ GEMINI CLIENT READY")
+
+    else:
+
+        print("⚠️ GOOGLE_API_KEY MISSING")
+
+except Exception as e:
+
+    print(
+        "❌ GEMINI CONNECTION ERROR:",
+        repr(e)
+    )
+
+    traceback.print_exc()
+
+
+# ============================================================
+# TEXT HELPERS
 # ============================================================
 
 def clean_text(text):
@@ -278,882 +194,220 @@ def clean_text(text):
     return text.strip()
 
 
-def truncate_text(
-    text,
-    max_chars=7000
-):
+def normalize_question(question):
 
-    text = clean_text(
-        text
+    question = clean_text(
+        question
     )
+
+    return question
+
+
+def short_text(text, max_chars=5000):
+
+    text = clean_text(text)
 
     if len(text) <= max_chars:
         return text
 
-    return (
-        text[:max_chars]
-        +
-        "\n...[dipendekkan]"
-    )
+    return text[:max_chars] + "..."
 
 
 # ============================================================
-# CATEGORY LOCAL
-# ============================================================
-
-def detect_category(question):
-
-    q = normalize_question(
-        question
-    ).lower()
-
-    if any(
-        word in q
-        for word in [
-            "solat",
-            "sembahyang",
-            "wuduk",
-            "tayammum",
-            "mandi wajib",
-            "hadas",
-            "najis",
-            "puasa",
-            "zakat",
-            "haji",
-            "umrah",
-            "haid",
-            "nifas",
-            "istihadah",
-            "nikah",
-            "talak",
-            "cerai",
-            "jual beli",
-            "muamalat",
-            "faraid",
-            "waris",
-        ]
-    ):
-        return "FIQH"
-
-    if any(
-        word in q
-        for word in [
-            "tauhid",
-            "akidah",
-            "aqidah",
-            "iman",
-            "syirik",
-            "kufur",
-            "asma",
-            "sifat allah",
-        ]
-    ):
-        return "TAUHID"
-
-    if any(
-        word in q
-        for word in [
-            "hadis",
-            "hadith",
-            "sabda nabi",
-            "riwayat",
-        ]
-    ):
-        return "HADIS"
-
-    if any(
-        word in q
-        for word in [
-            "tafsir",
-            "ayat al-quran",
-            "maksud ayat",
-            "surah",
-        ]
-    ):
-        return "TAFSIR"
-
-    if any(
-        word in q
-        for word in [
-            "sirah",
-            "rasulullah",
-            "nabi muhammad",
-            "perang badar",
-            "perang uhud",
-        ]
-    ):
-        return "SIRAH"
-
-    if any(
-        word in q
-        for word in [
-            "akhlak",
-            "adab",
-            "sabar",
-            "ikhlas",
-            "amanah",
-        ]
-    ):
-        return "AKHLAK"
-
-    if any(
-        word in q
-        for word in [
-            "usul fiqh",
-            "qiyas",
-            "ijmak",
-            "ijtihad",
-            "istihsan",
-            "maslahah",
-        ]
-    ):
-        return "USUL FIQH"
-
-    return "FIQH"
-
-
-# ============================================================
-# MAZHAB COMPARISON
+# DETECT COMPARISON
 # ============================================================
 
 def is_madhhab_comparison(question):
 
-    q = normalize_question(
-        question
-    ).lower()
+    q = question.lower()
 
-    patterns = [
-
-        # Melayu
-        "banding mazhab",
-        "bandingan mazhab",
-        "perbandingan mazhab",
-        "bandingkan mazhab",
-        "bezakan mazhab",
-        "perbezaan mazhab",
-        "beza mazhab",
-        "keempat-empat mazhab",
-        "empat mazhab",
-        "4 mazhab",
-
-        # Arabic
-        "مقارنة المذاهب",
-        "مقارنة بين المذاهب",
-        "المذاهب الأربعة",
-
-        # Explicit madhhab
+    comparison_words = [
+        "banding",
+        "bandingkan",
+        "perbandingan",
+        "mazhab",
+        "mazhab-mazhab",
         "syafie dan hanafi",
         "syafie dan maliki",
         "syafie dan hanbali",
-        "hanafi dan maliki",
-        "hanafi dan hanbali",
-        "maliki dan hanbali",
-
-        "الشافعي والحنفي",
-        "الشافعي والمالكي",
-        "الشافعي والحنبلي",
-        "الحنفي والمالكي",
-        "الحنفي والحنبلي",
-        "المالكي والحنبلي",
+        "hanafi dan syafie",
+        "maliki dan syafie",
+        "hanbali dan syafie",
+        "keempat-empat mazhab",
+        "empat mazhab",
+        "semua mazhab",
     ]
 
-    for pattern in patterns:
+    for word in comparison_words:
 
-        if pattern in q:
+        if word in q:
             return True
 
-    count = 0
+    # Jika soalan menyebut sekurang-kurangnya
+    # dua mazhab secara jelas
 
-    if (
-        "syafie" in q
-        or "shafii" in q
-        or "شافعي" in q
-    ):
-        count += 1
+    madhhab_count = 0
 
-    if (
-        "hanafi" in q
-        or "حنفي" in q
-    ):
-        count += 1
+    madhhab_words = [
+        "syafie",
+        "hanafi",
+        "maliki",
+        "hanbali",
+    ]
 
-    if (
-        "maliki" in q
-        or "مالكي" in q
-    ):
-        count += 1
+    for word in madhhab_words:
 
-    if (
-        "hanbali" in q
-        or "حنبلي" in q
-    ):
-        count += 1
+        if word in q:
+            madhhab_count += 1
 
-    return count >= 2
+    return madhhab_count >= 2
 
 
 # ============================================================
-# FILE HASH
+# OCR
 # ============================================================
 
-def get_file_hash(path):
+def get_book_hash(path):
 
-    try:
+    stat = path.stat()
 
-        hasher = hashlib.sha256()
-
-        with open(
-            path,
-            "rb"
-        ) as f:
-
-            while True:
-
-                chunk = f.read(
-                    1024 * 1024
-                )
-
-                if not chunk:
-                    break
-
-                hasher.update(
-                    chunk
-                )
-
-        return hasher.hexdigest()[:16]
-
-    except Exception:
-
-        return hashlib.sha256(
-            str(path).encode(
-                "utf-8"
-            )
-        ).hexdigest()[:16]
-
-
-# ============================================================
-# CHUNK TEXT
-# ============================================================
-
-def chunk_text(
-    text,
-    chunk_size=5000,
-    overlap=500
-):
-
-    text = clean_text(
-        text
+    raw = (
+        f"{path}"
+        f"|{stat.st_size}"
+        f"|{stat.st_mtime_ns}"
     )
 
-    if not text:
-        return []
+    return hashlib.sha256(
+        raw.encode("utf-8")
+    ).hexdigest()[:16]
 
-    if len(text) <= chunk_size:
-
-        return [text]
-
-    chunks = []
-
-    start = 0
-
-    total = len(text)
-
-    while start < total:
-
-        end = min(
-            start + chunk_size,
-            total
-        )
-
-        chunk = text[
-            start:end
-        ].strip()
-
-        if chunk:
-
-            chunks.append(
-                chunk
-            )
-
-        if end >= total:
-            break
-
-        start = max(
-            end - overlap,
-            start + 1
-        )
-
-    return chunks
-
-
-# ============================================================
-# OCR PAGE
-# ============================================================
 
 def ocr_page(
-    image,
-    lang="ara+msa+eng"
+    pdf_path,
+    page_number,
+    book_hash
 ):
 
+    cache_dir = (
+        OCR_CACHE_DIR /
+        book_hash
+    )
+
+    cache_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    cache_file = (
+        cache_dir /
+        f"{page_number}.txt"
+    )
+
+    # --------------------------------------------
+    # CACHE HIT
+    # --------------------------------------------
+
+    if cache_file.exists():
+
+        try:
+
+            return cache_file.read_text(
+                encoding="utf-8"
+            )
+
+        except Exception:
+            pass
+
+    # --------------------------------------------
+    # OCR
+    # --------------------------------------------
+
     try:
+
+        pages = convert_from_path(
+            str(pdf_path),
+            dpi=200,
+            first_page=page_number,
+            last_page=page_number
+        )
+
+        if not pages:
+            return ""
+
+        image = pages[0]
 
         text = pytesseract.image_to_string(
             image,
-            lang=lang
+            lang="ara+msa+eng"
         )
 
-        return clean_text(
-            text
+        text = clean_text(text)
+
+        cache_file.write_text(
+            text,
+            encoding="utf-8"
         )
+
+        return text
 
     except Exception as e:
 
         print(
             "❌ OCR ERROR:",
-            e
+            pdf_path,
+            page_number,
+            repr(e)
         )
 
         return ""
 
 
 # ============================================================
-# OCR PDF
+# LOCAL BOOK SEARCH
 # ============================================================
 
-def extract_pdf_text(
-    pdf_path,
-    book_hash
-):
+def get_local_book_metadata():
 
-    pdf_path = Path(
-        pdf_path
-    )
+    result = []
 
-    book_cache_dir = (
-        PAGE_CACHE_DIR /
-        book_hash
-    )
+    kitab_dir = Path("kitab")
 
-    book_cache_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    if not kitab_dir.exists():
 
-    try:
+        return result
 
-        print(
-            f"📖 OCR PDF: "
-            f"{pdf_path.name}"
-        )
-
-        images = convert_from_path(
-            str(pdf_path),
-            dpi=200
-        )
-
-        pages = []
-
-        total_pages = len(
-            images
-        )
-
-        for index, image in enumerate(
-            images
-        ):
-
-            page_number = index + 1
-
-            cache_file = (
-                book_cache_dir /
-                f"{page_number}.txt"
-            )
-
-            if cache_file.exists():
-
-                try:
-
-                    text = cache_file.read_text(
-                        encoding="utf-8"
-                    )
-
-                    text = clean_text(
-                        text
-                    )
-
-                    if text:
-
-                        pages.append(
-                            text
-                        )
-
-                        continue
-
-                except Exception:
-                    pass
-
-            print(
-                f"🔎 OCR PAGE "
-                f"{page_number}/{total_pages}"
-            )
-
-            text = ocr_page(
-                image
-            )
-
-            try:
-
-                cache_file.write_text(
-                    text,
-                    encoding="utf-8"
-                )
-
-            except Exception as e:
-
-                print(
-                    "⚠️ OCR CACHE ERROR:",
-                    e
-                )
-
-            if text:
-
-                pages.append(
-                    text
-                )
-
-        return "\n\n".join(
-            pages
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ PDF OCR ERROR:",
-            e
-        )
-
-        return ""
-
-
-# ============================================================
-# TXT
-# ============================================================
-
-def read_text_file(path):
-
-    try:
-
-        return clean_text(
-            Path(path).read_text(
-                encoding="utf-8",
-                errors="ignore"
-            )
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ READ TXT ERROR:",
-            e
-        )
-
-        return ""
-
-
-# ============================================================
-# BOOK TEXT
-# ============================================================
-
-def extract_book_text(
-    path,
-    book_hash
-):
-
-    path = Path(
-        path
-    )
-
-    extension = (
-        path.suffix.lower()
-    )
-
-    if extension == ".txt":
-
-        return read_text_file(
-            path
-        )
-
-    if extension == ".pdf":
-
-        return extract_pdf_text(
-            path,
-            book_hash
-        )
-
-    return ""
-
-
-# ============================================================
-# SUPABASE DELETE
-# ============================================================
-
-def delete_book_from_supabase(
-    book_hash
-):
-
-    if not supabase:
-        return False
-
-    try:
-
-        (
-            supabase
-            .table(
-                "kitab_chunks"
-            )
-            .delete()
-            .eq(
-                "book_hash",
-                book_hash
-            )
-            .execute()
-        )
-
-        print(
-            f"🗑️ Supabase data deleted: "
-            f"{book_hash}"
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "❌ DELETE SUPABASE ERROR:",
-            e
-        )
-
-        return False
-
-
-# ============================================================
-# SUPABASE INSERT
-# ============================================================
-
-def insert_chunk(
-    book_name,
-    category,
-    book_hash,
-    chunk,
-    embedding,
-    chunk_index
-):
-
-    if not supabase:
-        return False
-
-    payload = {
-
-        "book_name": book_name,
-
-        "category": category,
-
-        "book_hash": book_hash,
-
-        "content": chunk,
-
-        "embedding": embedding,
-
-        "chunk_index": chunk_index,
-    }
-
-    try:
-
-        (
-            supabase
-            .table(
-                "kitab_chunks"
-            )
-            .insert(
-                payload
-            )
-            .execute()
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "❌ SUPABASE INSERT ERROR:",
-            e
-        )
-
-        return False
-
-
-# ============================================================
-# GEMINI EMBEDDING
-# ============================================================
-
-def generate_embedding(text):
-
-    if not gemini_client:
-        return None
-
-    try:
-
-        result = (
-            gemini_client
-            .models
-            .embed_content(
-
-                model=EMBEDDING_MODEL,
-
-                contents=text,
-
-                config=types.EmbedContentConfig(
-                    output_dimensionality=3072
-                )
-            )
-        )
-
-        if not result.embeddings:
-
-            return None
-
-        return (
-            result
-            .embeddings[0]
-            .values
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ EMBEDDING ERROR:",
-            e
-        )
-
-        return None
-
-
-# ============================================================
-# PROCESS BOOK
-# ============================================================
-
-def process_book(
-    path,
-    category
-):
-
-    path = Path(
-        path
-    )
-
-    print()
-    print(
-        "=" * 60
-    )
-
-    print(
-        f"📚 PROCESS: "
-        f"{path.name}"
-    )
-
-    print(
-        f"📂 CATEGORY: "
-        f"{category}"
-    )
-
-    book_hash = get_file_hash(
-        path
-    )
-
-    print(
-        f"🔑 HASH: "
-        f"{book_hash}"
-    )
-
-    delete_book_from_supabase(
-        book_hash
-    )
-
-    text = extract_book_text(
-        path,
-        book_hash
-    )
-
-    if not text:
-
-        print(
-            f"⚠️ TIADA TEKS: "
-            f"{path.name}"
-        )
-
-        return False
-
-    chunks = chunk_text(
-        text
-    )
-
-    print(
-        f"📦 Jumlah chunks: "
-        f"{len(chunks)}"
-    )
-
-    for index, chunk in enumerate(
-        chunks
-    ):
-
-        print(
-            f"🧠 EMBEDDING "
-            f"{index + 1}-"
-            f"{len(chunks)}"
-        )
-
-        embedding = generate_embedding(
-            chunk
-        )
-
-        if not embedding:
-
-            print(
-                "⚠️ Embedding gagal"
-            )
-
-            continue
-
-        print(
-            f"💾 Supabase "
-            f"{index + 1}-"
-            f"{len(chunks)}"
-        )
-
-        success = insert_chunk(
-            book_name=path.stem,
-            category=category,
-            book_hash=book_hash,
-            chunk=chunk,
-            embedding=embedding,
-            chunk_index=index
-        )
-
-        if not success:
-
-            print(
-                f"⚠️ Gagal simpan chunk "
-                f"{index + 1}"
-            )
-
-    print(
-        f"✅ READY: "
-        f"{path.stem}"
-    )
-
-    return True
-
-
-# ============================================================
-# SYNC KITAB
-# ============================================================
-
-def sync_books():
-
-    print()
-    print(
-        "🔄 SYNC KITAB"
-    )
-    print(
-        "=" * 60
-    )
-
-    kitab_root = Path(
-        "/app/kitab"
-    )
-
-    if not kitab_root.exists():
-
-        print(
-            f"⚠️ Folder kitab tidak wujud: "
-            f"{kitab_root}"
-        )
-
-        return
-
-    extensions = {
-        ".pdf",
-        ".txt"
-    }
-
-    books = []
-
-    for path in kitab_root.rglob("*"):
+    for path in kitab_dir.rglob("*"):
 
         if not path.is_file():
             continue
 
-        if (
-            path.suffix.lower()
-            not in extensions
-        ):
+        suffix = path.suffix.lower()
+
+        if suffix not in [
+            ".pdf",
+            ".txt",
+        ]:
             continue
 
-        try:
-
-            relative = path.relative_to(
-                kitab_root
-            )
-
-            if len(relative.parts) > 1:
-
-                category = (
-                    relative.parts[0]
-                )
-
-            else:
-
-                category = "FIQH"
-
-        except Exception:
-
-            category = "FIQH"
-
-        books.append(
-            (
-                path,
-                category
-            )
+        category = (
+            path.parent.name
+            if path.parent.name
+            else "FIQH"
         )
 
-    print(
-        f"📚 Jumlah kitab: "
-        f"{len(books)}"
-    )
+        result.append(
+            {
+                "path": str(path),
+                "name": path.stem,
+                "category": category,
+            }
+        )
 
-    for path, category in books:
-
-        try:
-
-            process_book(
-                path,
-                category
-            )
-
-        except Exception as e:
-
-            print(
-                f"❌ PROCESS ERROR "
-                f"{path.name}:",
-                e
-            )
-
-    print(
-        "🏁 SYNC SELESAI"
-    )
+    return result
 
 
 # ============================================================
-# LOCAL SEARCH
+# SUPABASE LOCAL SEARCH
 # ============================================================
 
 def search_local(
@@ -1161,57 +415,188 @@ def search_local(
     limit=1
 ):
 
-    if not supabase:
+    """
+    LOCAL:
+        Maksimum 1 sumber.
+
+    Supabase RPC:
+        match_kitab_chunks
+
+    Gemini embedding hanya digunakan untuk
+    menghasilkan vector carian.
+
+    Gemini TIDAK memilih rujukan.
+    """
+
+    print()
+    print("🔎 LOCAL SEARCH")
+    print("Question:", question)
+
+    if supabase is None:
 
         print(
-            "⚠️ LOCAL SEARCH: "
-            "Supabase tiada"
+            "⚠️ LOCAL: Supabase tidak tersedia"
         )
 
         return []
 
-    embedding = generate_embedding(
-        question
-    )
+    if gemini_client is None:
 
-    if not embedding:
+        print(
+            "⚠️ LOCAL: Gemini client tidak tersedia"
+        )
 
         return []
 
     try:
 
-        result = supabase.rpc(
-            "match_kitab_chunks",
-            {
-                "query_embedding": embedding,
+        # ----------------------------------------
+        # EMBEDDING
+        # ----------------------------------------
 
-                "match_threshold": 0.20,
-
-                "match_count": 1,
-            }
-        ).execute()
-
-        rows = (
-            result.data
-            or []
+        embedding_result = (
+            gemini_client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=question,
+                config=types.EmbedContentConfig(
+                    output_dimensionality=3072
+                )
+            )
         )
 
-        # LOCAL = SATU SAHAJA
-        rows = rows[:1]
+        embeddings = (
+            embedding_result.embeddings
+            if embedding_result
+            else []
+        )
+
+        if not embeddings:
+
+            print(
+                "⚠️ LOCAL: Embedding kosong"
+            )
+
+            return []
+
+        query_embedding = (
+            embeddings[0].values
+        )
+
+        # ----------------------------------------
+        # SUPABASE RPC
+        # ----------------------------------------
+
+        response = (
+            supabase
+            .rpc(
+                "match_kitab_chunks",
+                {
+                    "query_embedding": query_embedding,
+                    "match_threshold": 0.10,
+                    "match_count": 10,
+                }
+            )
+            .execute()
+        )
+
+        rows = response.data or []
 
         print(
-            f"📚 LOCAL SOURCES: "
-            f"{len(rows)}"
+            "📦 LOCAL RAW RESULTS:",
+            len(rows)
         )
 
-        return rows
+        if not rows:
+
+            print(
+                "⚠️ LOCAL: Tiada hasil"
+            )
+
+            return []
+
+        # ----------------------------------------
+        # Ambil hanya SATU
+        # ----------------------------------------
+
+        best = rows[0]
+
+        text = (
+            best.get("content")
+            or best.get("text")
+            or best.get("chunk_text")
+            or ""
+        )
+
+        text = clean_text(text)
+
+        if not text:
+
+            print(
+                "⚠️ LOCAL: Text kosong"
+            )
+
+            return []
+
+        book = (
+            best.get("book_name")
+            or best.get("kitab")
+            or best.get("book")
+            or "Kitab tempatan"
+        )
+
+        category = (
+            best.get("category")
+            or best.get("kategori")
+            or "FIQH"
+        )
+
+        page = (
+            best.get("page")
+            or best.get("page_number")
+            or best.get("halaman")
+        )
+
+        book_hash = (
+            best.get("book_hash")
+            or ""
+        )
+
+        url = (
+            best.get("url")
+            or ""
+        )
+
+        result = {
+            "source": "local",
+            "book": book,
+            "category": category,
+            "page": page,
+            "book_hash": book_hash,
+            "text": text,
+            "url": url,
+        }
+
+        print(
+            "✅ LOCAL FOUND:",
+            book
+        )
+
+        print(
+            "📄 LOCAL TEXT:",
+            len(text),
+            "chars"
+        )
+
+        return [result][:limit]
 
     except Exception as e:
 
         print(
             "❌ LOCAL SEARCH ERROR:",
-            e
+            repr(e)
         )
+
+        traceback.print_exc()
 
         return []
 
@@ -1220,142 +605,225 @@ def search_local(
 # TURATH SEARCH
 # ============================================================
 
-def search_turath(
-    question
-):
+def search_turath(question):
 
-    comparison = (
-        is_madhhab_comparison(
-            question
-        )
-    )
+    """
+    TURATH:
 
-    mode = (
-        "comparison"
-        if comparison
-        else "normal"
-    )
+    NORMAL:
+        10 Syafie
+
+    COMPARISON:
+        10 Syafie
+        2 Hanafi
+        2 Maliki
+        2 Hanbali
+
+    Turath service yang menentukan kategori.
+    """
 
     print()
-    print(
-        "🔎 TURATH SEARCH"
+    print("🔎 TURATH SEARCH")
+    print("Question:", question)
+
+    comparison = is_madhhab_comparison(
+        question
     )
 
     print(
-        f"📌 MODE: {mode}"
+        "⚖️ COMPARISON:",
+        comparison
     )
-
-    if comparison:
-
-        print(
-            "📚 TARGET:"
-        )
-
-        print(
-            "   Syafie = 10"
-        )
-
-        print(
-            "   Hanafi = 2"
-        )
-
-        print(
-            "   Maliki = 2"
-        )
-
-        print(
-            "   Hanbali = 2"
-        )
-
-    else:
-
-        print(
-            "📚 TARGET:"
-        )
-
-        print(
-            "   Syafie = 10"
-        )
 
     try:
 
         response = requests.post(
-
             f"{TURATH_SERVICE_URL}/search",
-
             json={
-
                 "query": question,
-
                 "comparison": comparison,
-
             },
+            timeout=180,
+        )
 
-            timeout=180
+        print(
+            "🌐 TURATH HTTP:",
+            response.status_code
         )
 
         if response.status_code != 200:
 
             print(
-                "❌ TURATH HTTP ERROR:",
-                response.status_code
+                "❌ TURATH RESPONSE:",
+                response.text[:2000]
             )
-
-            try:
-
-                print(
-                    response.text[:2000]
-                )
-
-            except Exception:
-                pass
 
             return []
 
         data = response.json()
 
-        passages = (
-            data.get(
-                "passages"
+        print(
+            "📦 TURATH JSON TYPE:",
+            type(data).__name__
+        )
+
+        if isinstance(data, dict):
+
+            passages = (
+                data.get("passages")
+                or data.get("results")
+                or data.get("data")
+                or []
             )
-            or []
-        )
+
+        elif isinstance(data, list):
+
+            passages = data
+
+        else:
+
+            passages = []
 
         print(
-            f"📖 TURATH SOURCES: "
-            f"{len(passages)}"
+            "📚 TURATH RAW PASSAGES:",
+            len(passages)
         )
 
-        # Jangan potong di sini.
-        #
-        # turath_service.mjs bertanggungjawab
-        # menentukan:
-        #
-        # NORMAL
-        #   10 Syafie
-        #
-        # COMPARISON
-        #   10 Syafie
-        #   2 Hanafi
-        #   2 Maliki
-        #   2 Hanbali
+        results = []
 
-        return passages
+        for passage in passages:
 
-    except requests.exceptions.Timeout:
+            if not isinstance(
+                passage,
+                dict
+            ):
+                continue
+
+            # ------------------------------------
+            # Turath SDK fields
+            # ------------------------------------
+
+            text = (
+                passage.get("text")
+                or passage.get("content")
+                or passage.get("snippet")
+                or passage.get("snip")
+                or ""
+            )
+
+            text = clean_text(text)
+
+            if not text:
+                continue
+
+            book = (
+                passage.get("book")
+                or passage.get("book_name")
+                or passage.get("bookName")
+                or passage.get("meta")
+                or "Kitab Turath"
+            )
+
+            page = (
+                passage.get("page")
+                or passage.get("page_number")
+                or passage.get("pageNumber")
+                or passage.get("pg")
+            )
+
+            book_id = (
+                passage.get("book_id")
+                or passage.get("bookId")
+            )
+
+            author_id = (
+                passage.get("author_id")
+                or passage.get("authorId")
+            )
+
+            category_id = (
+                passage.get("cat_id")
+                or passage.get("category_id")
+                or passage.get("categoryId")
+            )
+
+            url = (
+                passage.get("url")
+                or passage.get("link")
+                or ""
+            )
+
+            # ------------------------------------
+            # Jika service tidak beri URL,
+            # bina URL berdasarkan book_id
+            # ------------------------------------
+
+            if (
+                not url
+                and book_id
+            ):
+
+                url = (
+                    "https://turath.io/book/"
+                    + str(book_id)
+                )
+
+            results.append(
+                {
+                    "source": "turath",
+                    "book": book,
+                    "category": (
+                        passage.get("category")
+                        or passage.get("category_name")
+                        or "Turath"
+                    ),
+                    "category_id": category_id,
+                    "book_id": book_id,
+                    "author_id": author_id,
+                    "page": page,
+                    "text": text,
+                    "url": url,
+                }
+            )
 
         print(
-            "❌ TURATH TIMEOUT"
+            "✅ TURATH VALID RESULTS:",
+            len(results)
         )
 
-        return []
+        # ----------------------------------------
+        # LIMIT
+        # ----------------------------------------
+
+        if comparison:
+
+            # Service sepatutnya sudah
+            # memilih 10+2+2+2.
+            #
+            # Jangan potong kepada 10 di sini,
+            # kerana comparison memang 16.
+
+            results = results[:16]
+
+        else:
+
+            results = results[:10]
+
+        print(
+            "📚 TURATH FINAL:",
+            len(results)
+        )
+
+        return results
 
     except Exception as e:
 
         print(
             "❌ TURATH SEARCH ERROR:",
-            e
+            repr(e)
         )
+
+        traceback.print_exc()
 
         return []
 
@@ -1365,110 +833,65 @@ def search_turath(
 # ============================================================
 
 def build_context(
-    local_results,
-    turath_results
+    sources
 ):
 
-    sections = []
+    if not sources:
 
-    # --------------------------------------------------------
-    # LOCAL
-    # --------------------------------------------------------
+        return ""
 
-    for index, item in enumerate(
-        local_results,
-        start=1
+    blocks = []
+
+    for i, source in enumerate(
+        sources,
+        1
     ):
 
-        content = (
-            item.get("content")
-            or item.get("text")
-            or item.get("chunk")
+        source_type = (
+            source.get("source")
             or ""
         )
 
-        if not content:
-            continue
-
-        book_name = (
-            item.get("book_name")
-            or item.get("kitab")
-            or "Kitab tempatan"
+        book = (
+            source.get("book")
+            or "Kitab"
         )
 
         category = (
-            item.get("category")
-            or ""
-        )
-
-        sections.append(
-            f"""
-[SUMBER LOCAL {index}]
-Kitab: {book_name}
-Kategori: {category}
-
-PETIKAN:
-{truncate_text(content, 6500)}
-""".strip()
-        )
-
-    # --------------------------------------------------------
-    # TURATH
-    # --------------------------------------------------------
-
-    for index, item in enumerate(
-        turath_results,
-        start=1
-    ):
-
-        content = (
-            item.get("content")
-            or item.get("text")
-            or item.get("snip")
-            or ""
-        )
-
-        if not content:
-            continue
-
-        book_name = (
-            item.get("book_name")
-            or item.get("book")
-            or "Kitab Turath"
-        )
-
-        author = (
-            item.get("author")
-            or item.get("author_name")
-            or ""
-        )
-
-        category = (
-            item.get("category")
+            source.get("category")
             or ""
         )
 
         page = (
-            item.get("page")
-            or item.get("page_number")
+            source.get("page")
             or ""
         )
 
-        sections.append(
-            f"""
-[SUMBER TURATH {index}]
-Kitab: {book_name}
-Pengarang: {author}
+        text = (
+            source.get("text")
+            or ""
+        )
+
+        if not text:
+            continue
+
+        block = f"""
+[SUMBER {i}]
+Jenis: {source_type}
+Kitab: {book}
 Kategori: {category}
 Halaman: {page}
 
-PETIKAN:
-{truncate_text(content, 6500)}
-""".strip()
+Petikan:
+{text}
+"""
+
+        blocks.append(
+            block.strip()
         )
 
     return "\n\n".join(
-        sections
+        blocks
     )
 
 
@@ -1477,132 +900,74 @@ PETIKAN:
 # ============================================================
 
 def build_references(
-    local_results,
-    turath_results
+    sources
 ):
 
-    lines = []
+    if not sources:
 
-    # --------------------------------------------------------
-    # LOCAL
-    # --------------------------------------------------------
-
-    if local_results:
-
-        lines.append(
-            "📚 *Rujukan Local*"
+        return (
+            "📚 **Rujukan:**\n"
+            "• Tiada rujukan ditemui."
         )
 
-        for index, item in enumerate(
-            local_results,
-            start=1
-        ):
+    lines = [
+        "📚 **Rujukan:**"
+    ]
 
-            book_name = (
-                item.get("book_name")
-                or item.get("kitab")
-                or "Kitab tempatan"
-            )
+    for i, source in enumerate(
+        sources,
+        1
+    ):
 
-            category = (
-                item.get("category")
-                or ""
-            )
-
-            line = (
-                f"{index}. "
-                f"{book_name}"
-            )
-
-            if category:
-
-                line += (
-                    f" — {category}"
-                )
-
-            lines.append(
-                line
-            )
-
-    # --------------------------------------------------------
-    # TURATH
-    # --------------------------------------------------------
-
-    if turath_results:
-
-        if lines:
-            lines.append("")
-
-        lines.append(
-            "📖 *Rujukan Turath*"
+        source_type = (
+            source.get("source")
+            or ""
         )
 
-        for index, item in enumerate(
-            turath_results,
-            start=1
-        ):
+        book = (
+            source.get("book")
+            or "Kitab"
+        )
 
-            book_name = (
-                item.get("book_name")
-                or item.get("book")
-                or "Kitab Turath"
+        page = (
+            source.get("page")
+            or ""
+        )
+
+        url = (
+            source.get("url")
+            or ""
+        )
+
+        if source_type == "turath":
+
+            label = "Turath"
+
+        else:
+
+            label = "Kitab tempatan"
+
+        title = book
+
+        if page:
+
+            title += (
+                f" — halaman {page}"
             )
 
-            author = (
-                item.get("author")
-                or item.get("author_name")
-                or ""
-            )
-
-            category = (
-                item.get("category")
-                or ""
-            )
-
-            page = (
-                item.get("page")
-                or item.get("page_number")
-                or ""
-            )
-
-            url = (
-                item.get("url")
-                or item.get("link")
-                or ""
-            )
-
-            line = (
-                f"{index}. "
-                f"{book_name}"
-            )
-
-            if author:
-
-                line += (
-                    f" — {author}"
-                )
-
-            if category:
-
-                line += (
-                    f" [{category}]"
-                )
-
-            if page:
-
-                line += (
-                    f" — hlm. {page}"
-                )
+        if url:
 
             lines.append(
-                line
+                f"• {i}. {label}: "
+                f"[{title}]({url})"
             )
 
-            if url:
+        else:
 
-                lines.append(
-                    f"   🔗 {url}"
-                )
+            lines.append(
+                f"• {i}. {label}: "
+                f"{title}"
+            )
 
     return "\n".join(
         lines
@@ -1618,179 +983,153 @@ def generate_answer(
     context
 ):
 
+    """
+    Gemini hanya menghuraikan.
+
+    Gemini TIDAK:
+        - mencari kitab
+        - memilih kitab
+        - mencari URL
+        - mencipta rujukan
+    """
+
     if not context:
 
-        return (
-            "⚠️ Tiada petikan sumber "
-            "ditemui untuk soalan ini."
+        print(
+            "⚠️ GEMINI: Context kosong"
         )
 
-    cached = get_cached_answer(
-        question
-    )
+        return ""
 
-    if cached:
+    if gemini_client is None:
 
         print(
-            "⚡ GEMINI CACHE HIT"
+            "⚠️ GEMINI CLIENT TIDAK ADA"
         )
 
-        return cached
-
-    if not gemini_client:
-
-        return (
-            "⚠️ *Huraian AI tidak dapat "
-            "dijana buat masa ini.*\n\n"
-            "Gemini belum dikonfigurasi."
-        )
-
-    system_instruction = """
-Anda ialah pembantu ilmu Islam untuk TanyaFiqihBot.
-
-Tugas anda HANYA menghuraikan jawapan berdasarkan
-PETIKAN SUMBER yang diberikan.
-
-PERATURAN:
-
-1. Jangan mencari rujukan sendiri.
-2. Jangan mereka-reka kitab.
-3. Jangan mereka-reka nombor halaman.
-4. Jangan menghasilkan URL.
-5. Jangan menghasilkan senarai rujukan.
-6. Rujukan telah dicari oleh sistem.
-7. Gunakan hanya maklumat daripada sumber yang diberikan.
-8. Jika sumber tidak mencukupi, nyatakan perkara itu.
-9. Jangan membuat dakwaan yang tidak disokong sumber.
-10. Untuk soalan fiqh, jelaskan berdasarkan petikan.
-11. Jika ada perbezaan mazhab, bentangkan perbezaan
-    berdasarkan sumber yang diberikan.
-12. Jawab dalam Bahasa Melayu.
-13. Jika sumber dalam Bahasa Arab, terangkan maksudnya
-    dalam Bahasa Melayu.
-14. Jangan gunakan pengetahuan luar untuk mengisi
-    maklumat yang tiada dalam sumber.
-
-Format:
-
-Jawapan:
-...
-
-Huraian:
-...
-
-Kesimpulan:
-...
-
-Jika sumber tidak mencukupi, nyatakan dengan jelas.
-"""
+        return ""
 
     prompt = f"""
-SOALAN PENGGUNA:
+Anda ialah pembantu ilmu Islam untuk TanyaFiqihBot.
+
+TUGAS ANDA:
+
+Huraikan jawapan kepada soalan berdasarkan
+PETIKAN SUMBER yang diberikan sahaja.
+
+JANGAN mencari sumber lain.
+
+JANGAN mencipta:
+- kitab
+- pengarang
+- halaman
+- URL
+- rujukan
+- dalil yang tidak terdapat dalam sumber
+
+Jika sumber tidak mencukupi,
+nyatakan dengan jujur bahawa sumber yang diberikan
+tidak mencukupi untuk membuat kesimpulan yang pasti.
+
+Soalan pengguna:
 
 {question}
 
-
-PETIKAN SUMBER:
+==================================================
+SUMBER YANG DITEMUI
+==================================================
 
 {context}
 
+==================================================
 
-Huraikan jawapan berdasarkan sumber yang diberikan.
+ARAHAN JAWAPAN:
+
+1. Jawab dalam Bahasa Melayu.
+
+2. Jika terdapat istilah Arab,
+   terangkan maksudnya dalam Bahasa Melayu.
+
+3. Jika terdapat perbezaan mazhab,
+   jelaskan perbezaan tersebut dengan jelas.
+
+4. Jangan mereka-reka.
+
+5. Jangan senaraikan rujukan.
+   Sistem akan menyediakan rujukan secara automatik.
+
+6. Jangan letakkan URL.
+
+7. Fokus kepada HURAIAN sahaja.
+
+8. Jika sumber menunjukkan pandangan tertentu,
+   nyatakan bahawa pandangan tersebut berdasarkan
+   sumber yang diberikan.
+
+Berikan jawapan yang mudah difahami.
 """
 
     try:
 
+        print()
         print(
-            "🤖 GEMINI: "
-            "GENERATE EXPLANATION"
+            "🤖 GEMINI GENERATING..."
         )
 
         response = (
-            gemini_client
-            .models
-            .generate_content(
-
+            gemini_client.models.generate_content(
                 model=LLM_MODEL,
-
                 contents=prompt,
-
                 config=types.GenerateContentConfig(
-
-                    system_instruction=(
-                        system_instruction
-                    ),
-
                     temperature=0.2,
-
                     max_output_tokens=2500,
                 )
             )
         )
 
-        answer = ""
+        answer = (
+            response.text
+            if response
+            else ""
+        )
 
-        if response:
-
-            answer = (
-                response.text
-                or ""
-            )
-
-        answer = answer.strip()
-
-        if not answer:
-
-            return (
-                "⚠️ *Huraian AI tidak dapat "
-                "dijana buat masa ini.*"
-            )
-
-        set_cached_answer(
-            question,
+        answer = clean_text(
             answer
+        )
+
+        print(
+            "✅ GEMINI ANSWER:",
+            len(answer),
+            "chars"
         )
 
         return answer
 
     except Exception as e:
 
-        error_text = str(e)
-
         print(
             "❌ GEMINI ERROR:",
-            error_text
+            repr(e)
         )
 
         if (
-            "429" in error_text
+            "429" in str(e)
             or
             "RESOURCE_EXHAUSTED"
-            in error_text
-            or
-            "quota"
-            in error_text.lower()
+            in str(e)
         ):
 
-            return (
-                "⚠️ *Huraian AI tidak dapat "
-                "dijana buat masa ini.*\n\n"
-                "Kuota Gemini telah habis "
-                "atau sementara tidak tersedia.\n\n"
-                "📚 Rujukan sumber masih "
-                "dipaparkan di bawah."
+            print(
+                "⚠️ GEMINI QUOTA HABIS"
             )
 
-        return (
-            "⚠️ *Huraian AI tidak dapat "
-            "dijana buat masa ini.*\n\n"
-            "Rujukan sumber masih "
-            "dipaparkan di bawah."
-        )
+        traceback.print_exc()
+
+        return ""
 
 
 # ============================================================
-# MAIN ANSWER
+# MAIN ANSWER ENGINE
 # ============================================================
 
 def answer_question(
@@ -1808,122 +1147,346 @@ def answer_question(
         )
 
     print()
-    print(
-        "=" * 60
-    )
+    print("=" * 70)
+    print("❓ SOALAN:")
+    print(question)
+    print("=" * 70)
 
-    print(
-        f"❓ SOALAN: "
-        f"{question}"
-    )
+    cache_key = question.lower()
 
-    comparison = (
-        is_madhhab_comparison(
-            question
-        )
-    )
+    # ========================================================
+    # CACHE
+    # ========================================================
 
-    if comparison:
+    if cache_key in ANSWER_CACHE:
 
         print(
-            "⚖️ MODE: "
-            "PERBANDINGAN MAZHAB"
+            "⚡ ANSWER CACHE HIT"
         )
 
-    else:
-
-        print(
-            "🕌 MODE: "
-            "MAZHAB SYAFIE"
+        cached = (
+            ANSWER_CACHE[
+                cache_key
+            ]
         )
 
-    # --------------------------------------------------------
-    # LOCAL = 1
-    # --------------------------------------------------------
+        return (
+            cached["answer"]
+            + "\n\n"
+            + cached["references"]
+        )
+
+    # ========================================================
+    # LOCAL
+    # ========================================================
 
     local_results = search_local(
         question,
         limit=1
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # TURATH
-    # --------------------------------------------------------
+    # ========================================================
 
     turath_results = search_turath(
         question
     )
 
-    total_sources = (
-        len(local_results)
+    # ========================================================
+    # COMBINE
+    # ========================================================
+
+    local_results = (
+        local_results[:1]
+    )
+
+    comparison = is_madhhab_comparison(
+        question
+    )
+
+    if comparison:
+
+        turath_results = (
+            turath_results[:16]
+        )
+
+    else:
+
+        turath_results = (
+            turath_results[:10]
+        )
+
+    all_sources = (
+        local_results
         +
-        len(turath_results)
-    )
-
-    print(
-        f"📦 TOTAL SOURCES: "
-        f"{total_sources}"
-    )
-
-    # --------------------------------------------------------
-    # CONTEXT
-    # --------------------------------------------------------
-
-    context = build_context(
-        local_results,
         turath_results
     )
 
-    # --------------------------------------------------------
-    # GEMINI
-    # --------------------------------------------------------
+    print()
+    print("=" * 70)
+    print("📊 SOURCE SUMMARY")
+    print(
+        "LOCAL:",
+        len(local_results)
+    )
+    print(
+        "TURATH:",
+        len(turath_results)
+    )
+    print(
+        "TOTAL:",
+        len(all_sources)
+    )
+    print(
+        "COMPARISON:",
+        comparison
+    )
+    print("=" * 70)
 
-    answer = generate_answer(
+    # ========================================================
+    # NO SOURCE
+    # ========================================================
+
+    if not all_sources:
+
+        print(
+            "⚠️ TIADA SUMBER"
+        )
+
+        return (
+            "⚠️ **Tiada rujukan ditemui.**\n\n"
+            "Saya tidak menemui kandungan kitab yang "
+            "mencukupi untuk menjawab soalan ini.\n\n"
+            "📚 **Rujukan:**\n"
+            "• Tiada rujukan ditemui."
+        )
+
+    # ========================================================
+    # REFERENCES FIRST
+    # ========================================================
+
+    references = build_references(
+        all_sources
+    )
+
+    # ========================================================
+    # CONTEXT
+    # ========================================================
+
+    context = build_context(
+        all_sources
+    )
+
+    # ========================================================
+    # GEMINI
+    # ========================================================
+
+    explanation = generate_answer(
         question,
         context
     )
 
-    # --------------------------------------------------------
-    # REFERENCES
-    # --------------------------------------------------------
+    # ========================================================
+    # GEMINI FAIL
+    # ========================================================
 
-    references = build_references(
-        local_results,
-        turath_results
-    )
+    if not explanation:
 
-    # --------------------------------------------------------
+        explanation = (
+            "⚠️ **Huraian AI tidak dapat "
+            "dihasilkan buat masa ini.**\n\n"
+            "Namun, rujukan kitab yang berkaitan "
+            "telah ditemui dan dipaparkan di bawah."
+        )
+
+    # ========================================================
     # FINAL
-    # --------------------------------------------------------
+    # ========================================================
 
-    parts = []
-
-    if answer:
-
-        parts.append(
-            answer
-        )
-
-    if references:
-
-        parts.append(
-            references
-        )
-
-    if not parts:
-
-        return (
-            "⚠️ Tiada sumber ditemui "
-            "untuk soalan ini."
-        )
-
-    return "\n\n".join(
-        parts
+    final_answer = (
+        explanation
+        + "\n\n"
+        + references
     )
+
+    # ========================================================
+    # CACHE
+    # ========================================================
+
+    ANSWER_CACHE[
+        cache_key
+    ] = {
+        "answer": explanation,
+        "references": references,
+    }
+
+    if (
+        len(ANSWER_CACHE)
+        > ANSWER_CACHE_MAX
+    ):
+
+        oldest = next(
+            iter(
+                ANSWER_CACHE
+            )
+        )
+
+        del ANSWER_CACHE[
+            oldest
+        ]
+
+    return final_answer
 
 
 # ============================================================
-# TELEGRAM START
+# TELEGRAM
+# ============================================================
+
+telegram_application = None
+
+
+async def telegram_startup():
+
+    global telegram_application
+
+    if not TELEGRAM_TOKEN:
+
+        print(
+            "❌ TELEGRAM_TOKEN MISSING"
+        )
+
+        return
+
+    try:
+
+        print()
+        print(
+            "📡 INITIALIZING TELEGRAM..."
+        )
+
+        telegram_application = (
+            Application.builder()
+            .token(TELEGRAM_TOKEN)
+            .build()
+        )
+
+        # --------------------------------------------
+        # HANDLERS
+        # --------------------------------------------
+
+        telegram_application.add_handler(
+            CommandHandler(
+                "start",
+                telegram_start
+            )
+        )
+
+        telegram_application.add_handler(
+            CommandHandler(
+                "help",
+                telegram_help
+            )
+        )
+
+        telegram_application.add_handler(
+            MessageHandler(
+                filters.TEXT
+                & ~filters.COMMAND,
+                telegram_message
+            )
+        )
+
+        # --------------------------------------------
+        # INITIALIZE
+        # --------------------------------------------
+
+        await telegram_application.initialize()
+
+        # --------------------------------------------
+        # CHECK BOT
+        # --------------------------------------------
+
+        me = (
+            await telegram_application.bot.get_me()
+        )
+
+        print(
+            "✅ TELEGRAM CONNECTED:",
+            f"@{me.username}"
+        )
+
+        # --------------------------------------------
+        # START APPLICATION
+        # --------------------------------------------
+
+        await telegram_application.start()
+
+        # --------------------------------------------
+        # START POLLING
+        # --------------------------------------------
+
+        await (
+            telegram_application
+            .updater
+            .start_polling(
+                drop_pending_updates=False
+            )
+        )
+
+        print(
+            "✅ Telegram polling started"
+        )
+
+        print(
+            "🤖 BOT:",
+            f"@{me.username}"
+        )
+
+        # --------------------------------------------
+        # KEEP ALIVE
+        # --------------------------------------------
+
+        while True:
+
+            await asyncio.sleep(
+                3600
+            )
+
+    except Exception as e:
+
+        print(
+            "❌ TELEGRAM START ERROR:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+
+def start_telegram():
+
+    print(
+        "🚀 Telegram thread starting..."
+    )
+
+    try:
+
+        asyncio.run(
+            telegram_startup()
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ TELEGRAM THREAD ERROR:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+
+# ============================================================
+# TELEGRAM /start
 # ============================================================
 
 async def telegram_start(
@@ -1931,23 +1494,42 @@ async def telegram_start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not update.message:
-        return
+    message = (
+        "🤖 **TanyaFiqihBot**\n\n"
+        "Assalamualaikum.\n\n"
+        "Saya membantu mencari rujukan "
+        "daripada kitab-kitab Islam.\n\n"
+        "📚 Fiqh\n"
+        "📖 Tauhid\n"
+        "📜 Hadis\n"
+        "📕 Tafsir\n"
+        "🕌 Sirah\n"
+        "🌿 Akhlak\n"
+        "📚 Usul Fiqh\n\n"
+        "Taip soalan anda."
+    )
 
     await update.message.reply_text(
-
-        "🤖 *TanyaFiqihBot*\n\n"
-
-        "Assalamualaikum.\n\n"
-
-        "Sila kemukakan soalan "
-        "berkaitan ilmu Islam.\n\n"
-
-        "📚 Sistem akan mencari sumber "
-        "kitab terlebih dahulu sebelum "
-        "menghasilkan huraian.",
-
+        message,
         parse_mode="Markdown"
+    )
+
+
+# ============================================================
+# TELEGRAM /help
+# ============================================================
+
+async def telegram_help(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        "Taip sahaja soalan agama anda.\n\n"
+        "Contoh:\n"
+        "• Apakah hukum membaca qunut Subuh?\n"
+        "• Bagaimana cara solat jamak?\n"
+        "• Apa perbezaan pendapat Syafie dan Hanafi?"
     )
 
 
@@ -1961,6 +1543,7 @@ async def telegram_message(
 ):
 
     if not update.message:
+
         return
 
     question = (
@@ -1969,193 +1552,194 @@ async def telegram_message(
     ).strip()
 
     if not question:
+
         return
 
-    try:
+    print()
+    print(
+        "📨 TELEGRAM QUESTION:",
+        question
+    )
 
-        await update.message.chat.send_action(
-            action="typing"
+    # --------------------------------------------
+    # Processing
+    # --------------------------------------------
+
+    processing_message = (
+        await update.message.reply_text(
+            "🔎 Sedang mencari rujukan kitab..."
         )
-
-    except Exception:
-        pass
+    )
 
     try:
 
-        answer = answer_question(
+        answer = await asyncio.to_thread(
+            answer_question,
             question
         )
+
+        # Telegram limit
+        # Pecahkan jika terlalu panjang
+
+        max_length = 3900
+
+        if len(answer) <= max_length:
+
+            await processing_message.edit_text(
+                answer,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+
+        else:
+
+            await processing_message.delete()
+
+            chunks = [
+                answer[i:i + max_length]
+                for i in range(
+                    0,
+                    len(answer),
+                    max_length
+                )
+            ]
+
+            for chunk in chunks:
+
+                await update.message.reply_text(
+                    chunk,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
 
     except Exception as e:
 
         print(
-            "❌ ANSWER ERROR:",
-            e
+            "❌ TELEGRAM MESSAGE ERROR:",
+            repr(e)
         )
 
-        answer = (
-            "⚠️ Berlaku ralat semasa "
-            "memproses soalan.\n\n"
-            "Sila cuba semula."
-        )
+        traceback.print_exc()
 
-    # Telegram limit lebih kurang 4096.
-    max_length = 3900
+        try:
 
-    if len(answer) <= max_length:
-
-        await update.message.reply_text(
-            answer,
-            disable_web_page_preview=True
-        )
-
-        return
-
-    chunks = []
-
-    start = 0
-
-    while start < len(answer):
-
-        end = min(
-            start + max_length,
-            len(answer)
-        )
-
-        if end < len(answer):
-
-            newline = answer.rfind(
-                "\n",
-                start,
-                end
+            await processing_message.edit_text(
+                "⚠️ Berlaku ralat ketika memproses soalan."
             )
 
-            if newline > start:
-
-                end = newline
-
-        chunks.append(
-            answer[start:end]
-        )
-
-        start = end
-
-    for chunk in chunks:
-
-        await update.message.reply_text(
-            chunk,
-            disable_web_page_preview=True
-        )
+        except Exception:
+            pass
 
 
 # ============================================================
-# TELEGRAM ERROR
+# KITAB SYNC
 # ============================================================
 
-async def telegram_error_handler(
-    update,
-    context
-):
+def startup_sync():
+
+    """
+    Fungsi sync kitab.
+
+    Nota:
+    Struktur ini dikekalkan supaya sistem lama
+    yang menggunakan fungsi sync_books()
+    boleh terus digunakan.
+    """
+
+    try:
+
+        print()
+        print(
+            "🔄 SYNC KITAB"
+        )
+        print("=" * 60)
+
+        # ------------------------------------------------
+        # Jika fungsi sync_books wujud dalam versi
+        # app.py lama, panggil.
+        # ------------------------------------------------
+
+        sync_function = globals().get(
+            "sync_books"
+        )
+
+        if callable(sync_function):
+
+            sync_function()
+
+        else:
+
+            print(
+                "ℹ️ Tiada sync_books() aktif."
+            )
+
+            print(
+                "ℹ️ Local search akan menggunakan "
+                "data Supabase sedia ada."
+            )
+
+    except Exception as e:
+
+        print(
+            "❌ STARTUP SYNC ERROR:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+
+# ============================================================
+# BACKGROUND SERVICES
+# ============================================================
+
+def start_background_services():
+
+    print()
+    print(
+        "=" * 60
+    )
+    print(
+        "🚀 STARTING BACKGROUND SERVICES"
+    )
+    print(
+        "=" * 60
+    )
+
+    # --------------------------------------------------------
+    # SYNC
+    # --------------------------------------------------------
+
+    sync_thread = threading.Thread(
+        target=startup_sync,
+        daemon=True,
+        name="kitab-sync"
+    )
+
+    sync_thread.start()
 
     print(
-        "❌ TELEGRAM ERROR:",
-        context.error
+        "✅ Kitab sync thread started"
+    )
+
+    # --------------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------------
+
+    telegram_thread = threading.Thread(
+        target=start_telegram,
+        daemon=True,
+        name="telegram-bot"
+    )
+
+    telegram_thread.start()
+
+    print(
+        "🚀 Telegram thread started"
     )
 
 
 # ============================================================
-# TELEGRAM STARTUP
-# ============================================================
-
-telegram_application = None
-
-
-def start_telegram():
-
-    global telegram_application
-
-    if not TELEGRAM_TOKEN:
-
-        print(
-            "⚠️ TELEGRAM_TOKEN TIADA"
-        )
-
-        return
-
-    try:
-
-        async def runner():
-
-            global telegram_application
-
-            telegram_application = (
-                Application
-                .builder()
-                .token(
-                    TELEGRAM_TOKEN
-                )
-                .build()
-            )
-
-            telegram_application.add_handler(
-                CommandHandler(
-                    "start",
-                    telegram_start
-                )
-            )
-
-            telegram_application.add_handler(
-                MessageHandler(
-                    filters.TEXT
-                    & ~filters.COMMAND,
-                    telegram_message
-                )
-            )
-
-            telegram_application.add_error_handler(
-                telegram_error_handler
-            )
-
-            await (
-                telegram_application
-                .initialize()
-            )
-
-            await (
-                telegram_application
-                .start()
-            )
-
-            await (
-                telegram_application
-                .updater
-                .start_polling()
-            )
-
-            print(
-                "✅ Telegram polling started"
-            )
-
-            while True:
-
-                await asyncio.sleep(
-                    3600
-                )
-
-        asyncio.run(
-            runner()
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ TELEGRAM START ERROR:",
-            e
-        )
-
-
-# ============================================================
-# HOME
+# HEALTH
 # ============================================================
 
 @app.route(
@@ -2164,62 +1748,23 @@ def start_telegram():
 )
 def home():
 
-    return jsonify({
+    return jsonify(
+        {
+            "status": "ok",
+            "bot": "TanyaFiqihBot",
+            "telegram": bool(
+                TELEGRAM_TOKEN
+            ),
+            "supabase": bool(
+                supabase
+            ),
+            "gemini": bool(
+                gemini_client
+            ),
+            "turath": TURATH_SERVICE_URL,
+        }
+    )
 
-        "status": "ok",
-
-        "bot": "TanyaFiqihBot",
-
-        "architecture": {
-
-            "local_sources": 1,
-
-            "turath_normal": {
-                "shafii": 10
-            },
-
-            "turath_comparison": {
-
-                "shafii": 10,
-
-                "hanafi": 2,
-
-                "maliki": 2,
-
-                "hanbali": 2
-            },
-
-            "gemini": (
-                "explanation_only"
-            )
-        },
-
-        "models": {
-
-            "llm": LLM_MODEL,
-
-            "embedding": EMBEDDING_MODEL
-        },
-
-        "embedding_dimension": 3072,
-
-        "turath_service": (
-            TURATH_SERVICE_URL
-        ),
-
-        "ocr_workers": OCR_WORKERS,
-
-        "data_dir": DATA_DIR,
-
-        "cache_size": len(
-            ANSWER_CACHE
-        )
-    })
-
-
-# ============================================================
-# HEALTH
-# ============================================================
 
 @app.route(
     "/health",
@@ -2227,70 +1772,25 @@ def home():
 )
 def health():
 
-    turath_ok = False
-
-    try:
-
-        response = requests.get(
-            f"{TURATH_SERVICE_URL}/health",
-            timeout=5
-        )
-
-        turath_ok = (
-            response.status_code == 200
-        )
-
-    except Exception:
-        turath_ok = False
-
-    return jsonify({
-
-        "status": "healthy",
-
-        "supabase": bool(
-            supabase
-        ),
-
-        "gemini": bool(
-            gemini_client
-        ),
-
-        "telegram": bool(
-            TELEGRAM_TOKEN
-        ),
-
-        "turath_service": turath_ok,
-
-        "turath_service_url": (
-            TURATH_SERVICE_URL
-        ),
-
-        "local_references": 1,
-
-        "turath_normal": {
-
-            "shafii": 10
-        },
-
-        "turath_comparison": {
-
-            "shafii": 10,
-
-            "hanafi": 2,
-
-            "maliki": 2,
-
-            "hanbali": 2
-        },
-
-        "cache_size": len(
-            ANSWER_CACHE
-        )
-    })
+    return jsonify(
+        {
+            "status": "healthy",
+            "telegram_token": bool(
+                TELEGRAM_TOKEN
+            ),
+            "supabase": bool(
+                supabase
+            ),
+            "gemini": bool(
+                gemini_client
+            ),
+            "turath_service": TURATH_SERVICE_URL,
+        }
+    )
 
 
 # ============================================================
-# ASK API
+# WEB ASK
 # ============================================================
 
 @app.route(
@@ -2311,9 +1811,7 @@ def ask():
             )
 
             question = (
-                data.get(
-                    "question"
-                )
+                data.get("question")
                 or ""
             )
 
@@ -2321,140 +1819,70 @@ def ask():
 
             question = (
                 request.args.get(
-                    "q",
+                    "question",
                     ""
                 )
             )
 
-        question = normalize_question(
-            question
-        )
+        question = question.strip()
 
         if not question:
 
-            return jsonify({
-
-                "ok": False,
-
-                "error": (
+            return jsonify(
+                {
+                    "error":
                     "Sila masukkan soalan."
-                )
-
-            }), 400
+                }
+            ), 400
 
         answer = answer_question(
             question
         )
 
-        return jsonify({
-
-            "ok": True,
-
-            "question": question,
-
-            "comparison": (
-                is_madhhab_comparison(
-                    question
-                )
-            ),
-
-            "answer": answer
-
-        })
+        return jsonify(
+            {
+                "question": question,
+                "answer": answer,
+            }
+        )
 
     except Exception as e:
 
         print(
             "❌ /ask ERROR:",
-            e
+            repr(e)
         )
 
-        return jsonify({
+        traceback.print_exc()
 
-            "ok": False,
-
-            "error": str(e)
-
-        }), 500
-
-
-# ============================================================
-# STARTUP SYNC
-# ============================================================
-
-def startup_sync():
-
-    try:
-
-        sync_books()
-
-    except Exception as e:
-
-        print(
-            "❌ STARTUP SYNC ERROR:",
-            e
-        )
+        return jsonify(
+            {
+                "error": str(e)
+            }
+        ), 500
 
 
 # ============================================================
-# MAIN
+# START SERVICES WHEN GUNICORN IMPORTS app.py
 # ============================================================
 
-if __name__ == "__main__":
+start_background_services()
 
-    print()
-    print(
-        "=" * 60
-    )
 
-    print(
-        "🤖 TanyaFiqihBot STARTING"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    # --------------------------------------------------------
-    # SYNC KITAB
-    # --------------------------------------------------------
-
-    sync_thread = threading.Thread(
-        target=startup_sync,
-        daemon=True
-    )
-
-    sync_thread.start()
-
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
-
-    telegram_thread = threading.Thread(
-        target=start_telegram,
-        daemon=True
-    )
-
-    telegram_thread.start()
-
-    # --------------------------------------------------------
-    # FLASK
-    # --------------------------------------------------------
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
-
-    print(
-        f"🌐 Flask starting "
-        f"on port {port}"
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        threaded=True
-    )
+# ============================================================
+# IMPORTANT
+# ============================================================
+#
+# JANGAN letakkan:
+#
+# if __name__ == "__main__":
+#     app.run(...)
+#
+# Render menggunakan Gunicorn:
+#
+# gunicorn ... app:app
+#
+# Jadi background service perlu dimulakan
+# ketika module ini diimport.
+#
+# ============================================================
