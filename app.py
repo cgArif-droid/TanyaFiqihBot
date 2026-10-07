@@ -3,17 +3,17 @@ import re
 import json
 import time
 import hashlib
+import asyncio
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-import numpy as np
+import pytesseract
 
 from flask import Flask, jsonify
 
 from pdf2image import convert_from_path
-import pytesseract
 
 from supabase import create_client
 
@@ -41,17 +41,11 @@ KITAB_DIR = Path(
     os.getenv("KITAB_DIR", "/app/kitab")
 )
 
-EXTRACTED_DIR = (
-    DATA_DIR / "extracted_text"
-)
+EXTRACTED_DIR = DATA_DIR / "extracted_text"
 
-PAGE_CACHE_DIR = (
-    EXTRACTED_DIR / "pages"
-)
+PAGE_CACHE_DIR = EXTRACTED_DIR / "pages"
 
-MANIFEST_FILE = (
-    DATA_DIR / "manifest.json"
-)
+MANIFEST_FILE = DATA_DIR / "manifest.json"
 
 OCR_WORKERS = int(
     os.getenv("OCR_WORKERS", "1")
@@ -136,25 +130,25 @@ def normalize_category(value: str) -> str:
     aliases = {
         "USUL": "USUL FIQH",
         "USULFIQH": "USUL FIQH",
-        "USUL FIQH": "USUL FIQH",
         "HADITH": "HADIS",
         "AQIDAH": "TAUHID",
         "AKIDAH": "TAUHID",
     }
 
-    return aliases.get(
-        value,
-        value if value in CATEGORIES else "FIQH"
-    )
+    if value in aliases:
+        return aliases[value]
+
+    if value in CATEGORIES:
+        return value
+
+    return "FIQH"
 
 
 def detect_category_from_path(path: Path) -> str:
 
     try:
 
-        relative = path.relative_to(
-            KITAB_DIR
-        )
+        relative = path.relative_to(KITAB_DIR)
 
         if len(relative.parts) >= 2:
 
@@ -172,25 +166,35 @@ def detect_category_from_path(path: Path) -> str:
 # DIRECTORIES
 # ============================================================
 
-for directory in [
-    DATA_DIR,
-    EXTRACTED_DIR,
-    PAGE_CACHE_DIR,
-]:
+DATA_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
 
-    directory.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+EXTRACTED_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+PAGE_CACHE_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+
+# ============================================================
+# FLASK
+# ============================================================
+
+app = Flask(__name__)
 
 
 # ============================================================
 # CLIENTS
 # ============================================================
 
-app = Flask(__name__)
-
 supabase = None
+
 gemini_model = None
 
 
@@ -203,7 +207,9 @@ if SUPABASE_URL and SUPABASE_KEY:
             SUPABASE_KEY
         )
 
-        print("✅ Supabase connected")
+        print(
+            "✅ Supabase connected"
+        )
 
     except Exception as error:
 
@@ -238,7 +244,7 @@ if GOOGLE_API_KEY:
 
 
 # ============================================================
-# BASIC HELPERS
+# GENERAL HELPERS
 # ============================================================
 
 def clean_text(value: Any) -> str:
@@ -280,9 +286,7 @@ def sha256_file(path: Path) -> str:
 
     hasher = hashlib.sha256()
 
-    with path.open(
-        "rb"
-    ) as file:
+    with path.open("rb") as file:
 
         while True:
 
@@ -311,7 +315,12 @@ def load_manifest() -> Dict[str, Any]:
             )
         )
 
-    except Exception:
+    except Exception as error:
+
+        print(
+            "⚠️ Manifest read error:",
+            error
+        )
 
         return {}
 
@@ -320,18 +329,27 @@ def save_manifest(
     manifest: Dict[str, Any]
 ):
 
-    MANIFEST_FILE.write_text(
-        json.dumps(
-            manifest,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
+    try:
+
+        MANIFEST_FILE.write_text(
+            json.dumps(
+                manifest,
+                ensure_ascii=False,
+                indent=2
+            ),
+            encoding="utf-8"
+        )
+
+    except Exception as error:
+
+        print(
+            "❌ Manifest save error:",
+            error
+        )
 
 
 # ============================================================
-# PDF / TXT EXTRACTION
+# PDF / TXT
 # ============================================================
 
 def extract_txt(
@@ -374,41 +392,52 @@ def ocr_pdf(
     except Exception as error:
 
         print(
-            f"❌ PDF IMAGE ERROR: {error}"
+            "❌ PDF conversion error:",
+            error
         )
 
         return ""
 
+    book_hash = hashlib.sha256(
+        str(path).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:16]
+
+    cache_dir = (
+        PAGE_CACHE_DIR
+        / book_hash
+    )
+
+    cache_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
     pages = []
 
-    for index, image in enumerate(
+    for page_number, image in enumerate(
         images,
         start=1
     ):
 
-        cache_dir = (
-            PAGE_CACHE_DIR
-            / hashlib.sha256(
-                str(path).encode()
-            ).hexdigest()[:16]
-        )
-
-        cache_dir.mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
         cache_file = (
             cache_dir
-            / f"{index}.txt"
+            / f"{page_number}.txt"
         )
 
         if cache_file.exists():
 
-            text = cache_file.read_text(
-                encoding="utf-8",
-                errors="ignore"
-            )
+            try:
+
+                text = cache_file.read_text(
+                    encoding="utf-8",
+                    errors="ignore"
+                )
+
+            except Exception:
+
+                text = ""
 
         else:
 
@@ -422,19 +451,28 @@ def ocr_pdf(
             except Exception as error:
 
                 print(
-                    f"❌ OCR page {index}:",
+                    f"❌ OCR PAGE {page_number}:",
                     error
                 )
 
                 text = ""
 
-            cache_file.write_text(
-                text,
-                encoding="utf-8"
-            )
+            try:
+
+                cache_file.write_text(
+                    text,
+                    encoding="utf-8"
+                )
+
+            except Exception as error:
+
+                print(
+                    "⚠️ OCR cache error:",
+                    error
+                )
 
         pages.append(
-            f"\n\n[PAGE {index}]\n{text}"
+            f"\n\n[PAGE {page_number}]\n{text}"
         )
 
     return "".join(pages)
@@ -507,6 +545,9 @@ def embed_text(
     text: str
 ) -> Optional[List[float]]:
 
+    if not GOOGLE_API_KEY:
+        return None
+
     try:
 
         result = genai.embed_content(
@@ -520,6 +561,7 @@ def embed_text(
         )
 
         if embedding:
+
             return embedding
 
     except Exception as error:
@@ -560,7 +602,7 @@ def discover_books() -> List[Dict[str, Any]]:
     if not KITAB_DIR.exists():
 
         print(
-            f"⚠️ KITAB DIR NOT FOUND: {KITAB_DIR}"
+            f"⚠️ Kitab directory tidak wujud: {KITAB_DIR}"
         )
 
         return books
@@ -576,13 +618,9 @@ def discover_books() -> List[Dict[str, Any]]:
         ]:
             continue
 
-        category = detect_category_from_path(
-            path
-        )
-
         books.append({
             "path": path,
-            "category": category,
+            "category": detect_category_from_path(path),
             "name": path.stem
         })
 
@@ -602,16 +640,12 @@ def delete_book_chunks(
 
     try:
 
-        result = (
-            supabase
-            .table("kitab_chunks")
-            .delete()
-            .eq(
-                "book_hash",
-                book_hash
-            )
-            .execute()
-        )
+        supabase.table(
+            "kitab_chunks"
+        ).delete().eq(
+            "book_hash",
+            book_hash
+        ).execute()
 
         print(
             f"🗑️ Supabase data deleted: {book_hash}"
@@ -652,9 +686,7 @@ def sync_books():
 
         try:
 
-            book_hash = sha256_file(path)[
-                :16
-            ]
+            book_hash = sha256_file(path)[:16]
 
         except Exception as error:
 
@@ -667,10 +699,14 @@ def sync_books():
 
         manifest_key = str(path)
 
-        old_hash = manifest.get(
+        old_entry = manifest.get(
             manifest_key,
             {}
-        ).get("hash")
+        )
+
+        old_hash = old_entry.get(
+            "hash"
+        )
 
         if old_hash == book_hash:
 
@@ -734,8 +770,9 @@ def sync_books():
 
             print(
                 f"🧠 EMBEDDING "
-                f"{start + 1}-{start + len(batch)}"
-                f"/{len(chunks)}"
+                f"{start + 1}-"
+                f"{start + len(batch)}/"
+                f"{len(chunks)}"
             )
 
             embeddings = embed_batch(
@@ -758,7 +795,6 @@ def sync_books():
                     continue
 
                 rows.append({
-
                     "book_hash":
                         book_hash,
 
@@ -776,19 +812,20 @@ def sync_books():
 
                     "embedding":
                         embedding
-
                 })
 
-            if supabase and rows:
+            if not rows:
+                continue
+
+            if supabase:
 
                 try:
 
-                    (
-                        supabase
-                        .table("kitab_chunks")
-                        .insert(rows)
-                        .execute()
-                    )
+                    supabase.table(
+                        "kitab_chunks"
+                    ).insert(
+                        rows
+                    ).execute()
 
                     print(
                         f"💾 Supabase "
@@ -803,10 +840,7 @@ def sync_books():
                         error
                     )
 
-        manifest[
-            manifest_key
-        ] = {
-
+        manifest[manifest_key] = {
             "hash":
                 book_hash,
 
@@ -818,7 +852,6 @@ def sync_books():
 
             "updated":
                 int(time.time())
-
         }
 
         save_manifest(
@@ -835,7 +868,7 @@ def sync_books():
 
 
 # ============================================================
-# LOCAL SEARCH
+# LOCAL SUPABASE SEARCH
 # ============================================================
 
 def search_supabase(
@@ -847,11 +880,11 @@ def search_supabase(
 
         return []
 
-    query_embedding = embed_text(
+    embedding = embed_text(
         question
     )
 
-    if not query_embedding:
+    if not embedding:
 
         return []
 
@@ -861,7 +894,7 @@ def search_supabase(
             "match_kitab_chunks",
             {
                 "query_embedding":
-                    query_embedding,
+                    embedding,
 
                 "match_threshold":
                     0.15,
@@ -873,22 +906,42 @@ def search_supabase(
 
         rows = result.data or []
 
-        passages = []
+        results = []
 
         for row in rows:
 
-            passages.append({
+            content = clean_text(
+                row.get(
+                    "content",
+                    ""
+                )
+            )
+
+            if not content:
+                continue
+
+            score = row.get(
+                "similarity",
+                row.get(
+                    "score",
+                    0
+                )
+            )
+
+            try:
+                score = float(
+                    score or 0
+                )
+            except Exception:
+                score = 0.0
+
+            results.append({
 
                 "source_type":
                     "local",
 
                 "content":
-                    clean_text(
-                        row.get(
-                            "content",
-                            ""
-                        )
-                    ),
+                    content,
 
                 "kitab_name":
                     row.get(
@@ -903,16 +956,7 @@ def search_supabase(
                     ),
 
                 "score":
-                    float(
-                        row.get(
-                            "similarity",
-                            row.get(
-                                "score",
-                                0
-                            )
-                        )
-                        or 0
-                    ),
+                    score,
 
                 "book_hash":
                     row.get(
@@ -923,10 +967,9 @@ def search_supabase(
                     row.get(
                         "chunk_index"
                     )
-
             })
 
-        return passages
+        return results
 
     except Exception as error:
 
@@ -939,7 +982,7 @@ def search_supabase(
 
 
 # ============================================================
-# TURATH HTTP
+# TURATH REQUEST
 # ============================================================
 
 def turath_request(
@@ -954,9 +997,7 @@ def turath_request(
     )
 
     print(
-        "🌐 TURATH REQUEST:",
-        url,
-        params
+        f"🌐 TURATH REQUEST: {url}"
     )
 
     try:
@@ -982,76 +1023,445 @@ def turath_request(
 
 
 # ============================================================
-# TURATH QUERY
+# BM -> ARABIC SEARCH TERMS
+# ============================================================
+
+DIRECT_ARABIC_TERMS = {
+
+    "mandi": [
+        "غسل",
+        "الاغتسال",
+        "غسل الجنابة",
+        "غسل الحيض",
+        "الطهارة"
+    ],
+
+    "mandi wajib": [
+        "غسل الجنابة",
+        "الاغتسال",
+        "الغسل",
+        "الطهارة"
+    ],
+
+    "mandi junub": [
+        "غسل الجنابة",
+        "الجنابة",
+        "الاغتسال"
+    ],
+
+    "mandi janabah": [
+        "غسل الجنابة",
+        "الجنابة",
+        "الاغتسال"
+    ],
+
+    "wuduk": [
+        "الوضوء",
+        "وضوء",
+        "الطهارة"
+    ],
+
+    "wudhu": [
+        "الوضوء",
+        "وضوء",
+        "الطهارة"
+    ],
+
+    "solat": [
+        "الصلاة",
+        "الصلوة"
+    ],
+
+    "sembahyang": [
+        "الصلاة",
+        "الصلوة"
+    ],
+
+    "puasa": [
+        "الصيام",
+        "الصوم"
+    ],
+
+    "zakat": [
+        "الزكاة"
+    ],
+
+    "haji": [
+        "الحج"
+    ],
+
+    "umrah": [
+        "العمرة"
+    ],
+
+    "najis": [
+        "النجاسة",
+        "النجس"
+    ],
+
+    "hadas": [
+        "الحدث",
+        "الطهارة"
+    ],
+
+    "aurat": [
+        "العورة"
+    ],
+
+    "tayammum": [
+        "التيمم"
+    ],
+
+    "haid": [
+        "الحيض"
+    ],
+
+    "nifas": [
+        "النفاس"
+    ],
+
+    "istihadah": [
+        "الاستحاضة"
+    ],
+
+    "azan": [
+        "الأذان"
+    ],
+
+    "iqamah": [
+        "الإقامة"
+    ],
+
+    "nikah": [
+        "النكاح",
+        "الزواج"
+    ],
+
+    "kahwin": [
+        "النكاح",
+        "الزواج"
+    ],
+
+    "cerai": [
+        "الطلاق"
+    ],
+
+    "talak": [
+        "الطلاق"
+    ],
+
+    "riba": [
+        "الربا"
+    ],
+
+    "sedekah": [
+        "الصدقة"
+    ],
+
+    "wakaf": [
+        "الوقف"
+    ],
+
+    "wasiat": [
+        "الوصية"
+    ],
+
+    "faraid": [
+        "الفرائض",
+        "الميراث"
+    ],
+
+    "waris": [
+        "الميراث",
+        "الوارث"
+    ],
+
+    "hutang": [
+        "الدين",
+        "الديون"
+    ],
+
+    "jual beli": [
+        "البيع",
+        "الشراء"
+    ],
+
+    "quran": [
+        "القرآن"
+    ],
+
+    "al quran": [
+        "القرآن"
+    ],
+
+    "hadis": [
+        "الحديث"
+    ],
+
+    "hadith": [
+        "الحديث"
+    ]
+}
+
+
+def build_turath_queries(
+    question: str
+) -> List[str]:
+
+    q = clean_text(
+        question
+    ).lower()
+
+    queries = []
+
+    if q in DIRECT_ARABIC_TERMS:
+
+        queries.extend(
+            DIRECT_ARABIC_TERMS[q]
+        )
+
+    else:
+
+        keyword_map = [
+            ("mandi", "الغسل"),
+            ("junub", "الجنابة"),
+            ("janabah", "الجنابة"),
+            ("wuduk", "الوضوء"),
+            ("wudhu", "الوضوء"),
+            ("solat", "الصلاة"),
+            ("sembahyang", "الصلاة"),
+            ("puasa", "الصيام"),
+            ("zakat", "الزكاة"),
+            ("haji", "الحج"),
+            ("umrah", "العمرة"),
+            ("najis", "النجاسة"),
+            ("hadas", "الحدث"),
+            ("aurat", "العورة"),
+            ("tayammum", "التيمم"),
+            ("haid", "الحيض"),
+            ("nifas", "النفاس"),
+            ("istihadah", "الاستحاضة"),
+            ("azan", "الأذان"),
+            ("iqamah", "الإقامة"),
+            ("nikah", "النكاح"),
+            ("kahwin", "الزواج"),
+            ("cerai", "الطلاق"),
+            ("talak", "الطلاق"),
+            ("riba", "الربا"),
+            ("sedekah", "الصدقة"),
+            ("wakaf", "الوقف"),
+            ("wasiat", "الوصية"),
+            ("faraid", "الفرائض"),
+            ("waris", "الميراث"),
+            ("hutang", "الدين"),
+            ("jual beli", "البيع"),
+            ("hadis", "الحديث"),
+            ("hadith", "الحديث"),
+            ("quran", "القرآن"),
+        ]
+
+        for keyword, arabic in keyword_map:
+
+            if keyword in q:
+
+                if arabic not in queries:
+
+                    queries.append(
+                        arabic
+                    )
+
+    if not queries:
+
+        queries.append(
+            question
+        )
+
+    unique = []
+
+    for item in queries:
+
+        item = clean_text(
+            item
+        )
+
+        if item and item not in unique:
+
+            unique.append(
+                item
+            )
+
+    return unique[:6]
+
+
+# ============================================================
+# TURATH SEARCH
 # ============================================================
 
 def turath_search(
     question: str,
     limit: int = TURATH_SEARCH_K
-) -> Dict[str, Any]:
+) -> List[Dict[str, Any]]:
 
-    result = turath_request(
-        "/search",
-        {
-            "q":
-                question[:500],
-
-            "limit":
-                limit
-        }
-    )
-
-    if not result:
-
-        return {
-            "passages": [],
-            "candidates": []
-        }
-
-    passages = result.get(
-        "passages",
-        []
-    )
-
-    candidates = result.get(
-        "candidates",
-        []
+    queries = build_turath_queries(
+        question
     )
 
     print(
-        "📊 TURATH COUNT:",
-        result.get(
+        f"🌐 TURATH QUERIES: "
+        f"{' | '.join(queries)}"
+    )
+
+    all_passages = []
+
+    seen = set()
+
+    for query in queries:
+
+        print(
+            f"🔎 TURATH SEARCH: {query}"
+        )
+
+        result = turath_request(
+            "/search",
+            {
+                "q":
+                    query[:500],
+
+                "limit":
+                    limit
+            }
+        )
+
+        if not result:
+            continue
+
+        count = result.get(
             "count",
             0
         )
+
+        data = result.get(
+            "passages",
+            []
+        )
+
+        if not data:
+
+            raw_result = result.get(
+                "result",
+                {}
+            )
+
+            data = raw_result.get(
+                "data",
+                []
+            ) if isinstance(
+                raw_result,
+                dict
+            ) else []
+
+        print(
+            f"📊 TURATH "
+            f'"{query}" COUNT: {count}'
+        )
+
+        print(
+            f"📊 TURATH "
+            f'"{query}" DATA: {len(data)}'
+        )
+
+        for item in data:
+
+            if not isinstance(
+                item,
+                dict
+            ):
+                continue
+
+            normalized = normalize_turath(
+                item
+            )
+
+            if not normalized:
+                continue
+
+            normalized[
+                "matched_query"
+            ] = query
+
+            key = hashlib.md5(
+                (
+                    str(
+                        normalized.get(
+                            "book_id"
+                        )
+                    )
+                    + "|"
+                    +
+                    str(
+                        normalized.get(
+                            "page"
+                        )
+                    )
+                    + "|"
+                    +
+                    normalized.get(
+                        "content",
+                        ""
+                    )[:1500]
+                ).encode(
+                    "utf-8",
+                    errors="ignore"
+                )
+            ).hexdigest()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            all_passages.append(
+                normalized
+            )
+
+        if len(all_passages) >= limit:
+
+            break
+
+    final = all_passages[:limit]
+
+    print(
+        f"📖 TURATH DIRECT PASSAGES: "
+        f"{len(final)}"
     )
 
     print(
-        "📖 TURATH DIRECT PASSAGES:",
-        len(passages)
+        f"📚 TURATH FINAL: "
+        f"{len(final)} passages"
     )
 
-    print(
-        "📚 TURATH CANDIDATES:",
-        len(candidates)
-    )
-
-    return {
-        "passages":
-            passages,
-
-        "candidates":
-            candidates
-    }
+    return final
 
 
 # ============================================================
-# TURATH NORMALIZATION
+# NORMALIZE TURATH
 # ============================================================
 
-def normalize_turath_passage(
+def normalize_turath(
     item: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
+
+    meta = item.get(
+        "meta",
+        {}
+    )
+
+    if not isinstance(
+        meta,
+        dict
+    ):
+
+        meta = {}
 
     content = clean_text(
         item.get(
@@ -1059,24 +1469,26 @@ def normalize_turath_passage(
             item.get(
                 "text",
                 item.get(
-                    "snippet",
-                    ""
+                    "snip",
+                    item.get(
+                        "snippet",
+                        ""
+                    )
                 )
             )
         )
     )
 
     if not content:
-
         return None
 
     kitab_name = clean_text(
         item.get(
             "kitab_name",
-            item.get(
+            meta.get(
                 "book_name",
                 item.get(
-                    "title",
+                    "book_name",
                     "Turath"
                 )
             )
@@ -1086,23 +1498,39 @@ def normalize_turath_passage(
     author = clean_text(
         item.get(
             "author",
-            item.get(
+            meta.get(
                 "author_name",
-                ""
+                item.get(
+                    "author_name",
+                    ""
+                )
             )
         )
     )
 
+    book_id = item.get(
+        "book_id"
+    )
+
     page = item.get(
-        "page"
+        "page",
+        meta.get(
+            "page"
+        )
     )
 
     page_id = item.get(
-        "page_id"
+        "page_id",
+        meta.get(
+            "page_id"
+        )
     )
 
-    book_id = item.get(
-        "book_id"
+    volume = item.get(
+        "vol",
+        meta.get(
+            "vol"
+        )
     )
 
     url = item.get(
@@ -1112,8 +1540,8 @@ def normalize_turath_passage(
     if not url and book_id:
 
         url = (
-            f"https://app.turath.io/book/"
-            f"{book_id}"
+            "https://app.turath.io/book/"
+            + str(book_id)
         )
 
     return {
@@ -1130,42 +1558,34 @@ def normalize_turath_passage(
         "author":
             author,
 
+        "book_id":
+            book_id,
+
         "page":
             page,
 
         "page_id":
             page_id,
 
-        "book_id":
-            book_id,
-
         "vol":
-            item.get(
-                "vol"
-            ),
+            volume,
 
         "url":
             url,
 
         "score":
-            0.0,
-
-        "matched_query":
-            item.get(
-                "matched_query"
-            )
-
+            0.0
     }
 
 
 # ============================================================
-# KEYWORD SCORING
+# KEYWORD SCORE
 # ============================================================
 
-BM_STOPWORDS = {
+STOPWORDS = {
     "apa",
-    "adakah",
     "apakah",
+    "adakah",
     "yang",
     "dan",
     "atau",
@@ -1179,8 +1599,11 @@ BM_STOPWORDS = {
     "itu",
     "ini",
     "saya",
+    "kami",
+    "kita",
     "nak",
     "mahu",
+    "ingin",
     "boleh",
     "kah",
     "nya",
@@ -1191,10 +1614,11 @@ BM_STOPWORDS = {
     "kalau",
     "jika",
     "bila",
+    "adalah",
 }
 
 
-def tokenize_malay(
+def tokenize_question(
     text: str
 ) -> List[str]:
 
@@ -1208,8 +1632,8 @@ def tokenize_malay(
     return [
         word
         for word in words
-        if word not in BM_STOPWORDS
-        and len(word) >= 3
+        if len(word) >= 3
+        and word not in STOPWORDS
     ]
 
 
@@ -1218,12 +1642,11 @@ def keyword_score(
     content: str
 ) -> float:
 
-    question_words = tokenize_malay(
+    question_words = tokenize_question(
         question
     )
 
     if not question_words:
-
         return 0.0
 
     content_lower = content.lower()
@@ -1236,64 +1659,67 @@ def keyword_score(
 
             matched += 1
 
-    return matched / len(
-        question_words
+    return (
+        matched
+        /
+        len(question_words)
     )
 
 
 # ============================================================
-# TURATH SCORE
+# TURATH RANK SCORE
 # ============================================================
 
-def turath_score(
+def calculate_turath_score(
     question: str,
-    passage: Dict[str, Any]
+    item: Dict[str, Any]
 ) -> float:
 
-    content = passage.get(
+    score = 0.50
+
+    content = item.get(
         "content",
         ""
     )
-
-    score = 0.0
-
-    /*
-    Turath search sudah melakukan
-    relevance ranking sendiri.
-    */
-
-    score += 0.55
 
     keyword = keyword_score(
         question,
         content
     )
 
-    score += keyword * 0.20
+    score += (
+        keyword * 0.20
+    )
 
-    if passage.get(
-        "kitab_name"
-    ):
-
-        score += 0.05
-
-    if passage.get(
-        "author"
-    ):
-
-        score += 0.05
-
-    if passage.get(
-        "page"
-    ) is not None:
-
-        score += 0.05
-
-    if passage.get(
+    if item.get(
         "book_id"
     ):
 
         score += 0.10
+
+    if item.get(
+        "page"
+    ) is not None:
+
+        score += 0.08
+
+    if item.get(
+        "kitab_name"
+    ):
+
+        score += 0.04
+
+    if item.get(
+        "author"
+    ):
+
+        score += 0.04
+
+    if item.get(
+        "matched_query"
+    ):
+
+        score += 0.04
 
     return min(
         score,
@@ -1305,7 +1731,7 @@ def turath_score(
 # HYBRID RANKING
 # ============================================================
 
-def rank_hybrid_sources(
+def rank_sources(
     question: str,
     local_results: List[Dict[str, Any]],
     turath_results: List[Dict[str, Any]],
@@ -1314,9 +1740,9 @@ def rank_hybrid_sources(
 
     ranked = []
 
-    /*
-    LOCAL
-    */
+    # --------------------------------------------------------
+    # LOCAL
+    # --------------------------------------------------------
 
     for item in local_results:
 
@@ -1330,7 +1756,7 @@ def rank_hybrid_sources(
         if not content:
             continue
 
-        similarity = float(
+        vector_score = float(
             item.get(
                 "score",
                 0
@@ -1338,19 +1764,21 @@ def rank_hybrid_sources(
             or 0
         )
 
+        vector_score = max(
+            0.0,
+            min(
+                vector_score,
+                1.0
+            )
+        )
+
         keyword = keyword_score(
             question,
             content
         )
 
-        /*
-        Local:
-        embedding = 70%
-        keyword = 30%
-        */
-
         final_score = (
-            similarity * 0.70
+            vector_score * 0.70
             +
             keyword * 0.30
         )
@@ -1362,40 +1790,37 @@ def rank_hybrid_sources(
             "score":
                 final_score,
 
-            "ranking":
+            "ranking_source":
                 "local"
-
         })
 
 
-    /*
-    TURATH
-    */
+    # --------------------------------------------------------
+    # TURATH
+    # --------------------------------------------------------
 
-    for raw in turath_results:
+    for item in turath_results:
 
-        item = normalize_turath_passage(
-            raw
-        )
-
-        if not item:
-            continue
-
-        item["score"] = turath_score(
+        score = calculate_turath_score(
             question,
             item
         )
 
-        item["ranking"] = "turath"
+        ranked.append({
 
-        ranked.append(
-            item
-        )
+            **item,
+
+            "score":
+                score,
+
+            "ranking_source":
+                "turath"
+        })
 
 
-    /*
-    REMOVE DUPLICATE CONTENT
-    */
+    # --------------------------------------------------------
+    # DEDUPLICATE
+    # --------------------------------------------------------
 
     unique = {}
 
@@ -1409,7 +1834,7 @@ def rank_hybrid_sources(
         )
 
         key = hashlib.md5(
-            content[:2000].encode(
+            content[:2500].encode(
                 "utf-8",
                 errors="ignore"
             )
@@ -1421,10 +1846,14 @@ def rank_hybrid_sources(
 
         else:
 
-            if (
-                item["score"]
-                >
-                unique[key]["score"]
+            existing = unique[key]
+
+            if item.get(
+                "score",
+                0
+            ) > existing.get(
+                "score",
+                0
             ):
 
                 unique[key] = item
@@ -1435,34 +1864,32 @@ def rank_hybrid_sources(
     )
 
 
-    /*
-    SORT
-    */
+    # --------------------------------------------------------
+    # SORT
+    # --------------------------------------------------------
 
     ranked.sort(
         key=lambda item:
-            item.get(
-                "score",
-                0
+            float(
+                item.get(
+                    "score",
+                    0
+                )
+                or 0
             ),
         reverse=True
     )
 
 
-    /*
-    FINAL
-    */
-
     return ranked[:limit]
 
 
 # ============================================================
-# FORMAT SOURCE
+# SOURCE FORMAT
 # ============================================================
 
-def format_source(
-    item: Dict[str, Any],
-    number: int
+def source_label(
+    item: Dict[str, Any]
 ) -> str:
 
     source_type = item.get(
@@ -1476,39 +1903,42 @@ def format_source(
 
     if source_type == "turath":
 
-        author = item.get(
-            "author"
+        author = clean_text(
+            item.get(
+                "author",
+                ""
+            )
         )
 
         page = item.get(
             "page"
         )
 
-        book_id = item.get(
-            "book_id"
+        volume = item.get(
+            "vol"
         )
 
-        parts = [
-            f"{number}. {kitab}"
-        ]
+        label = kitab
 
         if author:
-            parts.append(
-                f"— {author}"
+
+            label += (
+                f" — {author}"
+            )
+
+        if volume:
+
+            label += (
+                f", jilid {volume}"
             )
 
         if page is not None:
-            parts.append(
+
+            label += (
                 f", hlm. {page}"
             )
 
-        if book_id:
-            parts.append(
-                f" [Turath ID: {book_id}]"
-            )
-
-        return "".join(parts)
-
+        return label
 
     category = item.get(
         "category",
@@ -1516,25 +1946,23 @@ def format_source(
     )
 
     return (
-        f"{number}. {kitab}"
-        f" [{category}]"
+        f"{kitab} [{category}]"
     )
 
 
-def format_context(
-    ranked_sources: List[Dict[str, Any]]
+def build_context(
+    ranked: List[Dict[str, Any]]
 ) -> str:
 
     blocks = []
 
     for index, item in enumerate(
-        ranked_sources,
+        ranked,
         start=1
     ):
 
-        source_label = format_source(
-            item,
-            index
+        label = source_label(
+            item
         )
 
         content = truncate_text(
@@ -1546,105 +1974,104 @@ def format_context(
         )
 
         blocks.append(
-            f"Sumber {index}\n"
-            f"{source_label}\n"
-            f"Relevance Score: "
-            f"{item.get('score', 0):.3f}\n\n"
-            f"{content}"
+            "SUMBER "
+            + str(index)
+            + "\n"
+            + label
+            + "\n"
+            + "Skor relevansi: "
+            + f"{item.get('score', 0):.3f}"
+            + "\n\n"
+            + content
         )
 
-    return "\n\n"
-        .join(blocks)
+    return "\n\n".join(
+        blocks
+    )
 
 
 # ============================================================
-# GEMINI ANSWER
+# GEMINI
 # ============================================================
 
 def generate_answer(
     question: str,
-    ranked_sources: List[Dict[str, Any]]
+    ranked: List[Dict[str, Any]]
 ) -> str:
 
     if not gemini_model:
 
         return (
-            "Gemini belum dikonfigurasikan."
+            "Maaf, sistem AI belum "
+            "dikonfigurasikan."
         )
 
-    if not ranked_sources:
+    if not ranked:
 
         return (
-            "Maaf, saya tidak menemui "
-            "rujukan yang mencukupi untuk "
-            "menjawab persoalan ini."
+            "Maklumat daripada sumber "
+            "yang ditemui belum mencukupi "
+            "untuk menjawab persoalan ini."
         )
 
-    context = format_context(
-        ranked_sources
+    context = build_context(
+        ranked
     )
 
     prompt = f"""
 Anda ialah TanyaFiqhBot, pembantu rujukan
-Islam berasaskan kitab.
+Islam yang menjawab berdasarkan kitab.
 
-Soalan pengguna:
+SOALAN PENGGUNA:
 
 {question}
 
-RUJUKAN YANG DITEMUI:
+SUMBER RUJUKAN:
 
 {context}
 
-TUGAS:
+ARAHAN:
 
-Jawab soalan berdasarkan SUMBER yang diberikan.
+1. Jawab dalam Bahasa Melayu.
 
-Peraturan penting:
+2. Gunakan sumber yang diberikan sebagai
+   sumber utama jawapan.
 
-1. Jangan mereka-reka fakta yang tidak terdapat
-   dalam sumber.
+3. Utamakan sumber yang paling relevan.
 
-2. Utamakan sumber yang paling relevan.
+4. Jangan mereka-reka hukum atau fakta
+   yang tidak disokong oleh sumber.
 
-3. Jika sumber tempatan dan Turath bercanggah,
-   nyatakan percanggahan tersebut dengan jelas.
+5. Jika sumber tidak mencukupi, nyatakan
+   bahawa maklumat belum mencukupi.
 
-4. Jangan mengatakan sesuatu hukum itu pasti
-   jika sumber tidak mencukupi.
+6. Jika terdapat pandangan yang berbeza
+   dalam sumber, nyatakan perbezaan itu
+   secara neutral.
 
-5. Jika sumber tidak mencukupi, katakan dengan
-   jelas bahawa rujukan yang ditemui belum
-   mencukupi.
+7. Untuk sumber Turath, gunakan nama kitab,
+   pengarang dan halaman jika maklumat
+   tersedia.
 
-6. Untuk rujukan Turath, gunakan nama kitab,
-   nama pengarang dan halaman jika tersedia.
+8. Jangan mencipta nama kitab atau
+   nombor halaman.
 
-7. Jangan masukkan citation palsu.
+9. Jangan menyebut proses teknikal seperti
+   embedding, vector search, ranking,
+   database atau RAG kepada pengguna.
 
-8. Jawapan hendaklah dalam Bahasa Melayu.
+10. Jangan gunakan jadual.
 
-9. Gunakan format:
+FORMAT JAWAPAN:
 
 Jawapan:
-...
+[Jawapan ringkas dan jelas]
 
 Penjelasan:
-...
+[Penjelasan berdasarkan sumber]
 
 Rujukan:
-- ...
-
-10. Jangan gunakan markdown table.
-
-11. Jangan menyebut "AI", "database", "embedding",
-    "vector", "ranking" atau proses teknikal
-    kepada pengguna.
-
-12. Jangan memberi fatwa berdasarkan pengetahuan
-    luar jika ia tidak disokong oleh sumber yang
-    diberikan.
-
+[Nyatakan rujukan yang digunakan]
 """
 
     try:
@@ -1670,7 +2097,7 @@ Rujukan:
     except Exception as error:
 
         print(
-            "❌ LLM error:",
+            "❌ LLM ERROR:",
             error
         )
 
@@ -1681,7 +2108,7 @@ Rujukan:
 
 
 # ============================================================
-# QUESTION PIPELINE
+# MAIN QUESTION PIPELINE
 # ============================================================
 
 def answer_question(
@@ -1717,14 +2144,9 @@ def answer_question(
     # TURATH
     # --------------------------------------------------------
 
-    turath_data = turath_search(
+    turath_results = turath_search(
         question,
         TURATH_SEARCH_K
-    )
-
-    turath_results = turath_data.get(
-        "passages",
-        []
     )
 
     print(
@@ -1737,13 +2159,12 @@ def answer_question(
     # RANK
     # --------------------------------------------------------
 
-    ranked = rank_hybrid_sources(
+    ranked = rank_sources(
         question,
         local_results,
         turath_results,
         FINAL_CONTEXT_K
     )
-
 
     print(
         f"🏆 HYBRID RANKING: "
@@ -1765,7 +2186,7 @@ def answer_question(
 
 
     # --------------------------------------------------------
-    # ANSWER
+    # GEMINI
     # --------------------------------------------------------
 
     answer = generate_answer(
@@ -1773,12 +2194,14 @@ def answer_question(
         ranked
     )
 
-
-    return answer, ranked
+    return (
+        answer,
+        ranked
+    )
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM START
 # ============================================================
 
 async def telegram_start(
@@ -1786,26 +2209,40 @@ async def telegram_start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+        return
+
     await update.message.reply_text(
         "Assalamualaikum 👋\n\n"
-        "Saya TanyaFiqhBot.\n"
-        "Sila ajukan persoalan fiqh atau "
-        "persoalan berkaitan ilmu Islam."
+        "Saya TanyaFiqhBot.\n\n"
+        "Sila masukkan persoalan berkaitan "
+        "fiqh atau ilmu Islam."
     )
 
+
+# ============================================================
+# TELEGRAM HELP
+# ============================================================
 
 async def telegram_help(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+        return
+
     await update.message.reply_text(
-        "Contoh:\n\n"
-        "/fiqh apakah hukum mandi wajib?\n\n"
-        "Atau terus taip:\n"
-        "Apakah hukum mandi wajib selepas haid?"
+        "Contoh soalan:\n\n"
+        "Apakah hukum mandi wajib?\n\n"
+        "Apakah rukun wuduk?\n\n"
+        "Bolehkah solat jamak ketika musafir?"
     )
 
+
+# ============================================================
+# TELEGRAM QUESTION
+# ============================================================
 
 async def telegram_question(
     update: Update,
@@ -1823,26 +2260,14 @@ async def telegram_question(
     if not question:
         return
 
-    if question.startswith("/start"):
 
-        await telegram_start(
-            update,
-            context
-        )
+    # --------------------------------------------------------
+    # COMMAND /fiqh
+    # --------------------------------------------------------
 
-        return
-
-    if question.startswith("/help"):
-
-        await telegram_help(
-            update,
-            context
-        )
-
-        return
-
-
-    if question.startswith("/fiqh"):
+    if question.lower().startswith(
+        "/fiqh"
+    ):
 
         question = re.sub(
             r"^/fiqh\s*",
@@ -1871,13 +2296,29 @@ async def telegram_question(
         pass
 
 
-    answer, ranked = answer_question(
-        question
-    )
+    try:
+
+        answer, ranked = answer_question(
+            question
+        )
+
+    except Exception as error:
+
+        print(
+            "❌ QUESTION PIPELINE ERROR:",
+            error
+        )
+
+        await update.message.reply_text(
+            "Maaf, berlaku masalah "
+            "semasa memproses soalan."
+        )
+
+        return
 
 
     # --------------------------------------------------------
-    # SOURCE SUMMARY
+    # COUNT SOURCES
     # --------------------------------------------------------
 
     local_count = sum(
@@ -1897,10 +2338,13 @@ async def telegram_question(
     )
 
 
+    # --------------------------------------------------------
+    # SOURCE LIST
+    # --------------------------------------------------------
+
     source_lines = []
 
-    seen_sources = set()
-
+    seen = set()
 
     for item in ranked:
 
@@ -1908,73 +2352,76 @@ async def telegram_question(
             "source_type"
         )
 
+        kitab = clean_text(
+            item.get(
+                "kitab_name",
+                "Tidak diketahui"
+            )
+        )
+
         if source_type == "turath":
 
-            kitab = item.get(
-                "kitab_name",
-                "Turath"
-            )
-
-            author = item.get(
-                "author"
+            author = clean_text(
+                item.get(
+                    "author",
+                    ""
+                )
             )
 
             page = item.get(
                 "page"
             )
 
-            source_key = (
+            key = (
+                "turath",
                 kitab,
                 author,
                 page
             )
 
-            if source_key in seen_sources:
+            if key in seen:
                 continue
 
-            seen_sources.add(
-                source_key
+            seen.add(
+                key
             )
 
-            text = f"• {kitab}"
+            line = "• " + kitab
 
             if author:
-                text += (
+
+                line += (
                     f" — {author}"
                 )
 
             if page is not None:
-                text += (
+
+                line += (
                     f", hlm. {page}"
                 )
 
             source_lines.append(
-                text
+                line
             )
 
         else:
-
-            kitab = item.get(
-                "kitab_name",
-                "Kitab Tempatan"
-            )
 
             category = item.get(
                 "category",
                 "FIQH"
             )
 
-            source_key = (
+            key = (
                 "local",
                 kitab,
                 category
             )
 
-            if source_key in seen_sources:
+            if key in seen:
                 continue
 
-            seen_sources.add(
-                source_key
+            seen.add(
+                key
             )
 
             source_lines.append(
@@ -1982,6 +2429,10 @@ async def telegram_question(
                 f"[{category}]"
             )
 
+
+    # --------------------------------------------------------
+    # APPEND SOURCE INFO
+    # --------------------------------------------------------
 
     if source_lines:
 
@@ -1996,7 +2447,7 @@ async def telegram_question(
 
     answer += (
         "\n\n"
-        f"🔎 Sumber ditemui: "
+        "🔎 Sumber ditemui: "
         f"Kitab tempatan: {local_count} "
         f"| Turath: {turath_count}"
     )
@@ -2008,91 +2459,97 @@ async def telegram_question(
 
 
 # ============================================================
-# TELEGRAM POLLING
+# TELEGRAM
 # ============================================================
 
-def start_telegram():
+async def telegram_runner():
 
     if not TELEGRAM_TOKEN:
 
         print(
-            "⚠️ TELEGRAM_TOKEN tidak ada"
+            "⚠️ TELEGRAM_TOKEN tidak ditetapkan"
         )
 
         return
 
+    telegram_app = (
+        Application
+        .builder()
+        .token(
+            TELEGRAM_TOKEN
+        )
+        .build()
+    )
 
-    async def runner():
 
-        telegram_app = (
-            Application
-            .builder()
-            .token(
-                TELEGRAM_TOKEN
-            )
-            .build()
+    telegram_app.add_handler(
+        CommandHandler(
+            "start",
+            telegram_start
+        )
+    )
+
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "help",
+            telegram_help
+        )
+    )
+
+
+    telegram_app.add_handler(
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND,
+            telegram_question
+        )
+    )
+
+
+    telegram_app.add_handler(
+        MessageHandler(
+            filters.COMMAND,
+            telegram_question
+        )
+    )
+
+
+    print(
+        "✅ Telegram polling started"
+    )
+
+
+    await telegram_app.initialize()
+
+    await telegram_app.start()
+
+    await telegram_app.updater.start_polling(
+        stop_signals=None
+    )
+
+
+    while True:
+
+        await asyncio.sleep(
+            3600
         )
 
 
-        telegram_app.add_handler(
-            CommandHandler(
-                "start",
-                telegram_start
-            )
+def start_telegram():
+
+    try:
+
+        asyncio.run(
+            telegram_runner()
         )
 
-
-        telegram_app.add_handler(
-            CommandHandler(
-                "help",
-                telegram_help
-            )
-        )
-
-
-        telegram_app.add_handler(
-            MessageHandler(
-                filters.TEXT
-                & ~filters.COMMAND,
-                telegram_question
-            )
-        )
-
-
-        telegram_app.add_handler(
-            MessageHandler(
-                filters.COMMAND,
-                telegram_question
-            )
-        )
-
+    except Exception as error:
 
         print(
-            "✅ Telegram polling started"
+            "❌ TELEGRAM ERROR:",
+            error
         )
-
-
-        await telegram_app.initialize()
-
-        await telegram_app.start()
-
-        await telegram_app.updater.start_polling(
-            stop_signals=None
-        )
-
-
-        while True:
-
-            await __import__(
-                "asyncio"
-            ).sleep(3600)
-
-
-    import asyncio
-
-    asyncio.run(
-        runner()
-    )
 
 
 # ============================================================
@@ -2148,19 +2605,48 @@ def health():
 @app.route("/test/turath")
 def test_turath():
 
-    query = (
-        "غسل"
-    )
-
-    result = turath_search(
-        query,
+    results = turath_search(
+        "mandi",
         5
     )
 
     return jsonify({
-        "ok": True,
-        "query": query,
-        "result": result
+
+        "ok":
+            True,
+
+        "query":
+            "mandi",
+
+        "results":
+            results
+
+    })
+
+
+@app.route("/test/question")
+def test_question():
+
+    question = "Apakah hukum mandi wajib?"
+
+    answer, ranked = answer_question(
+        question
+    )
+
+    return jsonify({
+
+        "ok":
+            True,
+
+        "question":
+            question,
+
+        "answer":
+            answer,
+
+        "sources":
+            ranked
+
     })
 
 
@@ -2183,7 +2669,6 @@ def startup():
         "============================================================"
     )
 
-
     try:
 
         sync_books()
@@ -2205,7 +2690,7 @@ def startup():
 
 
 # ============================================================
-# RUN
+# START
 # ============================================================
 
 startup()
