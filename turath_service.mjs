@@ -1,28 +1,77 @@
 import http from "node:http";
-import { search, getBookInfo, getPage } from "turath-sdk";
+import {
+    search,
+    getBookInfo,
+    getPage
+} from "turath-sdk";
 
-const PORT = 8765;
-const HOST = "127.0.0.1";
 
 /*
 |--------------------------------------------------------------------------
-| CONFIG
+| SERVER CONFIG
 |--------------------------------------------------------------------------
 */
 
-const SEARCH_PAGES = 10;
-const RESULTS_PER_PAGE = 20;
+const PORT = Number(
+    process.env.PORT || 8765
+);
 
 /*
- * Soalan biasa:
- *   Syafie = 10
+ * PENTING:
  *
- * Perbandingan:
- *   Syafie = 10
- *   Hanafi = 2
- *   Maliki = 2
- *   Hanbali = 2
+ * Jika Python app.py dan service Turath berada
+ * DALAM CONTAINER YANG SAMA:
+ *
+ *     127.0.0.1
+ *
+ * boleh digunakan.
+ *
+ * Jika Turath service berada pada Render Web Service
+ * yang BERASINGAN daripada app.py, gunakan:
+ *
+ *     HOST = "0.0.0.0"
+ *
+ * dan app.py perlu menggunakan URL service tersebut.
  */
+
+const HOST =
+    process.env.HOST ||
+    "0.0.0.0";
+
+
+/*
+|--------------------------------------------------------------------------
+| SEARCH CONFIG
+|--------------------------------------------------------------------------
+*/
+
+const SEARCH_PAGES = Number(
+    process.env.TURATH_SEARCH_PAGES || 10
+);
+
+const RESULTS_PER_PAGE = Number(
+    process.env.TURATH_RESULTS_PER_PAGE || 20
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| FINAL RESULT LIMIT
+|--------------------------------------------------------------------------
+|
+| Soalan biasa:
+|
+|   Syafie = 10
+|
+| Perbandingan:
+|
+|   Syafie = 10
+|   Hanafi = 2
+|   Maliki = 2
+|   Hanbali = 2
+|
+|--------------------------------------------------------------------------
+*/
 
 const NORMAL_LIMITS = {
     shafii: 10
@@ -43,23 +92,73 @@ const COMPARISON_LIMITS = {
 */
 
 function toNumber(value) {
+
+    if (
+        value === undefined ||
+        value === null ||
+        value === ""
+    ) {
+        return null;
+    }
+
     const n = Number(value);
-    return Number.isFinite(n) ? n : null;
+
+    return Number.isFinite(n)
+        ? n
+        : null;
 }
 
+
 const CATEGORY_IDS = {
-    hanafi: toNumber(process.env.TURATH_HANAFI_CATEGORY_ID),
-    maliki: toNumber(process.env.TURATH_MALIKI_CATEGORY_ID),
-    shafii: toNumber(process.env.TURATH_SHAFII_CATEGORY_ID),
-    hanbali: toNumber(process.env.TURATH_HANBALI_CATEGORY_ID)
+
+    hanafi:
+        toNumber(
+            process.env.TURATH_HANAFI_CATEGORY_ID
+        ),
+
+    maliki:
+        toNumber(
+            process.env.TURATH_MALIKI_CATEGORY_ID
+        ),
+
+    shafii:
+        toNumber(
+            process.env.TURATH_SHAFII_CATEGORY_ID
+        ),
+
+    hanbali:
+        toNumber(
+            process.env.TURATH_HANBALI_CATEGORY_ID
+        )
 };
 
+
 const CATEGORY_NAMES = {
-    hanafi: "الفقه الحنفي",
-    maliki: "الفقه المالكي",
-    shafii: "الفقه الشافعي",
-    hanbali: "الفقه الحنبلي"
+
+    hanafi:
+        "الفقه الحنفي",
+
+    maliki:
+        "الفقه المالكي",
+
+    shafii:
+        "الفقه الشافعي",
+
+    hanbali:
+        "الفقه الحنبلي"
 };
+
+
+/*
+|--------------------------------------------------------------------------
+| PRINT CATEGORY CONFIG
+|--------------------------------------------------------------------------
+*/
+
+console.log(
+    "📚 CATEGORY IDS:",
+    CATEGORY_IDS
+);
 
 
 /*
@@ -257,24 +356,73 @@ const QUERY_MAP = {
 
 /*
 |--------------------------------------------------------------------------
-| Arabic detection
+| UTILITY
 |--------------------------------------------------------------------------
 */
 
+function safeString(value) {
+
+    if (
+        value === undefined ||
+        value === null
+    ) {
+        return "";
+    }
+
+    if (
+        typeof value === "object"
+    ) {
+
+        try {
+
+            return JSON.stringify(
+                value,
+                null,
+                0
+            );
+
+        } catch {
+
+            return String(value);
+        }
+    }
+
+    return String(value);
+}
+
+
 function containsArabic(text) {
-    return /[\u0600-\u06FF]/.test(text);
+
+    return /[\u0600-\u06FF]/.test(
+        String(text || "")
+    );
+}
+
+
+function uniqueArray(array) {
+
+    return [
+        ...new Set(
+            array.filter(Boolean)
+        )
+    ];
 }
 
 
 /*
 |--------------------------------------------------------------------------
-| Build Arabic queries
+| ARABIC QUERIES
 |--------------------------------------------------------------------------
 */
 
-function arabicQueries(originalQuery) {
+function arabicQueries(
+    originalQuery
+) {
 
-    const query = String(originalQuery || "").trim();
+    const query =
+        String(
+            originalQuery || ""
+        ).trim();
 
     if (!query) {
         return [];
@@ -283,59 +431,96 @@ function arabicQueries(originalQuery) {
     const results = [];
 
     /*
-     * Jika pengguna terus bertanya dalam Arab,
-     * gunakan soalan Arab itu sendiri.
+     * Jika pengguna bertanya dalam Arab,
+     * masukkan soalan asal.
      */
 
-    if (containsArabic(query)) {
-        results.push(query);
+    if (
+        containsArabic(query)
+    ) {
+
+        results.push(
+            query
+        );
     }
 
     /*
-     * Cari keyword Bahasa Melayu.
+     * Mapping Bahasa Melayu → Arab.
      */
 
-    const lower = query.toLowerCase();
+    const lower =
+        query.toLowerCase();
 
-    for (const [keyword, arabicTerms] of Object.entries(QUERY_MAP)) {
+    for (
+        const [
+            keyword,
+            arabicTerms
+        ]
+        of Object.entries(
+            QUERY_MAP
+        )
+    ) {
 
-        if (lower.includes(keyword)) {
-            results.push(...arabicTerms);
+        if (
+            lower.includes(
+                keyword
+            )
+        ) {
+
+            results.push(
+                ...arabicTerms
+            );
         }
     }
 
     /*
-     * Kalau tiada mapping,
-     * gunakan soalan asal sebagai fallback.
+     * Jika tiada mapping,
+     * cuba query asal.
      */
 
-    if (results.length === 0) {
-        results.push(query);
+    if (
+        results.length === 0
+    ) {
+
+        results.push(
+            query
+        );
     }
 
-    return [...new Set(results)].slice(0, 20);
+    return uniqueArray(
+        results
+    ).slice(0, 20);
 }
 
 
 /*
 |--------------------------------------------------------------------------
-| Detect comparison
+| MADHHAB COMPARISON
 |--------------------------------------------------------------------------
 */
 
-function isMadhhabComparison(text) {
+function isMadhhabComparison(
+    text
+) {
 
-    const q = String(text || "").toLowerCase();
+    const q =
+        String(
+            text || ""
+        ).toLowerCase();
 
     const terms = [
+
         "banding",
         "bandingkan",
         "perbandingan",
         "perbezaan mazhab",
+        "perbezaan antara mazhab",
         "beza mazhab",
         "mazhab mana",
         "empat mazhab",
         "4 mazhab",
+        "semua mazhab",
+        "keempat-empat mazhab",
 
         "syafie dan hanafi",
         "syafii dan hanafi",
@@ -348,25 +533,101 @@ function isMadhhabComparison(text) {
 
         "hanafi dan maliki",
         "hanafi dan hanbali",
+
         "maliki dan hanbali"
     ];
 
-    if (terms.some(term => q.includes(term))) {
+    if (
+        terms.some(
+            term =>
+                q.includes(term)
+        )
+    ) {
+
         return true;
     }
 
+
     /*
-     * Arabic comparison
+     * Explicit 2+ mazhab.
+     */
+
+    const madhhabs = [
+
+        "syafie",
+        "syafii",
+        "hanafi",
+        "maliki",
+        "hanbali"
+    ];
+
+    let count = 0;
+
+    for (
+        const madhhab
+        of madhhabs
+    ) {
+
+        if (
+            q.includes(
+                madhhab
+            )
+        ) {
+
+            count++;
+        }
+    }
+
+    if (
+        count >= 2
+    ) {
+
+        return true;
+    }
+
+
+    /*
+     * Arabic.
      */
 
     if (
+
         q.includes("مقارنة") ||
         q.includes("المذاهب") ||
         q.includes("الحنفي") ||
         q.includes("المالكي") ||
+        q.includes("الشافعي") ||
         q.includes("الحنبلي")
+
     ) {
-        return true;
+
+        /*
+         * Jangan anggap semua soalan yang hanya
+         * menyebut satu mazhab sebagai comparison.
+         */
+
+        const arabicMadhhabs = [
+
+            "الحنفي",
+            "المالكي",
+            "الشافعي",
+            "الحنبلي"
+        ];
+
+        const arabicCount =
+            arabicMadhhabs.filter(
+                term =>
+                    q.includes(term)
+            ).length;
+
+        if (
+            q.includes("مقارنة") ||
+            q.includes("المذاهب") ||
+            arabicCount >= 2
+        ) {
+
+            return true;
+        }
     }
 
     return false;
@@ -375,24 +636,74 @@ function isMadhhabComparison(text) {
 
 /*
 |--------------------------------------------------------------------------
-| Validate category
+| CATEGORY VALIDATION
 |--------------------------------------------------------------------------
 */
 
-function validateCategory(categoryKey) {
+function validateCategory(
+    categoryKey
+) {
 
-    if (!CATEGORY_IDS[categoryKey]) {
+    const categoryId =
+        CATEGORY_IDS[
+            categoryKey
+        ];
+
+    if (
+        !Number.isFinite(
+            categoryId
+        )
+    ) {
 
         throw new Error(
-            `CATEGORY ID tidak ditetapkan untuk ${categoryKey}`
+            `CATEGORY ID tidak ditetapkan untuk ${categoryKey}. ` +
+            `Sila tetapkan TURATH_${categoryKey.toUpperCase()}_CATEGORY_ID.`
         );
     }
+
+    return categoryId;
 }
 
 
 /*
 |--------------------------------------------------------------------------
-| Normalize result
+| EXTRACT FIELD
+|--------------------------------------------------------------------------
+|
+| SDK mungkin menggunakan nama field yang sedikit berbeza.
+| Kita cuba beberapa kemungkinan.
+|--------------------------------------------------------------------------
+*/
+
+function firstValue(
+    object,
+    keys
+) {
+
+    for (
+        const key of keys
+    ) {
+
+        const value =
+            object?.[key];
+
+        if (
+            value !== undefined &&
+            value !== null &&
+            value !== ""
+        ) {
+
+            return value;
+        }
+    }
+
+    return "";
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| NORMALIZE TURATH HIT
 |--------------------------------------------------------------------------
 */
 
@@ -403,31 +714,290 @@ function normalizeHit(
     page
 ) {
 
-    if (!hit) {
+    if (
+        !hit ||
+        typeof hit !== "object"
+    ) {
+
         return null;
     }
 
+
+    /*
+     * BOOK ID
+     */
+
+    const bookId =
+        firstValue(
+            hit,
+            [
+                "book_id",
+                "bookId",
+                "id"
+            ]
+        );
+
+
+    /*
+     * AUTHOR ID
+     */
+
+    const authorId =
+        firstValue(
+            hit,
+            [
+                "author_id",
+                "authorId"
+            ]
+        );
+
+
+    /*
+     * CATEGORY
+     */
+
+    const categoryId =
+        firstValue(
+            hit,
+            [
+                "cat_id",
+                "category_id",
+                "categoryId"
+            ]
+        ) ||
+        CATEGORY_IDS[
+            categoryKey
+        ];
+
+
+    /*
+     * META / BOOK NAME
+     */
+
+    const meta =
+        firstValue(
+            hit,
+            [
+                "meta",
+                "book",
+                "book_name",
+                "bookName",
+                "title"
+            ]
+        );
+
+
+    /*
+     * TEXT
+     */
+
+    const text =
+        firstValue(
+            hit,
+            [
+                "text",
+                "content",
+                "body",
+                "full_text"
+            ]
+        );
+
+
+    /*
+     * SNIPPET
+     */
+
+    const snippet =
+        firstValue(
+            hit,
+            [
+                "snip",
+                "snippet",
+                "content",
+                "text"
+            ]
+        );
+
+
+    /*
+     * PAGE
+     */
+
+    const resultPage =
+        firstValue(
+            hit,
+            [
+                "page",
+                "page_number",
+                "pageNumber",
+                "pg"
+            ]
+        );
+
+
+    /*
+     * URL
+     */
+
+    let url =
+        firstValue(
+            hit,
+            [
+                "url",
+                "link"
+            ]
+        );
+
+
+    /*
+     * Jika SDK ada book_id tetapi tiada URL,
+     * bina URL Turath.
+     */
+
+    if (
+        !url &&
+        bookId
+    ) {
+
+        url =
+            `https://turath.io/book/${bookId}`;
+    }
+
+
+    /*
+     * Pastikan sekurang-kurangnya
+     * text atau snippet wujud.
+     */
+
+    if (
+        !text &&
+        !snippet
+    ) {
+
+        return null;
+    }
+
+
+    /*
+     * RETURN FORMAT YANG SERASI DENGAN app.py
+     */
+
     return {
 
-        book_id: hit.book_id,
+        /*
+         * ID
+         */
 
-        author_id: hit.author_id,
+        book_id:
+            safeString(
+                bookId
+            ),
+
+        author_id:
+            safeString(
+                authorId
+            ),
 
         category_id:
-            hit.cat_id ||
-            CATEGORY_IDS[categoryKey],
+            safeString(
+                categoryId
+            ),
+
+        /*
+         * Nama kategori
+         */
 
         category:
-            CATEGORY_NAMES[categoryKey],
+            CATEGORY_NAMES[
+                categoryKey
+            ],
+
+        category_name:
+            CATEGORY_NAMES[
+                categoryKey
+            ],
+
+        /*
+         * Metadata kitab
+         */
 
         meta:
-            hit.meta || "",
+            safeString(
+                meta
+            ),
+
+        book:
+            safeString(
+                meta
+            ),
+
+        book_name:
+            safeString(
+                meta
+            ),
+
+        bookName:
+            safeString(
+                meta
+            ),
+
+        /*
+         * Petikan
+         */
 
         snippet:
-            hit.snip || "",
+            safeString(
+                snippet
+            ),
+
+        snip:
+            safeString(
+                snippet
+            ),
 
         text:
-            hit.text || "",
+            safeString(
+                text ||
+                snippet
+            ),
+
+        content:
+            safeString(
+                text ||
+                snippet
+            ),
+
+        /*
+         * Page
+         */
+
+        page:
+            safeString(
+                resultPage
+            ),
+
+        page_number:
+            safeString(
+                resultPage
+            ),
+
+        /*
+         * URL
+         */
+
+        url:
+            safeString(
+                url
+            ),
+
+        link:
+            safeString(
+                url
+            ),
+
+        /*
+         * Search info
+         */
 
         search_query:
             query,
@@ -440,27 +1010,159 @@ function normalizeHit(
 
 /*
 |--------------------------------------------------------------------------
-| Unique key
+| UNIQUE KEY
 |--------------------------------------------------------------------------
 */
 
-function resultKey(item) {
+function resultKey(
+    item
+) {
 
     return [
-        item.book_id,
-        item.meta,
-        item.text
+
+        safeString(
+            item.book_id
+        ),
+
+        safeString(
+            item.page
+        ),
+
+        safeString(
+            item.meta
+        ),
+
+        safeString(
+            item.text
+        )
+
     ].join("|");
 }
 
 
 /*
 |--------------------------------------------------------------------------
-| Search MANY pages
+| SEARCH ONE PAGE
 |--------------------------------------------------------------------------
-|
-| Ini sengaja cari banyak dahulu.
-|
+*/
+
+async function searchOnePage(
+    query,
+    categoryKey,
+    page
+) {
+
+    const categoryId =
+        validateCategory(
+            categoryKey
+        );
+
+
+    try {
+
+        const response =
+            await search(
+                query,
+                {
+                    category:
+                        categoryId,
+
+                    page,
+
+                    /*
+                     * Sesetengah SDK mungkin
+                     * mengabaikan limit.
+                     * Kita masih hantar.
+                     */
+
+                    limit:
+                        RESULTS_PER_PAGE
+                }
+            );
+
+
+        /*
+         * SDK biasanya:
+         *
+         * {
+         *   data: [...]
+         * }
+         */
+
+        let data = [];
+
+
+        if (
+            Array.isArray(
+                response
+            )
+        ) {
+
+            data =
+                response;
+
+        } else if (
+            Array.isArray(
+                response?.data
+            )
+        ) {
+
+            data =
+                response.data;
+
+        } else if (
+            Array.isArray(
+                response?.results
+            )
+        ) {
+
+            data =
+                response.results;
+
+        } else if (
+            Array.isArray(
+                response?.hits
+            )
+        ) {
+
+            data =
+                response.hits;
+        }
+
+
+        console.log(
+            `🔎 ${categoryKey} | ` +
+            `"${query}" | ` +
+            `page=${page} | ` +
+            `${data.length} results`
+        );
+
+
+        return data;
+
+    } catch (error) {
+
+        console.error(
+            `❌ TURATH SEARCH ERROR | ` +
+            `${categoryKey} | ` +
+            `page=${page}`
+        );
+
+        console.error(
+            error?.stack ||
+            error?.message ||
+            error
+        );
+
+        return [];
+    }
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| SEARCH MANY PAGES
+|--------------------------------------------------------------------------
 */
 
 async function searchCategoryMany(
@@ -468,10 +1170,14 @@ async function searchCategoryMany(
     categoryKey
 ) {
 
-    validateCategory(categoryKey);
+    validateCategory(
+        categoryKey
+    );
+
 
     const results = [];
     const seen = new Set();
+
 
     for (
         let page = 1;
@@ -479,46 +1185,31 @@ async function searchCategoryMany(
         page++
     ) {
 
-        let response;
-
-        try {
-
-            response = await search(
-                query,
-                {
-                    category:
-                        CATEGORY_IDS[categoryKey],
-
-                    page
-                }
-            );
-
-        } catch (error) {
-
-            console.error(
-                `❌ TURATH ERROR`,
-                categoryKey,
-                `page=${page}`,
-                error?.message || error
-            );
-
-            continue;
-        }
-
         const data =
-            Array.isArray(response?.data)
-                ? response.data
-                : [];
+            await searchOnePage(
+                query,
+                categoryKey,
+                page
+            );
 
-        console.log(
-            `🔎 ${categoryKey} | "${query}" | page=${page} | ${data.length} results`
-        );
 
-        if (data.length === 0) {
+        /*
+         * Tiada data bermaksud
+         * kemungkinan sudah sampai page terakhir.
+         */
+
+        if (
+            data.length === 0
+        ) {
+
             break;
         }
 
-        for (const hit of data) {
+
+        for (
+            const hit
+            of data
+        ) {
 
             const item =
                 normalizeHit(
@@ -528,26 +1219,39 @@ async function searchCategoryMany(
                     page
                 );
 
+
             if (!item) {
                 continue;
             }
 
-            const key =
-                resultKey(item);
 
-            if (seen.has(key)) {
+            const key =
+                resultKey(
+                    item
+                );
+
+
+            if (
+                seen.has(key)
+            ) {
+
                 continue;
             }
 
+
             seen.add(key);
 
-            results.push(item);
+            results.push(
+                item
+            );
         }
     }
+
 
     console.log(
         `📚 ${categoryKey} collected = ${results.length}`
     );
+
 
     return results;
 }
@@ -555,7 +1259,7 @@ async function searchCategoryMany(
 
 /*
 |--------------------------------------------------------------------------
-| Search one category using MANY queries
+| COLLECT CATEGORY
 |--------------------------------------------------------------------------
 */
 
@@ -565,21 +1269,25 @@ async function collectCategory(
 ) {
 
     const queries =
-        arabicQueries(originalQuery);
+        arabicQueries(
+            originalQuery
+        );
 
-    const all = [];
-    const seen = new Set();
 
     console.log(
         `🔍 ${categoryKey} queries:`,
         queries
     );
 
-    /*
-     * Setiap query akan cari banyak page.
-     */
 
-    for (const query of queries) {
+    const all = [];
+    const seen = new Set();
+
+
+    for (
+        const query
+        of queries
+    ) {
 
         const results =
             await searchCategoryMany(
@@ -587,24 +1295,39 @@ async function collectCategory(
                 categoryKey
             );
 
-        for (const item of results) {
+
+        for (
+            const item
+            of results
+        ) {
 
             const key =
-                resultKey(item);
+                resultKey(
+                    item
+                );
 
-            if (seen.has(key)) {
+
+            if (
+                seen.has(key)
+            ) {
+
                 continue;
             }
 
+
             seen.add(key);
 
-            all.push(item);
+            all.push(
+                item
+            );
         }
     }
+
 
     console.log(
         `📦 ${categoryKey} TOTAL UNIQUE = ${all.length}`
     );
+
 
     return all;
 }
@@ -612,11 +1335,7 @@ async function collectCategory(
 
 /*
 |--------------------------------------------------------------------------
-| Score result
-|--------------------------------------------------------------------------
-|
-| Kita cuba letakkan hasil yang lebih relevan
-| di bahagian atas.
+| RESULT SCORE
 |--------------------------------------------------------------------------
 */
 
@@ -627,62 +1346,139 @@ function scoreResult(
 
     let score = 0;
 
+
     const query =
-        String(originalQuery || "")
-            .toLowerCase();
+        String(
+            originalQuery || ""
+        ).toLowerCase();
+
 
     const text =
-        `${item.text} ${item.snippet} ${item.meta}`
-            .toLowerCase();
+        [
+            item.text,
+            item.snippet,
+            item.meta,
+            item.book
+        ]
+            .map(
+                value =>
+                    safeString(
+                        value
+                    ).toLowerCase()
+            )
+            .join(" ");
+
 
     /*
-     * Match Arabic query
+     * Arabic search terms.
      */
 
     const arabicQs =
-        arabicQueries(originalQuery);
+        arabicQueries(
+            originalQuery
+        );
 
-    for (const q of arabicQs) {
+
+    for (
+        const q
+        of arabicQs
+    ) {
 
         const words =
             q
                 .split(/\s+/)
-                .filter(Boolean);
+                .filter(
+                    word =>
+                        word.length >= 2
+                );
 
-        for (const word of words) {
+
+        for (
+            const word
+            of words
+        ) {
 
             if (
-                word.length >= 3 &&
-                text.includes(word)
+                text.includes(
+                    word
+                )
             ) {
+
                 score += 2;
             }
         }
     }
 
+
     /*
-     * Panjang teks yang munasabah.
+     * Keyword Melayu.
      */
 
-    if (item.text.length > 100) {
-        score += 1;
+    const malayWords =
+        query
+            .split(/\s+/)
+            .filter(
+                word =>
+                    word.length >= 3
+            );
+
+
+    for (
+        const word
+        of malayWords
+    ) {
+
+        if (
+            text.includes(
+                word
+            )
+        ) {
+
+            score += 1;
+        }
     }
 
-    /*
-     * Snippet tersedia.
-     */
-
-    if (item.snippet) {
-        score += 1;
-    }
 
     /*
-     * Search page awal biasanya lebih relevan.
+     * Text panjang biasanya lebih berguna
+     * daripada snippet sahaja.
      */
 
-    if (item.search_page === 1) {
+    if (
+        safeString(
+            item.text
+        ).length > 100
+    ) {
+
         score += 2;
     }
+
+
+    /*
+     * Metadata kitab wujud.
+     */
+
+    if (
+        item.book
+    ) {
+
+        score += 1;
+    }
+
+
+    /*
+     * Page awal sedikit keutamaan.
+     */
+
+    if (
+        Number(
+            item.search_page
+        ) === 1
+    ) {
+
+        score += 1;
+    }
+
 
     return score;
 }
@@ -690,7 +1486,7 @@ function scoreResult(
 
 /*
 |--------------------------------------------------------------------------
-| Rank + limit
+| RANK
 |--------------------------------------------------------------------------
 */
 
@@ -701,20 +1497,50 @@ function rankAndLimit(
 ) {
 
     const scored =
-        results.map(item => ({
-            ...item,
-            relevance:
-                scoreResult(
-                    item,
-                    originalQuery
-                )
-        }));
+        results.map(
+            item => ({
+                ...item,
+
+                relevance:
+                    scoreResult(
+                        item,
+                        originalQuery
+                    )
+            })
+        );
+
 
     scored.sort(
-        (a, b) =>
-            b.relevance -
-            a.relevance
+        (a, b) => {
+
+            if (
+                b.relevance !==
+                a.relevance
+            ) {
+
+                return (
+                    b.relevance -
+                    a.relevance
+                );
+            }
+
+
+            /*
+             * Kalau score sama,
+             * text lebih panjang dahulu.
+             */
+
+            return (
+                safeString(
+                    b.text
+                ).length -
+                safeString(
+                    a.text
+                ).length
+            );
+        }
     );
+
 
     return scored.slice(
         0,
@@ -725,10 +1551,7 @@ function rankAndLimit(
 
 /*
 |--------------------------------------------------------------------------
-| NORMAL FIQH
-|--------------------------------------------------------------------------
-|
-| Syafie = 10
+| NORMAL SEARCH
 |--------------------------------------------------------------------------
 */
 
@@ -736,11 +1559,17 @@ async function searchNormal(
     originalQuery
 ) {
 
+    console.log(
+        "📘 NORMAL MODE: SYAFII"
+    );
+
+
     const all =
         await collectCategory(
             originalQuery,
             "shafii"
         );
+
 
     const selected =
         rankAndLimit(
@@ -749,9 +1578,11 @@ async function searchNormal(
             NORMAL_LIMITS.shafii
         );
 
+
     console.log(
         `✅ NORMAL FINAL SYAFII = ${selected.length}`
     );
+
 
     return selected;
 }
@@ -759,13 +1590,7 @@ async function searchNormal(
 
 /*
 |--------------------------------------------------------------------------
-| COMPARISON
-|--------------------------------------------------------------------------
-|
-| Syafie = 10
-| Hanafi = 2
-| Maliki = 2
-| Hanbali = 2
+| COMPARISON SEARCH
 |--------------------------------------------------------------------------
 */
 
@@ -773,61 +1598,93 @@ async function searchComparison(
     originalQuery
 ) {
 
+    console.log(
+        "⚖️ COMPARISON MODE"
+    );
+
+
     const categoryResults = {};
 
+
     /*
-     * Cari semua kategori.
-     * Bukan 2 sahaja.
-     * Kita cari banyak dahulu.
+     * Cari semua mazhab.
      */
 
-    for (const categoryKey of [
+    const categories = [
         "shafii",
         "hanafi",
         "maliki",
         "hanbali"
-    ]) {
+    ];
 
-        categoryResults[categoryKey] =
-            await collectCategory(
-                originalQuery,
+
+    for (
+        const categoryKey
+        of categories
+    ) {
+
+        try {
+
+            categoryResults[
                 categoryKey
+            ] =
+                await collectCategory(
+                    originalQuery,
+                    categoryKey
+                );
+
+        } catch (error) {
+
+            console.error(
+                `❌ CATEGORY ERROR: ${categoryKey}`,
+                error
             );
+
+            categoryResults[
+                categoryKey
+            ] = [];
+        }
     }
 
+
     /*
-     * Kemudian baru pilih jumlah akhir.
+     * Pilih jumlah akhir.
      */
 
     const final = [];
 
-    for (const categoryKey of [
-        "shafii",
-        "hanafi",
-        "maliki",
-        "hanbali"
-    ]) {
+
+    for (
+        const categoryKey
+        of categories
+    ) {
 
         const limit =
             COMPARISON_LIMITS[
                 categoryKey
             ];
 
+
         const selected =
             rankAndLimit(
                 categoryResults[
                     categoryKey
-                ],
+                ] || [],
                 originalQuery,
                 limit
             );
 
-        final.push(...selected);
+
+        final.push(
+            ...selected
+        );
+
 
         console.log(
-            `✅ ${CATEGORY_NAMES[categoryKey]} FINAL = ${selected.length}`
+            `✅ ${categoryKey.toUpperCase()} FINAL = ${selected.length}`
         );
     }
+
 
     return final;
 }
@@ -843,10 +1700,36 @@ async function performSearch(
     originalQuery
 ) {
 
+    const query =
+        String(
+            originalQuery || ""
+        ).trim();
+
+
+    if (!query) {
+
+        return {
+
+            mode:
+                "shafii",
+
+            requested:
+                NORMAL_LIMITS,
+
+            count:
+                0,
+
+            passages:
+                []
+        };
+    }
+
+
     const comparison =
         isMadhhabComparison(
-            originalQuery
+            query
         );
+
 
     console.log("");
     console.log(
@@ -856,7 +1739,7 @@ async function performSearch(
         "📚 TURATH SEARCH"
     );
     console.log(
-        `❓ ${originalQuery}`
+        `❓ ${query}`
     );
     console.log(
         `🧭 MODE = ${
@@ -869,20 +1752,74 @@ async function performSearch(
         "================================================"
     );
 
-    const passages =
+
+    let passages = [];
+
+
+    if (
         comparison
-            ? await searchComparison(
-                originalQuery
-            )
-            : await searchNormal(
-                originalQuery
+    ) {
+
+        passages =
+            await searchComparison(
+                query
             );
+
+    } else {
+
+        passages =
+            await searchNormal(
+                query
+            );
+    }
+
 
     console.log(
         `🏁 FINAL TURATH RESULTS = ${passages.length}`
     );
 
+
+    /*
+     * Debug ringkas.
+     */
+
+    for (
+        let i = 0;
+        i < Math.min(
+            passages.length,
+            5
+        );
+        i++
+    ) {
+
+        const item =
+            passages[i];
+
+        console.log(
+            `📖 RESULT ${i + 1}:`,
+            {
+                book:
+                    item.book,
+
+                page:
+                    item.page,
+
+                category:
+                    item.category,
+
+                text_length:
+                    safeString(
+                        item.text
+                    ).length
+            }
+        );
+    }
+
+
     return {
+
+        success:
+            true,
 
         mode:
             comparison
@@ -904,7 +1841,7 @@ async function performSearch(
 
 /*
 |--------------------------------------------------------------------------
-| JSON
+| JSON RESPONSE
 |--------------------------------------------------------------------------
 */
 
@@ -915,7 +1852,12 @@ function sendJson(
 ) {
 
     const body =
-        JSON.stringify(data);
+        JSON.stringify(
+            data,
+            null,
+            2
+        );
+
 
     res.writeHead(
         statusCode,
@@ -923,54 +1865,107 @@ function sendJson(
             "Content-Type":
                 "application/json; charset=utf-8",
 
+            "Cache-Control":
+                "no-store",
+
             "Content-Length":
-                Buffer.byteLength(body)
+                Buffer.byteLength(
+                    body
+                )
         }
     );
 
-    res.end(body);
+
+    res.end(
+        body
+    );
 }
 
 
 /*
 |--------------------------------------------------------------------------
-| Read POST body
+| READ REQUEST BODY
 |--------------------------------------------------------------------------
 */
 
-function readBody(req) {
+function readBody(
+    req
+) {
 
     return new Promise(
-        (resolve, reject) => {
+        (
+            resolve,
+            reject
+        ) => {
 
             let body = "";
+
 
             req.on(
                 "data",
                 chunk => {
-                    body += chunk;
+
+                    body +=
+                        chunk.toString(
+                            "utf8"
+                        );
+
+
+                    /*
+                     * Elak body terlalu besar.
+                     */
+
+                    if (
+                        body.length >
+                        1024 * 1024
+                    ) {
+
+                        reject(
+                            new Error(
+                                "Request body terlalu besar"
+                            )
+                        );
+
+                        req.destroy();
+                    }
                 }
             );
+
 
             req.on(
                 "end",
                 () => {
 
+                    if (
+                        !body.trim()
+                    ) {
+
+                        resolve({});
+                        return;
+                    }
+
+
                     try {
 
                         resolve(
-                            body
-                                ? JSON.parse(body)
-                                : {}
+                            JSON.parse(
+                                body
+                            )
                         );
 
-                    } catch (error) {
+                    } catch (
+                        error
+                    ) {
 
-                        reject(error);
-
+                        reject(
+                            new Error(
+                                "JSON request tidak sah"
+                            )
+                        );
                     }
                 }
             );
+
 
             req.on(
                 "error",
@@ -983,23 +1978,58 @@ function readBody(req) {
 
 /*
 |--------------------------------------------------------------------------
+| URL PATH
+|--------------------------------------------------------------------------
+*/
+
+function getPath(
+    req
+) {
+
+    try {
+
+        return new URL(
+            req.url,
+            `http://${req.headers.host || "localhost"}`
+        ).pathname;
+
+    } catch {
+
+        return req.url;
+    }
+}
+
+
+/*
+|--------------------------------------------------------------------------
 | HTTP SERVER
 |--------------------------------------------------------------------------
 */
 
 const server =
     http.createServer(
-        async (req, res) => {
+        async (
+            req,
+            res
+        ) => {
+
+            const path =
+                getPath(
+                    req
+                );
+
 
             try {
 
                 /*
-                 * HEALTH
+                 * --------------------------------------------------------
+                 * ROOT
+                 * --------------------------------------------------------
                  */
 
                 if (
                     req.method === "GET" &&
-                    req.url === "/health"
+                    path === "/"
                 ) {
 
                     return sendJson(
@@ -1011,29 +2041,70 @@ const server =
                             service:
                                 "turath",
 
-                            search_pages:
-                                SEARCH_PAGES,
-
-                            normal_limits:
-                                NORMAL_LIMITS,
-
-                            comparison_limits:
-                                COMPARISON_LIMITS,
-
-                            categories:
-                                CATEGORY_IDS
+                            message:
+                                "Turath search service is running."
                         }
                     );
                 }
 
 
                 /*
-                 * CATEGORIES
+                 * --------------------------------------------------------
+                 * HEALTH
+                 * --------------------------------------------------------
                  */
 
                 if (
                     req.method === "GET" &&
-                    req.url === "/categories"
+                    path === "/health"
+                ) {
+
+                    return sendJson(
+                        res,
+                        200,
+                        {
+                            ok: true,
+
+                            service:
+                                "turath",
+
+                            host:
+                                HOST,
+
+                            port:
+                                PORT,
+
+                            search_pages:
+                                SEARCH_PAGES,
+
+                            results_per_page:
+                                RESULTS_PER_PAGE,
+
+                            categories:
+                                CATEGORY_IDS,
+
+                            category_names:
+                                CATEGORY_NAMES,
+
+                            normal_limits:
+                                NORMAL_LIMITS,
+
+                            comparison_limits:
+                                COMPARISON_LIMITS
+                        }
+                    );
+                }
+
+
+                /*
+                 * --------------------------------------------------------
+                 * CATEGORIES
+                 * --------------------------------------------------------
+                 */
+
+                if (
+                    req.method === "GET" &&
+                    path === "/categories"
                 ) {
 
                     return sendJson(
@@ -1051,21 +2122,29 @@ const server =
 
 
                 /*
+                 * --------------------------------------------------------
                  * SEARCH
+                 * --------------------------------------------------------
                  */
 
                 if (
                     req.method === "POST" &&
-                    req.url === "/search"
+                    path === "/search"
                 ) {
 
                     const body =
-                        await readBody(req);
+                        await readBody(
+                            req
+                        );
+
 
                     const query =
                         String(
-                            body.query || ""
+                            body.query ||
+                            body.question ||
+                            ""
                         ).trim();
+
 
                     if (!query) {
 
@@ -1073,16 +2152,34 @@ const server =
                             res,
                             400,
                             {
+                                success:
+                                    false,
+
                                 error:
                                     "Query kosong"
                             }
                         );
                     }
 
+
+                    /*
+                     * Python app.py menghantar:
+                     *
+                     * {
+                     *   query: "...",
+                     *   comparison: true/false
+                     * }
+                     *
+                     * Kita masih detect sendiri supaya
+                     * service tidak bergantung kepada
+                     * client.
+                     */
+
                     const result =
                         await performSearch(
                             query
                         );
+
 
                     return sendJson(
                         res,
@@ -1093,87 +2190,123 @@ const server =
 
 
                 /*
-                 * BOOK
+                 * --------------------------------------------------------
+                 * BOOK INFO
+                 * --------------------------------------------------------
                  */
 
                 if (
                     req.method === "GET" &&
-                    req.url.startsWith(
+                    path.startsWith(
                         "/book/"
                     )
                 ) {
 
-                    const id =
-                        Number(
-                            req.url
-                                .split("/")[2]
-                                .split("?")[0]
+                    const parts =
+                        path.split(
+                            "/"
                         );
 
+
+                    const id =
+                        Number(
+                            parts[2]
+                        );
+
+
                     if (
-                        !Number.isFinite(id)
+                        !Number.isFinite(
+                            id
+                        )
                     ) {
 
                         return sendJson(
                             res,
                             400,
                             {
+                                success:
+                                    false,
+
                                 error:
                                     "Book ID tidak sah"
                             }
                         );
                     }
 
+
                     const result =
                         await getBookInfo(
                             id
                         );
 
+
                     return sendJson(
                         res,
                         200,
-                        result
+                        {
+                            success:
+                                true,
+
+                            data:
+                                result
+                        }
                     );
                 }
 
 
                 /*
+                 * --------------------------------------------------------
                  * PAGE
+                 * --------------------------------------------------------
                  */
 
                 if (
                     req.method === "GET" &&
-                    req.url.startsWith(
+                    path.startsWith(
                         "/page/"
                     )
                 ) {
 
                     const parts =
-                        req.url.split("/");
+                        path.split(
+                            "/"
+                        );
+
 
                     const bookId =
-                        Number(parts[2]);
+                        Number(
+                            parts[2]
+                        );
+
 
                     const page =
                         Number(
                             parts[3]
-                                ?.split("?")[0]
                         );
 
+
                     if (
-                        !Number.isFinite(bookId) ||
-                        !Number.isFinite(page)
+                        !Number.isFinite(
+                            bookId
+                        ) ||
+                        !Number.isFinite(
+                            page
+                        )
                     ) {
 
                         return sendJson(
                             res,
                             400,
                             {
+                                success:
+                                    false,
+
                                 error:
-                                    "Book ID/page tidak sah"
+                                    "Book ID atau page tidak sah"
                             }
                         );
                     }
+
 
                     const result =
                         await getPage(
@@ -1181,38 +2314,65 @@ const server =
                             page
                         );
 
+
                     return sendJson(
                         res,
                         200,
-                        result
+                        {
+                            success:
+                                true,
+
+                            data:
+                                result
+                        }
                     );
                 }
 
 
                 /*
-                 * NOT FOUND
+                 * --------------------------------------------------------
+                 * 404
+                 * --------------------------------------------------------
                  */
 
                 return sendJson(
                     res,
                     404,
                     {
+                        success:
+                            false,
+
                         error:
-                            "Not found"
+                            "Endpoint tidak ditemui",
+
+                        path
                     }
                 );
 
-            } catch (error) {
+
+            } catch (
+                error
+            ) {
 
                 console.error(
-                    "❌ TURATH SERVICE ERROR:",
+                    "❌ TURATH SERVICE ERROR:"
+                );
+
+
+                console.error(
+                    error?.stack ||
+                    error?.message ||
                     error
                 );
+
 
                 return sendJson(
                     res,
                     500,
                     {
+                        success:
+                            false,
+
                         error:
                             error?.message ||
                             String(error)
@@ -1225,7 +2385,28 @@ const server =
 
 /*
 |--------------------------------------------------------------------------
-| START
+| SERVER ERROR
+|--------------------------------------------------------------------------
+*/
+
+server.on(
+    "error",
+    error => {
+
+        console.error(
+            "❌ HTTP SERVER ERROR:"
+        );
+
+        console.error(
+            error
+        );
+    }
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| START SERVER
 |--------------------------------------------------------------------------
 */
 
@@ -1258,12 +2439,17 @@ server.listen(
         );
 
         console.log(
-            "📖 NORMAL:",
+            "📄 RESULTS PER PAGE:",
+            RESULTS_PER_PAGE
+        );
+
+        console.log(
+            "📘 NORMAL LIMITS:",
             NORMAL_LIMITS
         );
 
         console.log(
-            "⚖️ COMPARISON:",
+            "⚖️ COMPARISON LIMITS:",
             COMPARISON_LIMITS
         );
 
