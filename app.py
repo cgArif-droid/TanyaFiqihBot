@@ -7,8 +7,6 @@ import time
 import hashlib
 import threading
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from flask import Flask, jsonify
 
 from telegram import Update
@@ -20,93 +18,60 @@ from telegram.ext import (
     filters,
 )
 
+from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
-
 from langchain_google_genai import (
     GoogleGenerativeAIEmbeddings,
     ChatGoogleGenerativeAI,
 )
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from pypdf import PdfReader
+from supabase import create_client, Client
 
+from pypdf import PdfReader
 from pdf2image import convert_from_path
 import pytesseract
 
-from supabase import create_client
 
-
-# ============================================================
+# =========================================================
 # CONFIG
-# ============================================================
+# =========================================================
 
-GOOGLE_API_KEY = os.environ.get(
-    "GOOGLE_API_KEY",
-    ""
-)
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
-TELEGRAM_TOKEN = os.environ.get(
-    "TELEGRAM_TOKEN",
-    ""
-)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-SUPABASE_URL = os.environ.get(
-    "SUPABASE_URL",
-    ""
-)
+DATA_DIR = os.environ.get("DATA_DIR", "/var/data")
 
-SUPABASE_KEY = os.environ.get(
-    "SUPABASE_KEY",
-    ""
-)
-
-DATA_DIR = os.environ.get(
-    "DATA_DIR",
-    "/var/data"
-)
-
-OCR_WORKERS = int(
-    os.environ.get(
-        "OCR_WORKERS",
-        "1"
-    )
-)
-
-OCR_DPI = int(
-    os.environ.get(
-        "OCR_DPI",
-        "200"
-    )
-)
+OCR_WORKERS = int(os.environ.get("OCR_WORKERS", "1"))
+OCR_DPI = int(os.environ.get("OCR_DPI", "200"))
 
 MIN_TEXT_CHARS = 40
 
-LLM_MODEL = "gemini-2.5-flash"
-
-EMBEDDING_MODEL = "models/gemini-embedding-001"
-
-EMBEDDING_DIMENSION = 3072
-
-SEARCH_K = 6
-
-EMBEDDING_BATCH_SIZE = 16
-
-MAX_CONTEXT_CHARS = 24000
-
-
-# ============================================================
-# DIRECTORY
-# ============================================================
-
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
+LLM_MODEL = os.environ.get(
+    "LLM_MODEL",
+    "gemini-2.5-flash"
 )
 
-KITAB_DIR = os.path.join(
-    BASE_DIR,
-    "kitab"
+EMBEDDING_MODEL = os.environ.get(
+    "EMBEDDING_MODEL",
+    "models/gemini-embedding-001"
 )
+
+SEARCH_K = int(os.environ.get("SEARCH_K", "6"))
+
+EMBEDDING_BATCH_SIZE = int(
+    os.environ.get("EMBEDDING_BATCH_SIZE", "16")
+)
+
+
+# =========================================================
+# PATH
+# =========================================================
+
+KITAB_DIR = os.path.join(DATA_DIR, "kitab")
 
 EXTRACTED_DIR = os.path.join(
     DATA_DIR,
@@ -123,242 +88,148 @@ MANIFEST_FILE = os.path.join(
     "manifest.json"
 )
 
-
-os.makedirs(
-    DATA_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    EXTRACTED_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    PAGE_CACHE_DIR,
-    exist_ok=True
-)
+os.makedirs(KITAB_DIR, exist_ok=True)
+os.makedirs(EXTRACTED_DIR, exist_ok=True)
+os.makedirs(PAGE_CACHE_DIR, exist_ok=True)
 
 
-# ============================================================
+# =========================================================
 # SUPABASE
-# ============================================================
+# =========================================================
 
-supabase = None
+supabase: Client | None = None
 
-
-def create_supabase():
-
-    global supabase
-
-    if supabase is not None:
-
-        return supabase
-
-    if not SUPABASE_URL:
-
-        raise RuntimeError(
-            "SUPABASE_URL belum ditetapkan."
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(
+            SUPABASE_URL,
+            SUPABASE_KEY
         )
+        print("✅ Supabase connected")
+    except Exception as e:
+        print("❌ Supabase connection error:", e)
+else:
+    print("⚠️ SUPABASE_URL / SUPABASE_KEY belum ditetapkan")
 
-    if not SUPABASE_KEY:
 
+def get_supabase():
+
+    if supabase is None:
         raise RuntimeError(
-            "SUPABASE_KEY belum ditetapkan."
+            "Supabase belum dikonfigurasi. "
+            "Semak SUPABASE_URL dan SUPABASE_KEY."
         )
-
-    supabase = create_client(
-        SUPABASE_URL,
-        SUPABASE_KEY
-    )
 
     return supabase
 
 
-# ============================================================
-# GLOBAL STATUS
-# ============================================================
-
-INDEX_READY = False
-
-INDEX_STATUS = "starting"
-
-INDEX_PROGRESS = {
-    "book": "",
-    "page": 0,
-    "total_pages": 0,
-    "message": "",
-}
-
-FAILED_BOOKS = []
-
-INDEX_LOCK = threading.Lock()
-
-OCR_LANGUAGE = None
-
-OCR_LANGUAGE_LOCK = threading.Lock()
-
-
-# ============================================================
+# =========================================================
 # FLASK
-# ============================================================
+# =========================================================
 
 app = Flask(__name__)
+
+INDEX_READY = False
+INDEX_STATUS = {
+    "status": "STARTING",
+    "books": 0,
+    "processed": 0,
+    "failed": 0,
+}
 
 
 @app.route("/")
 def home():
 
-    with INDEX_LOCK:
-
-        status = INDEX_STATUS
-        ready = INDEX_READY
-
-    return jsonify(
-        {
-            "name": "TanyaFiqhBot",
-            "status": status,
-            "index_ready": ready,
-        }
-    )
+    return jsonify({
+        "app": "TanyaFiqhBot",
+        "status": "online",
+        "index_ready": INDEX_READY,
+        "index_status": INDEX_STATUS
+    })
 
 
 @app.route("/health")
 def health():
 
-    with INDEX_LOCK:
+    return jsonify({
+        "status": "ok",
+        "index_ready": INDEX_READY
+    })
 
-        progress = dict(
-            INDEX_PROGRESS
+
+@app.route("/books")
+def books():
+
+    try:
+
+        sb = get_supabase()
+
+        result = (
+            sb.table("books")
+            .select("*")
+            .order("id")
+            .execute()
         )
 
-        status = INDEX_STATUS
-
-        ready = INDEX_READY
-
-        failed = list(
-            FAILED_BOOKS
+        return jsonify(
+            result.data or []
         )
 
-    return jsonify(
-        {
-            "status": status,
-            "index_ready": ready,
-            "progress": progress,
-            "failed_books": failed,
-        }
-    )
+    except Exception as e:
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
-# ============================================================
-# STATUS
-# ============================================================
-
-def update_status(
-    status=None,
-    book=None,
-    page=None,
-    total_pages=None,
-    message=None,
-):
-
-    global INDEX_STATUS
-
-    with INDEX_LOCK:
-
-        if status is not None:
-
-            INDEX_STATUS = status
-
-        if book is not None:
-
-            INDEX_PROGRESS[
-                "book"
-            ] = book
-
-        if page is not None:
-
-            INDEX_PROGRESS[
-                "page"
-            ] = page
-
-        if total_pages is not None:
-
-            INDEX_PROGRESS[
-                "total_pages"
-            ] = total_pages
-
-        if message is not None:
-
-            INDEX_PROGRESS[
-                "message"
-            ] = message
-
-
-# ============================================================
-# TEXT NORMALIZATION
-# ============================================================
+# =========================================================
+# UTILITIES
+# =========================================================
 
 def normalize_text(text):
 
     if not text:
-
         return ""
 
-    text = text.replace(
-        "\x00",
-        " "
+    text = text.replace("\x00", " ")
+
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
     )
 
     text = re.sub(
-        r"\s+",
-        " ",
+        r"\n{3,}",
+        "\n\n",
         text
     )
 
     return text.strip()
 
 
-# ============================================================
-# FILE HASH
-# ============================================================
-
-def calculate_file_hash(path):
+def file_hash(path):
 
     sha = hashlib.sha256()
 
-    with open(
-        path,
-        "rb"
-    ) as file:
+    with open(path, "rb") as f:
 
         while True:
 
-            chunk = file.read(
-                1024 * 1024
-            )
+            chunk = f.read(1024 * 1024)
 
             if not chunk:
-
                 break
 
-            sha.update(
-                chunk
-            )
+            sha.update(chunk)
 
     return sha.hexdigest()
 
 
-# ============================================================
-# MANIFEST
-# ============================================================
-
 def load_manifest():
 
-    if not os.path.exists(
-        MANIFEST_FILE
-    ):
-
+    if not os.path.exists(MANIFEST_FILE):
         return {}
 
     try:
@@ -367,259 +238,71 @@ def load_manifest():
             MANIFEST_FILE,
             "r",
             encoding="utf-8"
-        ) as file:
+        ) as f:
 
-            return json.load(
-                file
-            )
+            return json.load(f)
 
-    except Exception as e:
-
-        print(
-            "Manifest error:",
-            e
-        )
+    except Exception:
 
         return {}
 
 
 def save_manifest(manifest):
 
-    temp = (
+    tmp_file = MANIFEST_FILE + ".tmp"
+
+    with open(
+        tmp_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            manifest,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(
+        tmp_file,
         MANIFEST_FILE
-        + ".tmp"
-    )
-
-    try:
-
-        with open(
-            temp,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                manifest,
-                file,
-                ensure_ascii=False,
-                indent=2
-            )
-
-        os.replace(
-            temp,
-            MANIFEST_FILE
-        )
-
-    except Exception as e:
-
-        print(
-            "Manifest save error:",
-            e
-        )
-
-
-# ============================================================
-# FIND BOOKS
-# ============================================================
-
-def find_books():
-
-    if not os.path.exists(
-        KITAB_DIR
-    ):
-
-        print(
-            "Folder kitab tidak wujud:",
-            KITAB_DIR
-        )
-
-        return []
-
-    patterns = [
-
-        os.path.join(
-            KITAB_DIR,
-            "**",
-            "*.pdf"
-        ),
-
-        os.path.join(
-            KITAB_DIR,
-            "**",
-            "*.PDF"
-        ),
-
-        os.path.join(
-            KITAB_DIR,
-            "**",
-            "*.txt"
-        ),
-
-        os.path.join(
-            KITAB_DIR,
-            "**",
-            "*.TXT"
-        ),
-
-    ]
-
-    files = []
-
-    for pattern in patterns:
-
-        files.extend(
-            glob.glob(
-                pattern,
-                recursive=True
-            )
-        )
-
-    return sorted(
-        set(files)
     )
 
 
-# ============================================================
-# CATEGORY
-# ============================================================
+# =========================================================
+# OCR CACHE
+# =========================================================
 
-def get_category(path):
+def page_cache_path(book_hash, page_number):
 
-    try:
-
-        relative = os.path.relpath(
-            path,
-            KITAB_DIR
-        )
-
-        parts = relative.split(
-            os.sep
-        )
-
-        if len(parts) >= 2:
-
-            return parts[0].upper()
-
-    except Exception:
-
-        pass
-
-    return "LAIN-LAIN"
-
-
-# ============================================================
-# OCR LANGUAGE
-# ============================================================
-
-def get_ocr_language():
-
-    global OCR_LANGUAGE
-
-    if OCR_LANGUAGE:
-
-        return OCR_LANGUAGE
-
-    with OCR_LANGUAGE_LOCK:
-
-        if OCR_LANGUAGE:
-
-            return OCR_LANGUAGE
-
-        try:
-
-            languages = (
-                pytesseract
-                .get_languages(
-                    config=""
-                )
-            )
-
-            selected = []
-
-            if "msa" in languages:
-
-                selected.append(
-                    "msa"
-                )
-
-            if "ara" in languages:
-
-                selected.append(
-                    "ara"
-                )
-
-            if "eng" in languages:
-
-                selected.append(
-                    "eng"
-                )
-
-            if selected:
-
-                OCR_LANGUAGE = "+".join(
-                    selected
-                )
-
-            else:
-
-                OCR_LANGUAGE = "eng"
-
-        except Exception as e:
-
-            print(
-                "OCR language error:",
-                e
-            )
-
-            OCR_LANGUAGE = "eng"
-
-    print(
-        "OCR language:",
-        OCR_LANGUAGE
-    )
-
-    return OCR_LANGUAGE
-
-
-# ============================================================
-# PAGE CACHE
-# ============================================================
-
-def get_page_cache_path(
-    book_hash,
-    page_number
-):
-
-    folder = os.path.join(
+    book_dir = os.path.join(
         PAGE_CACHE_DIR,
         book_hash
     )
 
     os.makedirs(
-        folder,
+        book_dir,
         exist_ok=True
     )
 
     return os.path.join(
-        folder,
+        book_dir,
         f"{page_number}.txt"
     )
 
 
-def load_page_cache(
+def read_page_cache(
     book_hash,
     page_number
 ):
 
-    path = get_page_cache_path(
+    path = page_cache_path(
         book_hash,
         page_number
     )
 
-    if not os.path.exists(
-        path
-    ):
-
+    if not os.path.exists(path):
         return None
 
     try:
@@ -628,26 +311,13 @@ def load_page_cache(
             path,
             "r",
             encoding="utf-8"
-        ) as file:
+        ) as f:
 
-            text = file.read()
+            return f.read()
 
-        text = normalize_text(
-            text
-        )
+    except Exception:
 
-        if text:
-
-            return text
-
-    except Exception as e:
-
-        print(
-            "Cache read error:",
-            e
-        )
-
-    return None
+        return None
 
 
 def save_page_cache(
@@ -656,212 +326,115 @@ def save_page_cache(
     text
 ):
 
-    text = normalize_text(
-        text
-    )
-
-    if not text:
-
-        return False
-
-    path = get_page_cache_path(
+    path = page_cache_path(
         book_hash,
         page_number
     )
 
-    temp = path + ".tmp"
+    with open(
+        path,
+        "w",
+        encoding="utf-8"
+    ) as f:
 
-    try:
-
-        with open(
-            temp,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            file.write(
-                text
-            )
-
-        os.replace(
-            temp,
-            path
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "Cache save error:",
-            e
-        )
-
-        return False
+        f.write(text)
 
 
-# ============================================================
-# WHOLE TEXT CACHE
-# ============================================================
+# =========================================================
+# PDF EXTRACTION
+# =========================================================
 
-def get_whole_text_path(book_hash):
+def extract_pdf_pages(path, book_hash):
 
-    return os.path.join(
-        EXTRACTED_DIR,
-        f"{book_hash}.txt"
+    reader = PdfReader(path)
+
+    total_pages = len(reader.pages)
+
+    pages = []
+
+    print(
+        f"📖 PDF: {os.path.basename(path)} "
+        f"({total_pages} halaman)"
     )
 
+    for page_index in range(total_pages):
 
-def load_whole_text(book_hash):
+        page_number = page_index + 1
 
-    path = get_whole_text_path(
-        book_hash
-    )
-
-    if not os.path.exists(
-        path
-    ):
-
-        return None
-
-    try:
-
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            text = file.read()
-
-        text = normalize_text(
-            text
+        cached = read_page_cache(
+            book_hash,
+            page_number
         )
 
-        if text:
+        if cached is not None:
 
-            return text
+            text = normalize_text(cached)
 
-    except Exception as e:
+        else:
 
-        print(
-            "Whole cache error:",
-            e
-        )
+            text = ""
 
-    return None
+            try:
 
+                native_text = (
+                    reader.pages[page_index]
+                    .extract_text() or ""
+                )
 
-def save_whole_text(
-    book_hash,
-    text
-):
+                native_text = normalize_text(
+                    native_text
+                )
 
-    text = normalize_text(
-        text
-    )
+                if len(native_text) >= MIN_TEXT_CHARS:
 
-    if not text:
+                    text = native_text
 
-        return False
+            except Exception:
 
-    path = get_whole_text_path(
-        book_hash
-    )
+                text = ""
 
-    temp = path + ".tmp"
+            # OCR jika native PDF tidak mencukupi
+            if len(text) < MIN_TEXT_CHARS:
 
-    try:
+                try:
 
-        with open(
-            temp,
-            "w",
-            encoding="utf-8"
-        ) as file:
+                    print(
+                        f"🔍 OCR halaman "
+                        f"{page_number}/{total_pages}"
+                    )
 
-            file.write(
-                text
-            )
+                    images = convert_from_path(
+                        path,
+                        dpi=OCR_DPI,
+                        first_page=page_number,
+                        last_page=page_number,
+                        fmt="jpeg",
+                        thread_count=1
+                    )
 
-        os.replace(
-            temp,
-            path
-        )
+                    if images:
 
-        return True
+                        image = images[0]
 
-    except Exception as e:
+                        text = pytesseract.image_to_string(
+                            image,
+                            lang="ara+msa+eng"
+                        )
 
-        print(
-            "Whole text save error:",
-            e
-        )
+                        del image
 
-        return False
+                    del images
 
+                except Exception as e:
 
-# ============================================================
-# OCR ONE PAGE
-# ============================================================
+                    print(
+                        f"❌ OCR page {page_number}:",
+                        e
+                    )
 
-def ocr_single_page(
-    pdf_path,
-    page_number,
-    book_hash
-):
+                    text = ""
 
-    cached = load_page_cache(
-        book_hash,
-        page_number
-    )
-
-    if cached:
-
-        return (
-            page_number,
-            cached,
-            True
-        )
-
-    try:
-
-        print(
-            f"OCR page {page_number}"
-        )
-
-        images = convert_from_path(
-            pdf_path,
-            dpi=OCR_DPI,
-            first_page=page_number,
-            last_page=page_number,
-            fmt="jpeg",
-            grayscale=True,
-            thread_count=1,
-        )
-
-        if not images:
-
-            return (
-                page_number,
-                "",
-                False
-            )
-
-        image = images[0]
-
-        language = get_ocr_language()
-
-        text = pytesseract.image_to_string(
-            image,
-            lang=language,
-            config="--psm 6"
-        )
-
-        text = normalize_text(
-            text
-        )
-
-        if text:
+            text = normalize_text(text)
 
             save_page_cache(
                 book_hash,
@@ -869,376 +442,103 @@ def ocr_single_page(
                 text
             )
 
-        del image
-        del images
-
-        gc.collect()
-
-        return (
-            page_number,
-            text,
-            False
-        )
-
-    except Exception as e:
-
-        print(
-            f"OCR page {page_number} gagal:",
-            e
-        )
-
-        gc.collect()
-
-        return (
-            page_number,
-            "",
-            False
-        )
-
-
-# ============================================================
-# EXTRACT PDF BY PAGE
-# ============================================================
-
-def extract_pdf_pages(
-    pdf_path,
-    book_hash
-):
-
-    print(
-        "Buka PDF:",
-        pdf_path
-    )
-
-    reader = PdfReader(
-        pdf_path
-    )
-
-    total_pages = len(
-        reader.pages
-    )
-
-    filename = os.path.basename(
-        pdf_path
-    )
-
-    print(
-        f"Jumlah halaman: {total_pages}"
-    )
-
-    update_status(
-        book=filename,
-        page=0,
-        total_pages=total_pages,
-        message="Membaca PDF"
-    )
-
-    page_texts = [
-        ""
-        for _ in range(
-            total_pages
-        )
-    ]
-
-    ocr_pages = []
-
-    # --------------------------------------------------------
-    # TEXT LAYER
-    # --------------------------------------------------------
-
-    for index in range(
-        total_pages
-    ):
-
-        page_number = index + 1
-
-        try:
-
-            text = (
-                reader.pages[
-                    index
-                ].extract_text()
-            )
-
-            text = normalize_text(
+        pages.append(
+            (
+                page_number,
                 text
             )
+        )
 
-        except Exception as e:
+        if page_number % 10 == 0:
 
             print(
-                f"Text page {page_number} error:",
-                e
+                f"📄 Progress OCR: "
+                f"{page_number}/{total_pages}"
             )
 
-            text = ""
+        gc.collect()
 
-        if len(text) >= MIN_TEXT_CHARS:
-
-            page_texts[
-                index
-            ] = text
-
-        else:
-
-            cached_page = load_page_cache(
-                book_hash,
-                page_number
-            )
-
-            if cached_page:
-
-                page_texts[
-                    index
-                ] = cached_page
-
-            else:
-
-                ocr_pages.append(
-                    page_number
-                )
-
-        if (
-            page_number % 25 == 0
-            or page_number == total_pages
-        ):
-
-            update_status(
-                page=page_number,
-                total_pages=total_pages,
-                message=(
-                    f"Semak text "
-                    f"{page_number}/"
-                    f"{total_pages}"
-                )
-            )
-
-    # --------------------------------------------------------
-    # OCR
-    # --------------------------------------------------------
-
-    print(
-        f"Page perlu OCR: {len(ocr_pages)}"
-    )
-
-    if ocr_pages:
-
-        workers = max(
-            1,
-            OCR_WORKERS
-        )
-
-        update_status(
-            page=0,
-            total_pages=len(
-                ocr_pages
-            ),
-            message="OCR sedang berjalan"
-        )
-
-        with ThreadPoolExecutor(
-            max_workers=workers
-        ) as executor:
-
-            futures = {}
-
-            for page_number in ocr_pages:
-
-                future = executor.submit(
-                    ocr_single_page,
-                    pdf_path,
-                    page_number,
-                    book_hash
-                )
-
-                futures[
-                    future
-                ] = page_number
-
-            completed = 0
-
-            for future in as_completed(
-                futures
-            ):
-
-                page_number = futures[
-                    future
-                ]
-
-                try:
-
-                    (
-                        result_page,
-                        text,
-                        from_cache,
-                    ) = future.result()
-
-                    page_texts[
-                        result_page - 1
-                    ] = text
-
-                except Exception as e:
-
-                    print(
-                        f"OCR future "
-                        f"{page_number} error:",
-                        e
-                    )
-
-                completed += 1
-
-                update_status(
-                    page=completed,
-                    total_pages=len(
-                        ocr_pages
-                    ),
-                    message=(
-                        f"OCR "
-                        f"{completed}/"
-                        f"{len(ocr_pages)}"
-                    )
-                )
-
-                if completed % 10 == 0:
-
-                    gc.collect()
-
-    try:
-
-        reader.stream.close()
-
-    except Exception:
-
-        pass
-
-    del reader
-
-    gc.collect()
-
-    return page_texts
+    return pages, total_pages
 
 
-# ============================================================
+# =========================================================
 # TXT
-# ============================================================
+# =========================================================
 
 def extract_txt(path):
 
-    try:
+    with open(
+        path,
+        "r",
+        encoding="utf-8",
+        errors="ignore"
+    ) as f:
 
-        with open(
+        text = f.read()
+
+    text = normalize_text(text)
+
+    return [
+        (1, text)
+    ], 1
+
+
+# =========================================================
+# EXTRACT DOCUMENT
+# =========================================================
+
+def extract_document(
+    path,
+    book_hash
+):
+
+    extension = os.path.splitext(
+        path
+    )[1].lower()
+
+    if extension == ".pdf":
+
+        return extract_pdf_pages(
             path,
-            "r",
-            encoding="utf-8"
-        ) as file:
+            book_hash
+        )
 
-            return normalize_text(
-                file.read()
-            )
+    elif extension == ".txt":
 
-    except Exception:
+        return extract_txt(path)
 
-        try:
+    else:
 
-            with open(
-                path,
-                "r",
-                encoding="utf-8-sig"
-            ) as file:
-
-                return normalize_text(
-                    file.read()
-                )
-
-        except Exception as e:
-
-            print(
-                "TXT error:",
-                e
-            )
-
-            return ""
+        raise ValueError(
+            f"Format tidak disokong: {extension}"
+        )
 
 
-# ============================================================
-# EMBEDDING
-# ============================================================
+# =========================================================
+# GEMINI
+# =========================================================
 
-def create_embeddings():
+def get_embeddings():
 
     return GoogleGenerativeAIEmbeddings(
         model=EMBEDDING_MODEL,
         google_api_key=GOOGLE_API_KEY,
-        output_dimensionality=EMBEDDING_DIMENSION,
+        output_dimensionality=3072,
     )
 
 
-# ============================================================
-# DELETE SOURCE FROM SUPABASE
-# ============================================================
+def get_llm():
 
-def delete_source(book_hash):
-
-    if not book_hash:
-
-        return
-
-    try:
-
-        client = create_supabase()
-
-        result = client.rpc(
-            "delete_book_chunks",
-            {
-                "target_file_hash": book_hash
-            }
-        ).execute()
-
-        print(
-            "Data lama dipadam:",
-            book_hash
-        )
-
-        return result
-
-    except Exception as e:
-
-        print(
-            "Delete source error:",
-            e
-        )
-
-
-# ============================================================
-# GET BOOK
-# ============================================================
-
-def get_book_by_hash(book_hash):
-
-    client = create_supabase()
-
-    result = (
-        client
-        .table("books")
-        .select("*")
-        .eq(
-            "file_hash",
-            book_hash
-        )
-        .limit(1)
-        .execute()
+    return ChatGoogleGenerativeAI(
+        model=LLM_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.2,
     )
 
-    if result.data:
 
-        return result.data[0]
-
-    return None
-
-
-# ============================================================
-# CREATE / UPDATE BOOK
-# ============================================================
+# =========================================================
+# SUPABASE BOOK
+# =========================================================
 
 def create_book_record(
     path,
@@ -1247,703 +547,484 @@ def create_book_record(
     total_pages
 ):
 
-    client = create_supabase()
+    sb = get_supabase()
 
-    filename = os.path.basename(
-        path
-    )
+    file_name = os.path.basename(path)
 
-    existing = get_book_by_hash(
-        book_hash
-    )
-
-    data = {
-        "kitab_name": filename,
-        "category": category,
-        "file_name": filename,
-        "file_path": path,
-        "file_hash": book_hash,
-        "total_pages": total_pages,
-        "processed_pages": 0,
-        "total_chunks": 0,
-        "status": "PROCESSING",
-        "current_page": 0,
-    }
-
-    if existing:
-
-        result = (
-            client
-            .table("books")
-            .update(data)
-            .eq(
-                "id",
-                existing["id"]
-            )
-            .execute()
-        )
-
-        if result.data:
-
-            return result.data[0]
-
-        return existing
+    kitab_name = os.path.splitext(
+        file_name
+    )[0]
 
     result = (
-        client
-        .table("books")
-        .insert(data)
+        sb.table("books")
+        .upsert(
+            {
+                "kitab_name": kitab_name,
+                "category": category,
+                "file_name": file_name,
+                "file_path": path,
+                "file_hash": book_hash,
+                "total_pages": total_pages,
+                "processed_pages": 0,
+                "total_chunks": 0,
+                "status": "PROCESSING",
+                "current_page": 0,
+                "error_message": None,
+            },
+            on_conflict="file_hash"
+        )
         .execute()
     )
 
     if not result.data:
 
         raise RuntimeError(
-            "Gagal create rekod books."
+            "Gagal create/update book dalam Supabase"
         )
 
-    return result.data[0]
+    return result.data[0]["id"]
 
-
-# ============================================================
-# UPDATE BOOK
-# ============================================================
 
 def update_book(
     book_id,
-    **data
+    **fields
 ):
 
-    client = create_supabase()
+    sb = get_supabase()
 
     (
-        client
-        .table("books")
-        .update(data)
-        .eq(
-            "id",
-            book_id
-        )
+        sb.table("books")
+        .update(fields)
+        .eq("id", book_id)
         .execute()
     )
 
 
-# ============================================================
-# PROCESS PDF
-# ============================================================
+# =========================================================
+# DELETE BOOK
+# =========================================================
 
-def process_pdf_book(
-    path,
-    book_hash,
-    category
-):
+def delete_source(book_hash):
 
-    filename = os.path.basename(
-        path
-    )
+    sb = get_supabase()
 
-    # --------------------------------------------------------
-    # PDF
-    # --------------------------------------------------------
+    try:
 
-    print(
-        "Membaca halaman PDF..."
-    )
+        sb.rpc(
+            "delete_book_chunks",
+            {
+                "target_file_hash": book_hash
+            }
+        ).execute()
 
-    page_texts = extract_pdf_pages(
-        path,
-        book_hash
-    )
-
-    total_pages = len(
-        page_texts
-    )
-
-    # --------------------------------------------------------
-    # Book record
-    # --------------------------------------------------------
-
-    book = create_book_record(
-        path,
-        book_hash,
-        category,
-        total_pages
-    )
-
-    book_id = book["id"]
-
-    # --------------------------------------------------------
-    # Splitter
-    # --------------------------------------------------------
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=150,
-        separators=[
-            "\n\n",
-            "\n",
-            ". ",
-            " ",
-            "",
-        ],
-    )
-
-    embeddings = create_embeddings()
-
-    total_chunks = 0
-
-    # --------------------------------------------------------
-    # Process setiap halaman
-    # --------------------------------------------------------
-
-    for page_index, page_text in enumerate(
-        page_texts
-    ):
-
-        page_number = page_index + 1
-
-        page_text = normalize_text(
-            page_text
-        )
-
-        if not page_text:
-
-            continue
-
-        chunks = splitter.split_text(
-            page_text
-        )
-
-        if not chunks:
-
-            continue
+    except Exception as e:
 
         print(
-            f"Halaman {page_number}: "
-            f"{len(chunks)} chunks"
+            "⚠️ RPC delete_book_chunks:",
+            e
         )
 
-        # ----------------------------------------------------
-        # Embedding secara batch
-        # ----------------------------------------------------
-
-        for start in range(
-            0,
-            len(chunks),
-            EMBEDDING_BATCH_SIZE
-        ):
-
-            batch = chunks[
-                start:
-                start + EMBEDDING_BATCH_SIZE
-            ]
-
-            batch = [
-                normalize_text(x)
-                for x in batch
-                if normalize_text(x)
-            ]
-
-            if not batch:
-
-                continue
-
-            print(
-                f"Embedding halaman "
-                f"{page_number}, "
-                f"{start + 1}-"
-                f"{start + len(batch)}"
-            )
-
-            vectors = embeddings.embed_documents(
-                batch
-            )
-
-            rows = []
-
-            for local_index, (
-                chunk_text,
-                vector
-            ) in enumerate(
-                zip(
-                    batch,
-                    vectors
-                )
-            ):
-
-                chunk_number = (
-                    start
-                    + local_index
-                    + 1
-                )
-
-                rows.append(
-                    {
-                        "book_id": book_id,
-                        "content": chunk_text,
-                        "embedding": vector,
-                        "kitab_name": filename,
-                        "category": category,
-                        "page_number": page_number,
-                        "chunk_number": chunk_number,
-                        "file_hash": book_hash,
-                    }
-                )
-
-            if rows:
-
-                client = create_supabase()
-
-                client.table(
-                    "kitab_chunks"
-                ).upsert(
-                    rows,
-                    on_conflict=(
-                        "file_hash,"
-                        "page_number,"
-                        "chunk_number"
-                    )
-                ).execute()
-
-                total_chunks += len(
-                    rows
-                )
-
-            update_book(
-                book_id,
-                processed_pages=page_number,
-                total_chunks=total_chunks,
-                status="EMBEDDING",
-                current_page=page_number,
-            )
-
-            update_status(
-                book=filename,
-                page=page_number,
-                total_pages=total_pages,
-                message=(
-                    f"Embedding halaman "
-                    f"{page_number}/"
-                    f"{total_pages}"
-                )
-            )
-
-            del vectors
-            del rows
-
-            gc.collect()
-
-        del chunks
-
-        gc.collect()
-
-    # --------------------------------------------------------
-    # READY
-    # --------------------------------------------------------
-
-    update_book(
-        book_id,
-        processed_pages=total_pages,
-        total_chunks=total_chunks,
-        status="READY",
-        current_page=total_pages,
-    )
-
-    print()
-    print(
-        "KITAB SIAP:",
-        filename
+    (
+        sb.table("books")
+        .delete()
+        .eq("file_hash", book_hash)
+        .execute()
     )
 
     print(
-        "Jumlah chunks:",
-        total_chunks
+        f"🗑️ Supabase data deleted: {book_hash[:12]}"
     )
 
 
-# ============================================================
-# PROCESS TXT
-# ============================================================
-
-def process_txt_book(
-    path,
-    book_hash,
-    category
-):
-
-    filename = os.path.basename(
-        path
-    )
-
-    full_text = extract_txt(
-        path
-    )
-
-    if not full_text:
-
-        raise RuntimeError(
-            "Tiada teks berjaya diperoleh."
-        )
-
-    book = create_book_record(
-        path,
-        book_hash,
-        category,
-        1
-    )
-
-    book_id = book["id"]
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=150,
-        separators=[
-            "\n\n",
-            "\n",
-            ". ",
-            " ",
-            "",
-        ],
-    )
-
-    chunks = splitter.split_text(
-        full_text
-    )
-
-    embeddings = create_embeddings()
-
-    total_chunks = 0
-
-    for start in range(
-        0,
-        len(chunks),
-        EMBEDDING_BATCH_SIZE
-    ):
-
-        batch = chunks[
-            start:
-            start + EMBEDDING_BATCH_SIZE
-        ]
-
-        vectors = embeddings.embed_documents(
-            batch
-        )
-
-        rows = []
-
-        for local_index, (
-            chunk_text,
-            vector
-        ) in enumerate(
-            zip(
-                batch,
-                vectors
-            )
-        ):
-
-            chunk_number = (
-                start
-                + local_index
-                + 1
-            )
-
-            rows.append(
-                {
-                    "book_id": book_id,
-                    "content": chunk_text,
-                    "embedding": vector,
-                    "kitab_name": filename,
-                    "category": category,
-                    "page_number": 1,
-                    "chunk_number": chunk_number,
-                    "file_hash": book_hash,
-                }
-            )
-
-        if rows:
-
-            client = create_supabase()
-
-            client.table(
-                "kitab_chunks"
-            ).upsert(
-                rows,
-                on_conflict=(
-                    "file_hash,"
-                    "page_number,"
-                    "chunk_number"
-                )
-            ).execute()
-
-            total_chunks += len(
-                rows
-            )
-
-        update_book(
-            book_id,
-            processed_pages=1,
-            total_chunks=total_chunks,
-            status="EMBEDDING",
-            current_page=1,
-        )
-
-        del vectors
-        del rows
-
-        gc.collect()
-
-    update_book(
-        book_id,
-        processed_pages=1,
-        total_chunks=total_chunks,
-        status="READY",
-        current_page=1,
-    )
-
-    print(
-        "TXT SIAP:",
-        filename
-    )
-
-
-# ============================================================
+# =========================================================
 # PROCESS BOOK
-# ============================================================
+# =========================================================
 
 def process_book(
     path,
-    book_hash
+    category
 ):
 
-    filename = os.path.basename(
-        path
-    )
+    global INDEX_STATUS
 
-    category = get_category(
-        path
-    )
+    book_hash = file_hash(path)
 
     print()
+    print("=" * 60)
     print(
-        "=" * 60
+        "📚 PROCESS:",
+        os.path.basename(path)
     )
-
     print(
-        "KITAB:",
-        filename
-    )
-
-    print(
-        "KATEGORI:",
+        "📂 CATEGORY:",
         category
     )
-
     print(
-        "=" * 60
+        "🔑 HASH:",
+        book_hash[:16]
     )
+    print("=" * 60)
 
-    update_status(
-        book=filename,
-        message="Mengekstrak dan embedding"
-    )
+    book_id = None
 
-    if path.lower().endswith(
-        ".txt"
+    try:
+
+        # Bersihkan data lama jika ada
+        delete_source(book_hash)
+
+        # ---------------------------------------------
+        # EXTRACT
+        # ---------------------------------------------
+
+        pages, total_pages = extract_document(
+            path,
+            book_hash
+        )
+
+        # ---------------------------------------------
+        # CREATE BOOK
+        # ---------------------------------------------
+
+        book_id = create_book_record(
+            path,
+            book_hash,
+            category,
+            total_pages
+        )
+
+        update_book(
+            book_id,
+            status="EMBEDDING"
+        )
+
+        # ---------------------------------------------
+        # SPLITTER
+        # ---------------------------------------------
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1200,
+            chunk_overlap=150,
+            separators=[
+                "\n\n",
+                "\n",
+                " ",
+                ""
+            ]
+        )
+
+        embeddings = get_embeddings()
+
+        total_chunks = 0
+
+        # ---------------------------------------------
+        # PROCESS PAGE BY PAGE
+        # ---------------------------------------------
+
+        for page_number, page_text in pages:
+
+            if not page_text:
+                continue
+
+            if len(page_text) < MIN_TEXT_CHARS:
+                continue
+
+            chunks = splitter.split_text(
+                page_text
+            )
+
+            if not chunks:
+                continue
+
+            for batch_start in range(
+                0,
+                len(chunks),
+                EMBEDDING_BATCH_SIZE
+            ):
+
+                batch = chunks[
+                    batch_start:
+                    batch_start + EMBEDDING_BATCH_SIZE
+                ]
+
+                print(
+                    f"🧠 Embedding "
+                    f"page {page_number} "
+                    f"batch "
+                    f"{batch_start + 1}-"
+                    f"{batch_start + len(batch)}"
+                )
+
+                vectors = embeddings.embed_documents(
+                    batch
+                )
+
+                rows = []
+
+                for i, (
+                    chunk_text,
+                    vector
+                ) in enumerate(
+                    zip(batch, vectors)
+                ):
+
+                    chunk_number = (
+                        batch_start + i + 1
+                    )
+
+                    rows.append(
+                        {
+                            "book_id": book_id,
+                            "content": chunk_text,
+                            "embedding": vector,
+                            "kitab_name": os.path.splitext(
+                                os.path.basename(path)
+                            )[0],
+                            "category": category,
+                            "page_number": page_number,
+                            "chunk_number": chunk_number,
+                            "file_hash": book_hash,
+                        }
+                    )
+
+                if rows:
+
+                    (
+                        get_supabase()
+                        .table("kitab_chunks")
+                        .upsert(
+                            rows,
+                            on_conflict=(
+                                "file_hash,"
+                                "page_number,"
+                                "chunk_number"
+                            )
+                        )
+                        .execute()
+                    )
+
+                    total_chunks += len(rows)
+
+                del vectors
+                del rows
+                gc.collect()
+
+            # Progress database
+            update_book(
+                book_id,
+                status="EMBEDDING",
+                processed_pages=page_number,
+                current_page=page_number,
+                total_chunks=total_chunks
+            )
+
+            print(
+                f"✅ Page {page_number}/{total_pages} "
+                f"| chunks: {total_chunks}"
+            )
+
+        # ---------------------------------------------
+        # READY
+        # ---------------------------------------------
+
+        update_book(
+            book_id,
+            status="READY",
+            processed_pages=total_pages,
+            current_page=total_pages,
+            total_chunks=total_chunks,
+            error_message=None
+        )
+
+        print()
+        print(
+            f"🎉 SIAP: "
+            f"{os.path.basename(path)}"
+        )
+
+        print(
+            f"📄 Pages: {total_pages}"
+        )
+
+        print(
+            f"🧩 Chunks: {total_chunks}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print()
+        print(
+            "❌ ERROR PROCESS BOOK:",
+            e
+        )
+
+        if book_id:
+
+            try:
+
+                update_book(
+                    book_id,
+                    status="FAILED",
+                    error_message=str(e)
+                )
+
+            except Exception:
+
+                pass
+
+        return False
+
+
+# =========================================================
+# FIND BOOKS
+# =========================================================
+
+def discover_books():
+
+    books = []
+
+    extensions = [
+        "*.pdf",
+        "*.PDF",
+        "*.txt",
+        "*.TXT"
+    ]
+
+    for category_path in glob.glob(
+        os.path.join(
+            KITAB_DIR,
+            "*"
+        )
     ):
 
-        process_txt_book(
-            path,
-            book_hash,
-            category
-        )
+        if not os.path.isdir(
+            category_path
+        ):
+            continue
 
-    else:
+        category = os.path.basename(
+            category_path
+        ).strip().upper()
 
-        process_pdf_book(
-            path,
-            book_hash,
-            category
-        )
+        for extension in extensions:
+
+            books.extend(
+                glob.glob(
+                    os.path.join(
+                        category_path,
+                        extension
+                    )
+                )
+            )
+
+    return books
 
 
-# ============================================================
+# =========================================================
 # SYNC BOOKS
-# ============================================================
+# =========================================================
 
 def sync_books():
 
     global INDEX_READY
-    global FAILED_BOOKS
+    global INDEX_STATUS
 
-    INDEX_READY = False
-
-    FAILED_BOOKS = []
-
-    update_status(
-        status="indexing",
-        message="Mula indexing"
-    )
+    print()
+    print("=" * 60)
+    print("🔄 SYNC KITAB")
+    print("=" * 60)
 
     manifest = load_manifest()
 
-    files = find_books()
+    book_paths = discover_books()
 
-    print()
+    INDEX_STATUS = {
+        "status": "PROCESSING",
+        "books": len(book_paths),
+        "processed": 0,
+        "failed": 0,
+    }
+
     print(
-        "Jumlah kitab:",
-        len(files)
+        f"📚 Jumlah kitab: {len(book_paths)}"
     )
 
-    current_files = {}
+    current_hashes = set()
 
-    # --------------------------------------------------------
-    # HASH
-    # --------------------------------------------------------
-
-    for path in files:
+    for path in book_paths:
 
         try:
 
-            current_files[
-                path
-            ] = calculate_file_hash(
-                path
-            )
+            book_hash = file_hash(path)
 
-        except Exception as e:
-
-            print(
-                "Hash gagal:",
-                path,
-                e
-            )
-
-    # --------------------------------------------------------
-    # DELETE REMOVED
-    # --------------------------------------------------------
-
-    for old_path in list(
-        manifest.keys()
-    ):
-
-        if old_path not in current_files:
-
-            old_hash = (
-                manifest[
-                    old_path
-                ].get(
-                    "hash"
-                )
-            )
-
-            if old_hash:
-
-                print(
-                    "Kitab dibuang:",
-                    old_path
-                )
-
-                delete_source(
-                    old_hash
-                )
-
-            del manifest[
-                old_path
-            ]
-
-    save_manifest(
-        manifest
-    )
-
-    # --------------------------------------------------------
-    # PROCESS
-    # --------------------------------------------------------
-
-    for path, book_hash in (
-        current_files.items()
-    ):
-
-        filename = os.path.basename(
-            path
-        )
-
-        old = manifest.get(
-            path
-        )
-
-        # ----------------------------------------------------
-        # READY
-        # ----------------------------------------------------
-
-        if (
-            old
-            and old.get("hash")
-            == book_hash
-            and old.get("status")
-            == "ready"
-        ):
-
-            print(
-                "SKIP:",
-                filename
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # CHANGED
-        # ----------------------------------------------------
-
-        if old:
-
-            old_hash = old.get(
-                "hash"
-            )
-
-            if (
-                old_hash
-                and old_hash != book_hash
-            ):
-
-                print(
-                    "Kitab berubah:",
-                    filename
-                )
-
-                delete_source(
-                    old_hash
-                )
-
-        # ----------------------------------------------------
-        # PROCESS
-        # ----------------------------------------------------
-
-        try:
-
-            update_status(
-                book=filename,
-                page=0,
-                total_pages=0,
-                message=(
-                    "Memproses "
-                    + filename
-                )
-            )
-
-            process_book(
-                path,
+            current_hashes.add(
                 book_hash
             )
 
-            manifest[path] = {
-                "hash": book_hash,
-                "status": "ready",
-                "filename": filename,
-                "category": get_category(
-                    path
-                ),
-                "updated": time.time(),
-            }
+            category = os.path.basename(
+                os.path.dirname(path)
+            ).strip().upper()
+
+            filename = os.path.basename(
+                path
+            )
+
+            old = manifest.get(
+                path
+            )
+
+            # Jika fail sama dan sudah READY
+            if (
+                old
+                and old.get("hash") == book_hash
+                and old.get("status") == "READY"
+            ):
+
+                print(
+                    f"⏭️ SKIP: {filename}"
+                )
+
+                INDEX_STATUS[
+                    "processed"
+                ] += 1
+
+                continue
+
+            print(
+                f"🆕 PROCESS: {filename}"
+            )
+
+            success = process_book(
+                path,
+                category
+            )
+
+            if success:
+
+                manifest[path] = {
+                    "hash": book_hash,
+                    "status": "READY",
+                    "category": category,
+                    "updated_at": time.time()
+                }
+
+                INDEX_STATUS[
+                    "processed"
+                ] += 1
+
+            else:
+
+                manifest[path] = {
+                    "hash": book_hash,
+                    "status": "FAILED",
+                    "category": category,
+                    "updated_at": time.time()
+                }
+
+                INDEX_STATUS[
+                    "failed"
+                ] += 1
 
             save_manifest(
                 manifest
@@ -1951,250 +1032,195 @@ def sync_books():
 
         except Exception as e:
 
-            print()
             print(
-                "KITAB GAGAL:",
-                filename
+                f"❌ Sync error "
+                f"{path}: {e}"
             )
 
-            print(
-                "ERROR:",
-                e
-            )
+            INDEX_STATUS[
+                "failed"
+            ] += 1
 
-            FAILED_BOOKS.append(
-                filename
-            )
-
-            manifest[path] = {
-                "hash": book_hash,
-                "status": "failed",
-                "filename": filename,
-                "category": get_category(
-                    path
-                ),
-                "error": str(e),
-                "updated": time.time(),
-            }
-
-            save_manifest(
-                manifest
-            )
-
-        finally:
-
-            gc.collect()
+    INDEX_STATUS[
+        "status"
+    ] = "READY"
 
     INDEX_READY = True
 
-    update_status(
-        status="ready",
-        message="Index siap"
-    )
-
     print()
-    print(
-        "=" * 60
-    )
+    print("=" * 60)
+    print("✅ SYNC SELESAI")
+    print("=" * 60)
 
     print(
-        "INDEX SIAP"
-    )
-
-    print(
-        "=" * 60
+        INDEX_STATUS
     )
 
 
-# ============================================================
-# SEARCH SUPABASE
-# ============================================================
+# =========================================================
+# SEARCH SUPABASE VECTOR
+# =========================================================
 
 def search_books(
     question,
-    category=None
+    category=None,
+    limit=SEARCH_K
 ):
 
-    embeddings = create_embeddings()
+    embeddings = get_embeddings()
 
     query_vector = embeddings.embed_query(
         question
     )
 
-    client = create_supabase()
+    sb = get_supabase()
 
-    result = client.rpc(
+    result = sb.rpc(
         "match_kitab_chunks",
         {
             "query_embedding": query_vector,
-            "match_count": SEARCH_K,
+            "match_count": limit,
             "filter_category": category,
         }
     ).execute()
 
-    return result.data or []
+    rows = result.data or []
+
+    docs = []
+
+    for row in rows:
+
+        docs.append(
+            Document(
+                page_content=row.get(
+                    "content",
+                    ""
+                ),
+                metadata={
+                    "kitab_name": row.get(
+                        "kitab_name"
+                    ),
+                    "category": row.get(
+                        "category"
+                    ),
+                    "page_number": row.get(
+                        "page_number"
+                    ),
+                    "chunk_number": row.get(
+                        "chunk_number"
+                    ),
+                    "similarity": row.get(
+                        "similarity"
+                    ),
+                }
+            )
+        )
+
+    return docs
 
 
-# ============================================================
-# LLM
-# ============================================================
-
-def create_llm():
-
-    return ChatGoogleGenerativeAI(
-        model=LLM_MODEL,
-        google_api_key=GOOGLE_API_KEY,
-        temperature=0.1,
-    )
-
-
-# ============================================================
-# ANSWER
-# ============================================================
+# =========================================================
+# GENERATE ANSWER
+# =========================================================
 
 def generate_answer(
     question,
     category=None
 ):
 
-    if not INDEX_READY:
-
-        return (
-            "📚 Sistem masih menyediakan "
-            "kitab. Sila cuba semula "
-            "sebentar lagi."
-        )
-
     try:
 
-        results = search_books(
+        docs = search_books(
             question,
-            category
+            category=category,
+            limit=SEARCH_K
         )
 
-        if not results:
+        if not docs:
 
             return (
                 "Maaf, saya tidak menemui "
-                "rujukan yang sesuai dalam "
-                "kitab yang tersedia."
+                "rujukan yang berkaitan dalam "
+                "kitab yang telah dimasukkan."
             )
 
         context_parts = []
 
-        for item in results:
+        for doc in docs:
+
+            metadata = doc.metadata
+
+            kitab = metadata.get(
+                "kitab_name",
+                "Tidak diketahui"
+            )
+
+            kategori = metadata.get(
+                "category",
+                ""
+            )
+
+            page = metadata.get(
+                "page_number",
+                "-"
+            )
+
+            similarity = metadata.get(
+                "similarity",
+                0
+            )
 
             context_parts.append(
-                "SUMBER: "
-                + str(
-                    item.get(
-                        "kitab_name",
-                        "Tidak diketahui"
-                    )
-                )
-                + "\n"
-                + "KATEGORI: "
-                + str(
-                    item.get(
-                        "category",
-                        "-"
-                    )
-                )
-                + "\n"
-                + "HALAMAN: "
-                + str(
-                    item.get(
-                        "page_number",
-                        "-"
-                    )
-                )
-                + "\n"
-                + "CHUNK: "
-                + str(
-                    item.get(
-                        "chunk_number",
-                        "-"
-                    )
-                )
-                + "\n"
-                + "SIMILARITY: "
-                + str(
-                    round(
-                        float(
-                            item.get(
-                                "similarity",
-                                0
-                            )
-                        ),
-                        4
-                    )
-                )
-                + "\n"
-                + "TEKS:\n"
-                + str(
-                    item.get(
-                        "content",
-                        ""
-                    )
-                )
+                f"""
+KITAB: {kitab}
+KATEGORI: {kategori}
+HALAMAN: {page}
+SIMILARITY: {similarity}
+
+{doc.page_content}
+"""
             )
 
-        context = (
-            "\n\n---\n\n"
-            .join(
-                context_parts
-            )
+        context = "\n\n".join(
+            context_parts
         )
 
-        context = context[
-            :MAX_CONTEXT_CHARS
-        ]
-
         prompt = f"""
-Anda ialah TanyaFiqhBot,
-pembantu rujukan ilmu Islam.
+Anda ialah TanyaFiqhBot, pembantu rujukan
+ilmu Islam.
 
-Jawab soalan pengguna dalam
-Bahasa Melayu yang mudah difahami.
+Jawab soalan pengguna berdasarkan kandungan
+kitab yang diberikan di bawah.
 
-PERATURAN PENTING:
+PENTING:
+1. Utamakan maklumat daripada kitab.
+2. Jangan mereka-reka dalil atau hukum.
+3. Jika maklumat tidak mencukupi, nyatakan
+   bahawa rujukan tidak mencukupi.
+4. Jangan mendakwa sesuatu itu pendapat ulama
+   tertentu jika tidak terdapat dalam konteks.
+5. Jawab dalam Bahasa Melayu yang mudah difahami.
+6. Jika terdapat dalil atau teks Arab dalam
+   konteks, boleh sertakan teks tersebut
+   jika relevan.
+7. Nyatakan nama kitab dan halaman sebagai
+   rujukan.
+8. Untuk isu khilaf, nyatakan bahawa terdapat
+   perbezaan pandangan jika konteks menunjukkan
+   demikian.
+9. Untuk persoalan hukum yang serius atau
+   melibatkan keadaan khusus seseorang,
+   sarankan pengguna merujuk ustaz/ulama
+   yang berkelayakan.
 
-1. Gunakan hanya maklumat daripada
-   konteks kitab yang diberikan.
-
-2. Jangan mereka-reka maklumat yang
-   tiada dalam konteks.
-
-3. Jika konteks tidak mencukupi,
-   nyatakan bahawa rujukan yang
-   ditemui tidak mencukupi.
-
-4. Jika terdapat perbezaan pandangan,
-   nyatakan berdasarkan sumber yang
-   ditemui.
-
-5. Jangan mendakwa jawapan ini
-   sebagai fatwa rasmi.
-
-6. Jawab terus soalan pengguna.
-
-7. Gunakan format yang mudah dibaca.
-
-8. Nyatakan nama kitab jika tersedia.
-
-9. Nyatakan nombor halaman jika tersedia.
-
-10. Jangan masukkan maklumat luar
-    daripada konteks kitab.
-
-SOALAN PENGGUNA:
+SOALAN:
 {question}
 
-KONTEKS KITAB:
+RUJUKAN KITAB:
 {context}
 """
 
-        llm = create_llm()
+        llm = get_llm()
 
         response = llm.invoke(
             [
@@ -2215,642 +1241,396 @@ KONTEKS KITAB:
                 answer
             )
 
-        answer = answer.strip()
+        # Tambah rujukan
+        references = []
 
-        del llm
-        del results
-        del context
+        seen = set()
 
-        gc.collect()
+        for doc in docs:
+
+            kitab = doc.metadata.get(
+                "kitab_name"
+            )
+
+            page = doc.metadata.get(
+                "page_number"
+            )
+
+            key = (
+                kitab,
+                page
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            references.append(
+                f"• {kitab} — hlm. {page}"
+            )
+
+        if references:
+
+            answer += (
+                "\n\n📚 *Rujukan:*\n"
+                + "\n".join(references)
+            )
 
         return answer
 
     except Exception as e:
 
         print(
-            "Generate answer error:",
+            "❌ generate_answer error:",
             e
         )
 
-        gc.collect()
-
         return (
-            "Maaf, berlaku masalah "
-            "ketika mencari jawapan. "
-            "Sila cuba lagi."
+            "Maaf, berlaku masalah ketika "
+            "memproses soalan. Sila cuba lagi."
         )
 
 
-# ============================================================
-# START
-# ============================================================
+# =========================================================
+# TELEGRAM
+# =========================================================
 
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not update.message:
+    message = update.effective_message
 
-        return
+    await message.reply_text(
+        """
+📚 *TanyaFiqhBot*
 
-    text = """
-🤖 *TanyaFiqhBot*
+Assalamualaikum 👋
 
-Assalamualaikum.
+Saya ialah chatbot rujukan ilmu Islam
+berdasarkan kitab yang dimasukkan ke dalam
+sistem.
 
-Saya membantu mencari jawapan
-berdasarkan kitab yang dimasukkan
-ke dalam sistem.
+🔎 Taip soalan anda untuk mencari jawapan.
 
 Contoh:
 
-• Apa hukum mandi wajib?
-• Apakah rukun solat?
-• Apa syarat sah puasa?
-• Bagaimana cara wuduk?
+• Apakah syarat sah solat?
+• Apa hukum terlupa membaca al-Fatihah?
+• Apakah rukun wuduk?
 
-*Command:*
+Kategori:
 
-/fiqh - Cari kitab Fiqh
-/tauhid - Cari kitab Tauhid
-/semua - Cari semua kitab
-/status - Status sistem
+/fiqh
+/tauhid
+/hadis
+/tafsir
+/sirah
+/akhlak
+/usulfiqh
 
-Anda juga boleh terus taip
-soalan tanpa command.
-"""
-
-    await update.message.reply_text(
-        text,
+/semua
+/status
+""",
         parse_mode="Markdown"
     )
 
-
-# ============================================================
-# STATUS TELEGRAM
-# ============================================================
 
 async def status_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not update.message:
+    message = update.effective_message
 
-        return
+    try:
 
-    with INDEX_LOCK:
+        sb = get_supabase()
 
-        status = INDEX_STATUS
-
-        progress = dict(
-            INDEX_PROGRESS
+        result = (
+            sb.table("books")
+            .select(
+                "kitab_name,category,status,"
+                "total_pages,processed_pages,"
+                "total_chunks"
+            )
+            .order("id")
+            .execute()
         )
 
-        ready_state = INDEX_READY
+        rows = result.data or []
 
-        failed_state = list(
-            FAILED_BOOKS
+        ready = sum(
+            1
+            for row in rows
+            if row.get("status") == "READY"
         )
 
-    manifest = load_manifest()
-
-    ready = []
-
-    failed = []
-
-    categories = {}
-
-    for path, data in (
-        manifest.items()
-    ):
-
-        status_value = data.get(
-            "status"
+        processing = sum(
+            1
+            for row in rows
+            if row.get("status") in [
+                "PROCESSING",
+                "OCR",
+                "EMBEDDING"
+            ]
         )
 
-        if status_value == "ready":
+        failed = sum(
+            1
+            for row in rows
+            if row.get("status") == "FAILED"
+        )
 
-            ready.append(
-                path
-            )
+        total_chunks = sum(
+            row.get("total_chunks") or 0
+            for row in rows
+        )
 
-            category = data.get(
-                "category",
-                "LAIN-LAIN"
-            )
+        text = f"""
+📊 *Status TanyaFiqhBot*
 
-            categories[
-                category
-            ] = (
-                categories.get(
-                    category,
-                    0
-                )
-                + 1
-            )
+📚 Jumlah kitab: {len(rows)}
+✅ Ready: {ready}
+🔄 Processing: {processing}
+❌ Failed: {failed}
 
-        elif status_value == "failed":
+🧩 Jumlah chunks: {total_chunks}
+"""
 
-            failed.append(
-                data.get(
-                    "filename",
-                    os.path.basename(
-                        path
-                    )
-                )
-            )
+        await message.reply_text(
+            text,
+            parse_mode="Markdown"
+        )
 
-    text = (
-        "📊 *Status TanyaFiqhBot*\n\n"
-        f"Status: `{status}`\n"
-        f"Index: `{ready_state}`\n\n"
-        f"📚 Kitab siap: "
-        f"`{len(ready)}`\n"
-        f"❌ Kitab gagal: "
-        f"`{len(failed)}`\n"
+    except Exception as e:
+
+        await message.reply_text(
+            f"❌ Gagal mendapatkan status.\n\n{e}"
+        )
+
+
+async def category_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    message = update.effective_message
+
+    command = (
+        update.message.text
+        .split()[0]
+        .lower()
+        .replace("/", "")
     )
 
-    if progress.get(
-        "book"
-    ):
+    category_map = {
+        "fiqh": "FIQH",
+        "tauhid": "TAUHID",
+        "hadis": "HADIS",
+        "tafsir": "TAFSIR",
+        "sirah": "SIRAH",
+        "akhlak": "AKHLAK",
+        "usulfiqh": "USUL FIQH",
+        "semua": None,
+    }
 
-        text += (
-            "\n📖 Kitab: "
-            + progress["book"]
-            + "\n"
+    category = category_map.get(
+        command
+    )
+
+    context.user_data[
+        "category"
+    ] = category
+
+    if category:
+
+        text = (
+            f"📚 Mod *{category}* diaktifkan.\n\n"
+            "Sila taip soalan anda."
         )
 
-    if progress.get(
-        "message"
-    ):
+    else:
 
-        text += (
-            "⚙️ "
-            + progress["message"]
-            + "\n"
+        context.user_data[
+            "category"
+        ] = None
+
+        text = (
+            "📚 Mod *SEMUA KITAB* diaktifkan.\n\n"
+            "Sila taip soalan anda."
         )
 
-    if categories:
-
-        text += (
-            "\n📂 *Kategori:*\n"
-        )
-
-        for category in sorted(
-            categories
-        ):
-
-            text += (
-                "• "
-                + category
-                + ": "
-                + str(
-                    categories[
-                        category
-                    ]
-                )
-                + "\n"
-            )
-
-    if failed:
-
-        text += (
-            "\n❌ *Kitab gagal:*\n"
-        )
-
-        for filename in failed[
-            :10
-        ]:
-
-            text += (
-                "• "
-                + filename
-                + "\n"
-            )
-
-    if failed_state and not failed:
-
-        text += (
-            "\n❌ *Gagal:*\n"
-        )
-
-        for filename in failed_state[
-            :10
-        ]:
-
-            text += (
-                "• "
-                + filename
-                + "\n"
-            )
-
-    await update.message.reply_text(
+    await message.reply_text(
         text,
         parse_mode="Markdown"
     )
 
 
-# ============================================================
-# CATEGORY QUESTION
-# ============================================================
-
-async def category_question(
-    update,
-    category
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not update.message:
-
-        return
-
-    if not INDEX_READY:
-
-        await update.message.reply_text(
-            "📚 Sistem masih menyediakan "
-            "kitab. Sila cuba semula "
-            "sebentar lagi."
-        )
-
-        return
-
-    message = (
-        update.message.text
-        or ""
-    )
-
-    parts = message.split(
-        maxsplit=1
-    )
-
-    if len(parts) < 2:
-
-        await update.message.reply_text(
-            "Sila masukkan soalan.\n\n"
-            "Contoh:\n"
-            "/fiqh apa hukum mandi wajib?"
-        )
-
-        return
-
-    question = parts[1].strip()
-
-    if not question:
-
-        await update.message.reply_text(
-            "Sila masukkan soalan."
-        )
-
-        return
-
-    await update.message.reply_text(
-        "🔎 Sedang mencari rujukan..."
-    )
-
-    answer = generate_answer(
-        question,
-        category
-    )
-
-    await update.message.reply_text(
-        answer
-    )
-
-
-# ============================================================
-# COMMANDS
-# ============================================================
-
-async def fiqh_command(
-    update,
-    context
-):
-
-    await category_question(
-        update,
-        "FIQH"
-    )
-
-
-async def tauhid_command(
-    update,
-    context
-):
-
-    await category_question(
-        update,
-        "TAUHID"
-    )
-
-
-async def semua_command(
-    update,
-    context
-):
-
-    if not update.message:
-
-        return
-
-    if not INDEX_READY:
-
-        await update.message.reply_text(
-            "📚 Sistem masih menyediakan "
-            "kitab. Sila cuba semula "
-            "sebentar lagi."
-        )
-
-        return
-
-    message = (
-        update.message.text
-        or ""
-    )
-
-    parts = message.split(
-        maxsplit=1
-    )
-
-    if len(parts) < 2:
-
-        await update.message.reply_text(
-            "Contoh:\n"
-            "/semua apa hukum mandi wajib?"
-        )
-
-        return
-
-    question = parts[1].strip()
-
-    if not question:
-
-        await update.message.reply_text(
-            "Sila masukkan soalan."
-        )
-
-        return
-
-    await update.message.reply_text(
-        "🔎 Sedang mencari semua kitab..."
-    )
-
-    answer = generate_answer(
-        question
-    )
-
-    await update.message.reply_text(
-        answer
-    )
-
-
-# ============================================================
-# NORMAL MESSAGE
-# ============================================================
-
-async def normal_message(
-    update,
-    context
-):
-
-    if not update.message:
-
-        return
+    message = update.effective_message
 
     question = (
-        update.message.text
-        or ""
+        message.text or ""
     ).strip()
 
     if not question:
 
         return
 
-    if not INDEX_READY:
+    category = context.user_data.get(
+        "category"
+    )
 
-        await update.message.reply_text(
-            "📚 Sistem masih menyediakan "
-            "kitab. Sila cuba semula "
-            "sebentar lagi."
-        )
-
-        return
-
-    await update.message.reply_text(
-        "🔎 Sedang mencari rujukan..."
+    await message.chat.send_action(
+        "typing"
     )
 
     answer = generate_answer(
-        question
+        question,
+        category=category
     )
 
-    await update.message.reply_text(
-        answer
+    await message.reply_text(
+        answer,
+        parse_mode="Markdown"
     )
 
 
-# ============================================================
-# TELEGRAM
-# ============================================================
+# =========================================================
+# TELEGRAM RUN
+# =========================================================
 
 def run_telegram():
 
-    if not TELEGRAM_TOKEN:
+    print(
+        "🤖 Telegram bot starting..."
+    )
 
-        print(
-            "TELEGRAM_TOKEN belum ditetapkan."
+    telegram_app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "start",
+            start_command
+        )
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "status",
+            status_command
+        )
+    )
+
+    for command in [
+        "fiqh",
+        "tauhid",
+        "hadis",
+        "tafsir",
+        "sirah",
+        "akhlak",
+        "usulfiqh",
+        "semua",
+    ]:
+
+        telegram_app.add_handler(
+            CommandHandler(
+                command,
+                category_command
+            )
         )
 
-        return
+    telegram_app.add_handler(
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND,
+            handle_message
+        )
+    )
 
     print(
-        "Telegram bot sedang dimulakan..."
+        "✅ Telegram bot ready"
     )
+
+    telegram_app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        stop_signals=None
+    )
+
+
+# =========================================================
+# BACKGROUND
+# =========================================================
+
+def start_background():
+
+    global INDEX_STATUS
 
     try:
 
-        telegram_app = (
-            Application.builder()
-            .token(
-                TELEGRAM_TOKEN
-            )
-            .build()
-        )
-
-        telegram_app.add_handler(
-            CommandHandler(
-                "start",
-                start_command
-            )
-        )
-
-        telegram_app.add_handler(
-            CommandHandler(
-                "status",
-                status_command
-            )
-        )
-
-        telegram_app.add_handler(
-            CommandHandler(
-                "fiqh",
-                fiqh_command
-            )
-        )
-
-        telegram_app.add_handler(
-            CommandHandler(
-                "tauhid",
-                tauhid_command
-            )
-        )
-
-        telegram_app.add_handler(
-            CommandHandler(
-                "semua",
-                semua_command
-            )
-        )
-
-        telegram_app.add_handler(
-            MessageHandler(
-                filters.TEXT
-                & ~filters.COMMAND,
-                normal_message
-            )
-        )
-
-        print(
-            "Telegram polling dimulakan."
-        )
-
-        telegram_app.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            stop_signals=None
-        )
+        sync_books()
 
     except Exception as e:
 
         print(
-            "TELEGRAM ERROR:",
+            "❌ Background sync error:",
             e
         )
 
-        gc.collect()
-
-
-# ============================================================
-# BACKGROUND
-# ============================================================
-
-def start_background():
-
-    def indexing():
-
-        try:
-
-            print(
-                "Background indexing bermula..."
-            )
-
-            sync_books()
-
-        except Exception as e:
-
-            print(
-                "INDEXING ERROR:",
-                e
-            )
-
-            update_status(
-                status="error",
-                message=str(e)
-            )
-
-            gc.collect()
-
-    indexing_thread = threading.Thread(
-        target=indexing,
-        daemon=True,
-        name="indexing-thread"
-    )
-
-    indexing_thread.start()
-
-    time.sleep(2)
+        INDEX_STATUS[
+            "status"
+        ] = "ERROR"
 
     telegram_thread = threading.Thread(
         target=run_telegram,
-        daemon=True,
-        name="telegram-thread"
+        daemon=True
     )
 
     telegram_thread.start()
 
 
-# ============================================================
-# STARTUP
-# ============================================================
+# =========================================================
+# START
+# =========================================================
 
+print()
+print("=" * 60)
+print("📚 TanyaFiqhBot")
+print("=" * 60)
 print(
-    "=" * 60
-)
-
-print(
-    "TanyaFiqhBot"
-)
-
-print(
-    "Database: Supabase pgvector"
-)
-
-print(
-    "OCR Workers:",
-    OCR_WORKERS
-)
-
-print(
-    "OCR DPI:",
-    OCR_DPI
-)
-
-print(
-    "Embedding:",
-    EMBEDDING_MODEL
-)
-
-print(
-    "Embedding Dimension:",
-    EMBEDDING_DIMENSION
-)
-
-print(
-    "LLM:",
-    LLM_MODEL
-)
-
-print(
-    "Kitab:",
+    "Kitab directory:",
     KITAB_DIR
 )
-
 print(
-    "Data:",
-    DATA_DIR
+    "Supabase:",
+    "CONNECTED"
+    if supabase
+    else "NOT CONNECTED"
 )
-
-print(
-    "=" * 60
-)
+print("=" * 60)
 
 
-start_background()
+threading.Thread(
+    target=start_background,
+    daemon=True
+).start()
 
 
-# ============================================================
-# LOCAL
-# ============================================================
+# =========================================================
+# LOCAL DEVELOPMENT
+# =========================================================
 
 if __name__ == "__main__":
 
