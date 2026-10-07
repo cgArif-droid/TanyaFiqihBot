@@ -6,7 +6,11 @@ import glob
 import time
 import hashlib
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed
+)
 
 from flask import Flask, jsonify
 
@@ -29,7 +33,9 @@ from langchain_google_genai import (
 
 from langchain_community.vectorstores import Chroma
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import (
+    RecursiveCharacterTextSplitter
+)
 
 from pypdf import PdfReader
 
@@ -56,7 +62,8 @@ DATA_DIR = os.environ.get(
     "/var/data"
 )
 
-# Untuk RAM 515 MB, default 1 worker
+# RAM sekitar 515 MB
+# Gunakan 1 worker untuk kestabilan
 OCR_WORKERS = int(
     os.environ.get(
         "OCR_WORKERS",
@@ -73,6 +80,12 @@ LLM_MODEL = "gemini-2.5-flash"
 EMBEDDING_MODEL = (
     "models/gemini-embedding-001"
 )
+
+# Jumlah dokumen yang diambil
+SEARCH_K = 6
+
+# Saiz batch embedding
+EMBEDDING_BATCH_SIZE = 16
 
 
 # ============================================================
@@ -164,11 +177,16 @@ app = Flask(__name__)
 @app.route("/")
 def home():
 
+    with INDEX_LOCK:
+
+        status = INDEX_STATUS
+        ready = INDEX_READY
+
     return jsonify(
         {
             "name": "TanyaFiqhBot",
-            "status": INDEX_STATUS,
-            "index_ready": INDEX_READY,
+            "status": status,
+            "index_ready": ready,
         }
     )
 
@@ -184,18 +202,24 @@ def health():
 
         status = INDEX_STATUS
 
+        ready = INDEX_READY
+
+        failed = list(
+            FAILED_BOOKS
+        )
+
     return jsonify(
         {
             "status": status,
-            "index_ready": INDEX_READY,
+            "index_ready": ready,
             "progress": progress,
-            "failed_books": FAILED_BOOKS,
+            "failed_books": failed,
         }
     )
 
 
 # ============================================================
-# STATUS
+# STATUS UPDATE
 # ============================================================
 
 def update_status(
@@ -211,36 +235,42 @@ def update_status(
     with INDEX_LOCK:
 
         if status is not None:
+
             INDEX_STATUS = status
 
         if book is not None:
+
             INDEX_PROGRESS[
                 "book"
             ] = book
 
         if page is not None:
+
             INDEX_PROGRESS[
                 "page"
             ] = page
 
         if total_pages is not None:
+
             INDEX_PROGRESS[
                 "total_pages"
             ] = total_pages
 
         if message is not None:
+
             INDEX_PROGRESS[
                 "message"
             ] = message
 
 
 # ============================================================
-# TEXT
+# TEXT NORMALIZATION
 # ============================================================
 
 def normalize_text(text):
 
     if not text:
+
         return ""
 
     text = text.replace(
@@ -279,6 +309,7 @@ def calculate_file_hash(
             )
 
             if not chunk:
+
                 break
 
             sha.update(
@@ -331,23 +362,32 @@ def save_manifest(
         + ".tmp"
     )
 
-    with open(
-        temp,
-        "w",
-        encoding="utf-8"
-    ) as file:
+    try:
 
-        json.dump(
-            manifest,
-            file,
-            ensure_ascii=False,
-            indent=2
+        with open(
+            temp,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            json.dump(
+                manifest,
+                file,
+                ensure_ascii=False,
+                indent=2
+            )
+
+        os.replace(
+            temp,
+            MANIFEST_FILE
         )
 
-    os.replace(
-        temp,
-        MANIFEST_FILE
-    )
+    except Exception as e:
+
+        print(
+            "Manifest save error:",
+            e
+        )
 
 
 # ============================================================
@@ -356,27 +396,43 @@ def save_manifest(
 
 def find_books():
 
+    if not os.path.exists(
+        KITAB_DIR
+    ):
+
+        print(
+            "Folder kitab tidak wujud:",
+            KITAB_DIR
+        )
+
+        return []
+
     patterns = [
+
         os.path.join(
             KITAB_DIR,
             "**",
             "*.pdf"
         ),
+
         os.path.join(
             KITAB_DIR,
             "**",
             "*.PDF"
         ),
+
         os.path.join(
             KITAB_DIR,
             "**",
             "*.txt"
         ),
+
         os.path.join(
             KITAB_DIR,
             "**",
             "*.TXT"
         ),
+
     ]
 
     files = []
@@ -410,17 +466,16 @@ def get_category(
             KITAB_DIR
         )
 
-        parts = (
-            relative.split(
-                os.sep
-            )
+        parts = relative.split(
+            os.sep
         )
 
         if len(parts) >= 2:
 
-            return parts[0]
+            return parts[0].upper()
 
     except Exception:
+
         pass
 
     return "LAIN-LAIN"
@@ -456,26 +511,27 @@ def get_ocr_language():
             selected = []
 
             if "msa" in languages:
+
                 selected.append(
                     "msa"
                 )
 
             if "ara" in languages:
+
                 selected.append(
                     "ara"
                 )
 
             if "eng" in languages:
+
                 selected.append(
                     "eng"
                 )
 
             if selected:
 
-                OCR_LANGUAGE = (
-                    "+".join(
-                        selected
-                    )
+                OCR_LANGUAGE = "+".join(
+                    selected
                 )
 
             else:
@@ -578,7 +634,7 @@ def save_page_cache(
         text
     )
 
-    # Jangan simpan cache jika OCR gagal.
+    # Jangan simpan cache kosong
     if not text:
 
         return False
@@ -588,10 +644,12 @@ def save_page_cache(
         page_number
     )
 
+    temp = path + ".tmp"
+
     try:
 
         with open(
-            path,
+            temp,
             "w",
             encoding="utf-8"
         ) as file:
@@ -599,6 +657,11 @@ def save_page_cache(
             file.write(
                 text
             )
+
+        os.replace(
+            temp,
+            path
+        )
 
         return True
 
@@ -608,6 +671,20 @@ def save_page_cache(
             "Cache save error:",
             e
         )
+
+        try:
+
+            if os.path.exists(
+                temp
+            ):
+
+                os.remove(
+                    temp
+                )
+
+        except Exception:
+
+            pass
 
         return False
 
@@ -685,10 +762,12 @@ def save_whole_text(
         book_hash
     )
 
+    temp = path + ".tmp"
+
     try:
 
         with open(
-            path,
+            temp,
             "w",
             encoding="utf-8"
         ) as file:
@@ -696,6 +775,11 @@ def save_whole_text(
             file.write(
                 text
             )
+
+        os.replace(
+            temp,
+            path
+        )
 
         return True
 
@@ -720,7 +804,7 @@ def ocr_single_page(
 ):
 
     # --------------------------------------------------------
-    # Cuba cache dahulu
+    # Semak cache
     # --------------------------------------------------------
 
     cached = load_page_cache(
@@ -737,6 +821,10 @@ def ocr_single_page(
         )
 
     try:
+
+        print(
+            f"OCR page {page_number}"
+        )
 
         images = convert_from_path(
             pdf_path,
@@ -760,11 +848,6 @@ def ocr_single_page(
 
         language = get_ocr_language()
 
-        print(
-            f"OCR page {page_number} "
-            f"menggunakan {language}"
-        )
-
         text = pytesseract.image_to_string(
             image,
             lang=language,
@@ -775,10 +858,7 @@ def ocr_single_page(
             text
         )
 
-        # ----------------------------------------------------
-        # Cache hanya jika ada text.
-        # ----------------------------------------------------
-
+        # Simpan hanya jika berjaya
         if text:
 
             save_page_cache(
@@ -815,7 +895,7 @@ def ocr_single_page(
 
 
 # ============================================================
-# PDF TEXT EXTRACTION
+# PDF EXTRACTION
 # ============================================================
 
 def extract_pdf(
@@ -824,7 +904,7 @@ def extract_pdf(
 ):
 
     # --------------------------------------------------------
-    # Whole book cache
+    # Semak whole text cache
     # --------------------------------------------------------
 
     cached = load_whole_text(
@@ -856,16 +936,15 @@ def extract_pdf(
         pdf_path
     )
 
+    print(
+        f"Jumlah halaman: {total_pages}"
+    )
+
     update_status(
         book=filename,
         page=0,
         total_pages=total_pages,
         message="Membaca PDF"
-    )
-
-    print(
-        f"Jumlah halaman: "
-        f"{total_pages}"
     )
 
     page_texts = [
@@ -917,9 +996,23 @@ def extract_pdf(
 
         else:
 
-            ocr_pages.append(
+            # Cuba page cache dahulu
+            cached_page = load_page_cache(
+                book_hash,
                 page_number
             )
+
+            if cached_page:
+
+                page_texts[
+                    index
+                ] = cached_page
+
+            else:
+
+                ocr_pages.append(
+                    page_number
+                )
 
         if (
             page_number % 25 == 0
@@ -1032,7 +1125,7 @@ def extract_pdf(
                     gc.collect()
 
     # --------------------------------------------------------
-    # Gabungkan
+    # Gabungkan teks
     # --------------------------------------------------------
 
     sections = []
@@ -1042,6 +1135,7 @@ def extract_pdf(
     ):
 
         if not text:
+
             continue
 
         page_number = index + 1
@@ -1064,6 +1158,8 @@ def extract_pdf(
         len(full_text)
     )
 
+    # Whole cache hanya selepas
+    # keseluruhan PDF selesai
     if full_text:
 
         save_whole_text(
@@ -1076,6 +1172,7 @@ def extract_pdf(
         reader.stream.close()
 
     except Exception:
+
         pass
 
     del reader
@@ -1088,7 +1185,7 @@ def extract_pdf(
 
 
 # ============================================================
-# TXT
+# TXT EXTRACTION
 # ============================================================
 
 def extract_txt(
@@ -1166,6 +1263,10 @@ def delete_source(
     book_hash
 ):
 
+    if not book_hash:
+
+        return
+
     try:
 
         vectorstore = get_vectorstore()
@@ -1228,14 +1329,17 @@ def process_book(
     print(
         "=" * 60
     )
+
     print(
         "KITAB:",
         filename
     )
+
     print(
         "KATEGORI:",
         category
     )
+
     print(
         "=" * 60
     )
@@ -1274,6 +1378,10 @@ def process_book(
     # Split
     # --------------------------------------------------------
 
+    update_status(
+        message="Memecahkan teks kepada chunks"
+    )
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1200,
         chunk_overlap=150,
@@ -1305,13 +1413,17 @@ def process_book(
     # Vectorstore
     # --------------------------------------------------------
 
+    update_status(
+        message="Menyimpan embedding"
+    )
+
     vectorstore = get_vectorstore()
 
     total = len(
         chunks
     )
 
-    batch_size = 16
+    batch_size = EMBEDDING_BATCH_SIZE
 
     try:
 
@@ -1340,6 +1452,7 @@ def process_book(
                 )
 
                 if not chunk:
+
                     continue
 
                 doc = Document(
@@ -1365,16 +1478,31 @@ def process_book(
 
                 continue
 
+            actual_end = min(
+                end,
+                total
+            )
+
             print(
-                "Embedding "
+                f"Embedding "
                 f"{start + 1}-"
-                f"{end}/"
+                f"{actual_end}/"
                 f"{total}"
             )
 
             vectorstore.add_documents(
                 documents=batch_documents,
                 ids=batch_ids
+            )
+
+            update_status(
+                page=actual_end,
+                total_pages=total,
+                message=(
+                    f"Embedding "
+                    f"{actual_end}/"
+                    f"{total}"
+                )
             )
 
             del batch_documents
@@ -1387,6 +1515,7 @@ def process_book(
             vectorstore.persist()
 
         except Exception:
+
             pass
 
     except Exception as e:
@@ -1396,6 +1525,7 @@ def process_book(
             e
         )
 
+        # Padam embedding separa
         delete_source(
             book_hash
         )
@@ -1415,7 +1545,7 @@ def process_book(
 
 
 # ============================================================
-# SYNC
+# SYNC BOOKS
 # ============================================================
 
 def sync_books():
@@ -1445,7 +1575,7 @@ def sync_books():
     current_files = {}
 
     # --------------------------------------------------------
-    # Hash files
+    # Hash
     # --------------------------------------------------------
 
     for path in files:
@@ -1467,7 +1597,7 @@ def sync_books():
             )
 
     # --------------------------------------------------------
-    # Delete old books
+    # Delete removed books
     # --------------------------------------------------------
 
     for old_path in list(
@@ -1539,7 +1669,7 @@ def sync_books():
             continue
 
         # ----------------------------------------------------
-        # Changed book
+        # Changed / failed
         # ----------------------------------------------------
 
         if old:
@@ -1548,7 +1678,10 @@ def sync_books():
                 "hash"
             )
 
-            if old_hash:
+            if (
+                old_hash
+                and old_hash != book_hash
+            ):
 
                 print(
                     "Kitab berubah:",
@@ -1630,22 +1763,26 @@ def sync_books():
 
             gc.collect()
 
+    # --------------------------------------------------------
+    # Siap
+    # --------------------------------------------------------
+
     INDEX_READY = True
 
     update_status(
         status="ready",
-        message=(
-            "Index siap"
-        )
+        message="Index siap"
     )
 
     print()
     print(
         "=" * 60
     )
+
     print(
         "INDEX SIAP"
     )
+
     print(
         "=" * 60
     )
@@ -1672,7 +1809,7 @@ def search_books(
                     vectorstore
                     .similarity_search(
                         question,
-                        k=6,
+                        k=SEARCH_K,
                         filter={
                             "category":
                                 category
@@ -1680,13 +1817,18 @@ def search_books(
                     )
                 )
 
-            except Exception:
+            except Exception as e:
+
+                print(
+                    "Filter search gagal:",
+                    e
+                )
 
                 docs = (
                     vectorstore
                     .similarity_search(
                         question,
-                        k=6
+                        k=SEARCH_K
                     )
                 )
 
@@ -1696,7 +1838,7 @@ def search_books(
                 vectorstore
                 .similarity_search(
                     question,
-                    k=6
+                    k=SEARCH_K
                 )
             )
 
@@ -1734,8 +1876,9 @@ def generate_answer(
     if not INDEX_READY:
 
         return (
-            "📚 Sistem masih menyediakan kitab. "
-            "Sila cuba semula sebentar lagi."
+            "📚 Sistem masih menyediakan "
+            "kitab. Sila cuba semula "
+            "sebentar lagi."
         )
 
     try:
@@ -1767,6 +1910,11 @@ def generate_answer(
                 "Tidak diketahui"
             )
 
+            category_name = metadata.get(
+                "category",
+                "-"
+            )
+
             chunk = metadata.get(
                 "chunk",
                 "-"
@@ -1779,6 +1927,11 @@ def generate_answer(
             context_parts.append(
                 "SUMBER: "
                 + source
+                + "\n"
+                + "KATEGORI: "
+                + str(
+                    category_name
+                )
                 + "\n"
                 + "CHUNK: "
                 + str(chunk)
@@ -1795,7 +1948,6 @@ def generate_answer(
         )
 
         # Hadkan context
-        # untuk jimat token/RAM.
         context = context[
             :24000
         ]
@@ -1807,25 +1959,38 @@ pembantu rujukan ilmu Islam.
 Jawab soalan pengguna dalam
 Bahasa Melayu yang mudah difahami.
 
-Gunakan HANYA maklumat daripada
-konteks kitab yang diberikan.
+PERATURAN PENTING:
 
-Jangan mereka-reka maklumat.
+1. Gunakan hanya maklumat daripada
+   konteks kitab yang diberikan.
 
-Jika maklumat tidak mencukupi,
-beritahu pengguna bahawa rujukan
-yang ditemui tidak mencukupi.
+2. Jangan mereka-reka maklumat yang
+   tiada dalam konteks.
 
-Jika terdapat perbezaan pandangan,
-nyatakan berdasarkan teks yang ditemui.
+3. Jika konteks tidak mencukupi,
+   nyatakan bahawa rujukan yang
+   ditemui tidak mencukupi.
 
-Jangan mendakwa jawapan ini sebagai
-fatwa rasmi.
+4. Jika terdapat perbezaan pandangan,
+   nyatakan berdasarkan sumber yang
+   ditemui.
 
-Jika sumber kitab tersedia,
-nyatakan nama kitab pada akhir jawapan.
+5. Jangan mendakwa jawapan ini
+   sebagai fatwa rasmi.
 
-SOALAN:
+6. Jawab terus soalan pengguna.
+
+7. Gunakan format yang mudah dibaca.
+
+8. Jika nama kitab tersedia,
+   nyatakan nama kitab pada akhir
+   jawapan.
+
+9. Jika terdapat nombor halaman
+   dalam konteks, nyatakan halaman
+   tersebut.
+
+SOALAN PENGGUNA:
 {question}
 
 KONTEKS KITAB:
@@ -1853,13 +2018,15 @@ KONTEKS KITAB:
                 answer
             )
 
+        answer = answer.strip()
+
         del llm
         del docs
         del context
 
         gc.collect()
 
-        return answer.strip()
+        return answer
 
     except Exception as e:
 
@@ -1878,13 +2045,17 @@ KONTEKS KITAB:
 
 
 # ============================================================
-# TELEGRAM START
+# TELEGRAM /START
 # ============================================================
 
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+
+    if not update.message:
+
+        return
 
     text = """
 🤖 *TanyaFiqhBot*
@@ -1902,12 +2073,15 @@ Contoh:
 • Apa syarat sah puasa?
 • Bagaimana cara wuduk?
 
-Command:
+*Command:*
 
 /fiqh - Cari kitab Fiqh
 /tauhid - Cari kitab Tauhid
 /semua - Cari semua kitab
 /status - Status sistem
+
+Anda juga boleh terus taip
+soalan tanpa command.
 """
 
     await update.message.reply_text(
@@ -1917,7 +2091,7 @@ Command:
 
 
 # ============================================================
-# STATUS COMMAND
+# TELEGRAM STATUS
 # ============================================================
 
 async def status_command(
@@ -1925,12 +2099,22 @@ async def status_command(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+
+        return
+
     with INDEX_LOCK:
 
         status = INDEX_STATUS
 
         progress = dict(
             INDEX_PROGRESS
+        )
+
+        ready_state = INDEX_READY
+
+        failed_state = list(
+            FAILED_BOOKS
         )
 
     manifest = load_manifest()
@@ -1984,7 +2168,7 @@ async def status_command(
     text = (
         "📊 *Status TanyaFiqhBot*\n\n"
         f"Status: `{status}`\n"
-        f"Index: `{INDEX_READY}`\n\n"
+        f"Index: `{ready_state}`\n\n"
         f"📚 Kitab siap: "
         f"`{len(ready)}`\n"
         f"❌ Kitab gagal: "
@@ -2049,6 +2233,22 @@ async def status_command(
                 + "\n"
             )
 
+    if failed_state and not failed:
+
+        text += (
+            "\n❌ *Gagal:*\n"
+        )
+
+        for filename in failed_state[
+            :10
+        ]:
+
+            text += (
+                "• "
+                + filename
+                + "\n"
+            )
+
     await update.message.reply_text(
         text,
         parse_mode="Markdown"
@@ -2063,6 +2263,10 @@ async def category_question(
     update,
     category
 ):
+
+    if not update.message:
+
+        return
 
     if not INDEX_READY:
 
@@ -2117,6 +2321,10 @@ async def category_question(
     )
 
 
+# ============================================================
+# FIQH
+# ============================================================
+
 async def fiqh_command(
     update,
     context
@@ -2127,6 +2335,10 @@ async def fiqh_command(
         "FIQH"
     )
 
+
+# ============================================================
+# TAUHID
+# ============================================================
 
 async def tauhid_command(
     update,
@@ -2140,13 +2352,17 @@ async def tauhid_command(
 
 
 # ============================================================
-# SEMUA
+# SEMUA KITAB
 # ============================================================
 
 async def semua_command(
     update,
     context
 ):
+
+    if not update.message:
+
+        return
 
     if not INDEX_READY:
 
@@ -2177,6 +2393,14 @@ async def semua_command(
         return
 
     question = parts[1].strip()
+
+    if not question:
+
+        await update.message.reply_text(
+            "Sila masukkan soalan."
+        )
+
+        return
 
     await update.message.reply_text(
         "🔎 Sedang mencari semua kitab..."
@@ -2237,7 +2461,7 @@ async def normal_message(
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM BOT
 # ============================================================
 
 def run_telegram():
@@ -2254,64 +2478,101 @@ def run_telegram():
         "Telegram bot sedang dimulakan..."
     )
 
-    telegram_app = (
-        Application.builder()
-        .token(
-            TELEGRAM_TOKEN
-        )
-        .build()
-    )
+    try:
 
-    telegram_app.add_handler(
-        CommandHandler(
-            "start",
-            start_command
+        telegram_app = (
+            Application.builder()
+            .token(
+                TELEGRAM_TOKEN
+            )
+            .build()
         )
-    )
 
-    telegram_app.add_handler(
-        CommandHandler(
-            "status",
-            status_command
+        # ----------------------------------------------------
+        # Commands
+        # ----------------------------------------------------
+
+        telegram_app.add_handler(
+            CommandHandler(
+                "start",
+                start_command
+            )
         )
-    )
 
-    telegram_app.add_handler(
-        CommandHandler(
-            "fiqh",
-            fiqh_command
+        telegram_app.add_handler(
+            CommandHandler(
+                "status",
+                status_command
+            )
         )
-    )
 
-    telegram_app.add_handler(
-        CommandHandler(
-            "tauhid",
-            tauhid_command
+        telegram_app.add_handler(
+            CommandHandler(
+                "fiqh",
+                fiqh_command
+            )
         )
-    )
 
-    telegram_app.add_handler(
-        CommandHandler(
-            "semua",
-            semua_command
+        telegram_app.add_handler(
+            CommandHandler(
+                "tauhid",
+                tauhid_command
+            )
         )
-    )
 
-    telegram_app.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            normal_message
+        telegram_app.add_handler(
+            CommandHandler(
+                "semua",
+                semua_command
+            )
         )
-    )
 
-    telegram_app.run_polling(
-        allowed_updates=Update.ALL_TYPES
-    )
+        # ----------------------------------------------------
+        # Normal text
+        # ----------------------------------------------------
+
+        telegram_app.add_handler(
+            MessageHandler(
+                filters.TEXT
+                & ~filters.COMMAND,
+                normal_message
+            )
+        )
+
+        print(
+            "Telegram polling dimulakan."
+        )
+
+        # ----------------------------------------------------
+        # PENTING
+        #
+        # run_telegram() berjalan dalam
+        # background thread.
+        #
+        # stop_signals=None diperlukan
+        # supaya python-telegram-bot tidak
+        # cuba menggunakan signal handler
+        # daripada thread.
+        # ----------------------------------------------------
+
+        telegram_app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            stop_signals=None
+        )
+
+    except Exception as e:
+
+        print(
+            "TELEGRAM ERROR:",
+            e
+        )
+
+        gc.collect()
 
 
 # ============================================================
-# BACKGROUND
+# BACKGROUND INDEXING
 # ============================================================
 
 def start_background():
@@ -2328,40 +2589,49 @@ def start_background():
 
         except Exception as e:
 
-            global INDEX_STATUS
-
-            INDEX_STATUS = "error"
-
             print(
                 "INDEXING ERROR:",
                 e
             )
 
             update_status(
+                status="error",
                 message=str(e)
             )
 
             gc.collect()
 
+    # --------------------------------------------------------
+    # Indexing thread
+    # --------------------------------------------------------
+
     indexing_thread = threading.Thread(
         target=indexing,
-        daemon=True
+        daemon=True,
+        name="indexing-thread"
     )
 
     indexing_thread.start()
 
+    # Beri sedikit masa Flask/indexing
+    # untuk mula sebelum Telegram.
     time.sleep(2)
+
+    # --------------------------------------------------------
+    # Telegram thread
+    # --------------------------------------------------------
 
     telegram_thread = threading.Thread(
         target=run_telegram,
-        daemon=True
+        daemon=True,
+        name="telegram-thread"
     )
 
     telegram_thread.start()
 
 
 # ============================================================
-# START SERVER
+# STARTUP INFORMATION
 # ============================================================
 
 print(
@@ -2403,12 +2673,25 @@ print(
 )
 
 print(
+    "Chroma:",
+    CHROMA_DIR
+)
+
+print(
     "=" * 60
 )
 
 
+# ============================================================
+# START BACKGROUND
+# ============================================================
+
 start_background()
 
+
+# ============================================================
+# LOCAL DEVELOPMENT
+# ============================================================
 
 if __name__ == "__main__":
 
