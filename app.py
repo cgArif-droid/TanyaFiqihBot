@@ -9,8 +9,9 @@ import threading
 import urllib.request
 import urllib.parse
 import html
+from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 
 from telegram import Update
 from telegram.ext import (
@@ -21,11 +22,11 @@ from telegram.ext import (
     filters,
 )
 
-from langchain_core.messages import HumanMessage
 from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     GoogleGenerativeAIEmbeddings,
 )
+from langchain_core.messages import HumanMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from supabase import create_client, Client
@@ -35,37 +36,24 @@ from pdf2image import convert_from_path
 import pytesseract
 
 
-# ============================================================
-# CONFIG
-# ============================================================
+# =========================================================
+# ENVIRONMENT
+# =========================================================
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 DATA_DIR = os.getenv("DATA_DIR", "/var/data")
 
-OCR_WORKERS = int(
-    os.getenv("OCR_WORKERS", "1")
-)
+OCR_WORKERS = int(os.getenv("OCR_WORKERS", "1"))
+OCR_DPI = int(os.getenv("OCR_DPI", "200"))
+MIN_TEXT_CHARS = int(os.getenv("MIN_TEXT_CHARS", "30"))
 
-OCR_DPI = int(
-    os.getenv("OCR_DPI", "200")
-)
-
-MIN_TEXT_CHARS = int(
-    os.getenv("MIN_TEXT_CHARS", "40")
-)
-
-SEARCH_K = int(
-    os.getenv("SEARCH_K", "6")
-)
-
-TURATH_SEARCH_K = int(
-    os.getenv("TURATH_SEARCH_K", "5")
-)
+SEARCH_K = int(os.getenv("SEARCH_K", "6"))
+TURATH_SEARCH_K = int(os.getenv("TURATH_SEARCH_K", "5"))
 
 EMBEDDING_BATCH_SIZE = int(
     os.getenv("EMBEDDING_BATCH_SIZE", "16")
@@ -86,48 +74,43 @@ TURATH_SERVICE_URL = os.getenv(
     "http://127.0.0.1:8765"
 )
 
+TURATH_ENABLED = os.getenv(
+    "TURATH_ENABLED",
+    "true"
+).lower() == "true"
+
 TURATH_TIMEOUT = int(
-    os.getenv("TURATH_TIMEOUT", "25")
+    os.getenv("TURATH_TIMEOUT", "30")
 )
 
-TURATH_CACHE_SECONDS = int(
-    os.getenv("TURATH_CACHE_SECONDS", "300")
+TURATH_CACHE_TTL = int(
+    os.getenv("TURATH_CACHE_TTL", "300")
 )
 
-MAX_TURATH_TEXT = int(
-    os.getenv("MAX_TURATH_TEXT", "5000")
+# Had maksimum konteks supaya prompt tidak terlalu besar
+LOCAL_CONTEXT_LIMIT = int(
+    os.getenv("LOCAL_CONTEXT_LIMIT", "2500")
+)
+
+TURATH_CONTEXT_LIMIT = int(
+    os.getenv("TURATH_CONTEXT_LIMIT", "3000")
+)
+
+TOTAL_CONTEXT_LIMIT = int(
+    os.getenv("TOTAL_CONTEXT_LIMIT", "18000")
 )
 
 
-# ============================================================
-# APP
-# ============================================================
-
-app = Flask(__name__)
-
-
-# ============================================================
+# =========================================================
 # DIRECTORIES
-# ============================================================
+# =========================================================
 
-os.makedirs(
+os.makedirs(DATA_DIR, exist_ok=True)
+
+CACHE_DIR = os.path.join(
     DATA_DIR,
-    exist_ok=True
-)
-
-EXTRACTED_DIR = os.path.join(
-    DATA_DIR,
-    "extracted_text"
-)
-
-PAGE_CACHE_DIR = os.path.join(
-    EXTRACTED_DIR,
+    "extracted_text",
     "pages"
-)
-
-MANIFEST_PATH = os.path.join(
-    DATA_DIR,
-    "manifest.json"
 )
 
 TURATH_CACHE_DIR = os.path.join(
@@ -135,303 +118,153 @@ TURATH_CACHE_DIR = os.path.join(
     "turath_cache"
 )
 
-os.makedirs(
-    EXTRACTED_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    PAGE_CACHE_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    TURATH_CACHE_DIR,
-    exist_ok=True
-)
-
-
-# ============================================================
-# KITAB DIRECTORY
-# ============================================================
-
-REPO_KITAB_DIR = os.path.join(
-    os.path.dirname(
-        os.path.abspath(__file__)
-    ),
-    "kitab"
-)
-
-PERSISTENT_KITAB_DIR = os.path.join(
+MANIFEST_FILE = os.path.join(
     DATA_DIR,
-    "kitab"
+    "manifest.json"
 )
 
-if os.path.isdir(
-    PERSISTENT_KITAB_DIR
-):
-
-    KITAB_DIR = PERSISTENT_KITAB_DIR
-
-else:
-
-    KITAB_DIR = REPO_KITAB_DIR
-
-print(
-    f"📂 Kitab directory digunakan: {KITAB_DIR}"
-)
+os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(TURATH_CACHE_DIR, exist_ok=True)
 
 
-# ============================================================
-# SUPABASE
-# ============================================================
+# =========================================================
+# GLOBAL CLIENTS
+# =========================================================
 
 supabase: Client | None = None
-
-if SUPABASE_URL and SUPABASE_KEY:
-
-    try:
-
-        supabase = create_client(
-            SUPABASE_URL,
-            SUPABASE_KEY
-        )
-
-        print(
-            "✅ Supabase connected"
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ Supabase connection error:",
-            e
-        )
-
-else:
-
-    print(
-        "⚠️ SUPABASE_URL / SUPABASE_KEY tidak lengkap"
-    )
-
-
-# ============================================================
-# GEMINI
-# ============================================================
-
 embeddings = None
 llm = None
 
+
 if GOOGLE_API_KEY:
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model=EMBEDDING_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        output_dimensionality=3072,
+    )
 
-    try:
-
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            google_api_key=GOOGLE_API_KEY,
-            output_dimensionality=3072
-        )
-
-        llm = ChatGoogleGenerativeAI(
-            model=LLM_MODEL,
-            google_api_key=GOOGLE_API_KEY,
-            temperature=0.2
-        )
-
-        print(
-            f"✅ Gemini connected: {LLM_MODEL}"
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ Gemini connection error:",
-            e
-        )
-
-else:
-
-    print(
-        "⚠️ GOOGLE_API_KEY tidak ditetapkan"
+    llm = ChatGoogleGenerativeAI(
+        model=LLM_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.2,
     )
 
 
-# ============================================================
-# TEXT SPLITTER
-# ============================================================
-
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1200,
-    chunk_overlap=150,
-    separators=[
-        "\n\n",
-        "\n",
-        ". ",
-        " ",
-        ""
-    ]
-)
-
-
-# ============================================================
-# GLOBAL STATE
-# ============================================================
-
-sync_lock = threading.Lock()
-
-SYNC_STATUS = {
-
-    "running":
-        False,
-
-    "message":
-        "Belum bermula",
-
-    "current_book":
-        None,
-
-    "current_page":
-        0,
-
-    "total_pages":
-        0,
-
-    "processed_pages":
-        0,
-
-    "total_chunks":
-        0,
-
-    "error":
-        None,
-
-    "started_at":
-        None,
-
-    "finished_at":
-        None,
-}
-
-
-# ============================================================
-# TURATH CACHE
-# ============================================================
-
-turath_cache_lock = threading.Lock()
-
-TURATH_MEMORY_CACHE = {}
-
-
-def turath_cache_key(query):
-
-    return hashlib.sha256(
-        query.strip().lower().encode(
-            "utf-8"
-        )
-    ).hexdigest()
-
-
-def get_turath_memory_cache(
-    query
-):
-
-    key = turath_cache_key(
-        query
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = supabase_client = Client(
+        SUPABASE_URL,
+        SUPABASE_KEY
     )
 
-    with turath_cache_lock:
 
-        item = TURATH_MEMORY_CACHE.get(
-            key
-        )
+# =========================================================
+# FLASK
+# =========================================================
 
-        if not item:
-            return None
-
-        timestamp = item.get(
-            "timestamp",
-            0
-        )
-
-        if (
-            time.time()
-            - timestamp
-            > TURATH_CACHE_SECONDS
-        ):
-
-            TURATH_MEMORY_CACHE.pop(
-                key,
-                None
-            )
-
-            return None
-
-        return item.get(
-            "data"
-        )
+app = Flask(__name__)
 
 
-def set_turath_memory_cache(
-    query,
-    data
-):
+# =========================================================
+# CATEGORY
+# =========================================================
 
-    key = turath_cache_key(
-        query
-    )
-
-    with turath_cache_lock:
-
-        TURATH_MEMORY_CACHE[key] = {
-            "timestamp":
-                time.time(),
-
-            "data":
-                data
-        }
+CATEGORIES = [
+    "FIQH",
+    "TAUHID",
+    "HADIS",
+    "TAFSIR",
+    "SIRAH",
+    "AKHLAK",
+    "USUL FIQH",
+]
 
 
-# ============================================================
-# BASIC HELPERS
-# ============================================================
+def normalize_category(category):
+    if not category:
+        return None
 
-def normalize_text(text):
+    category = str(category).strip().upper()
 
+    aliases = {
+        "USUL": "USUL FIQH",
+        "USULFIQH": "USUL FIQH",
+        "USUL FIQIH": "USUL FIQH",
+        "HADITH": "HADIS",
+        "TAFSIR": "TAFSIR",
+        "FIQIH": "FIQH",
+        "AKHLAQ": "AKHLAK",
+    }
+
+    return aliases.get(category, category)
+
+
+def detect_category_from_text(text):
     if not text:
+        return None
+
+    t = text.lower()
+
+    if "/fiqh" in t:
+        return "FIQH"
+
+    if "/tauhid" in t or "/akidah" in t:
+        return "TAUHID"
+
+    if "/hadis" in t or "/hadith" in t:
+        return "HADIS"
+
+    if "/tafsir" in t:
+        return "TAFSIR"
+
+    if "/sirah" in t:
+        return "SIRAH"
+
+    if "/akhlak" in t:
+        return "AKHLAK"
+
+    if "/usul" in t:
+        return "USUL FIQH"
+
+    return None
+
+
+# =========================================================
+# GENERAL HELPERS
+# =========================================================
+
+def safe_filename(name):
+    name = re.sub(
+        r"[^\w\-. ]+",
+        "_",
+        name,
+        flags=re.UNICODE
+    )
+
+    return name.strip()[:150]
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+
+            if not chunk:
+                break
+
+            h.update(chunk)
+
+    return h.hexdigest()
+
+
+def clean_text(text):
+    if text is None:
         return ""
 
     text = str(text)
 
-    text = text.replace(
-        "\x00",
-        " "
-    )
-
-    text = re.sub(
-        r"[ \t]+",
-        " ",
-        text
-    )
-
-    text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        text
-    )
-
-    return text.strip()
-
-
-def strip_html(
-    text
-):
-
-    if not text:
-        return ""
-
-    text = html.unescape(
-        str(text)
-    )
+    text = html.unescape(text)
 
     text = re.sub(
         r"<br\s*/?>",
@@ -453,482 +286,490 @@ def strip_html(
         text
     )
 
-    return normalize_text(
+    text = re.sub(
+        r"[ \t]+",
+        " ",
         text
     )
 
-
-def file_hash(path):
-
-    sha = hashlib.sha256()
-
-    with open(
-        path,
-        "rb"
-    ) as f:
-
-        while True:
-
-            chunk = f.read(
-                1024 * 1024
-            )
-
-            if not chunk:
-                break
-
-            sha.update(
-                chunk
-            )
-
-    return sha.hexdigest()
-
-
-def load_manifest():
-
-    if not os.path.exists(
-        MANIFEST_PATH
-    ):
-
-        return {}
-
-    try:
-
-        with open(
-            MANIFEST_PATH,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            return json.load(
-                f
-            )
-
-    except Exception:
-
-        return {}
-
-
-def save_manifest(data):
-
-    temp = (
-        MANIFEST_PATH
-        + ".tmp"
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
     )
 
-    with open(
-        temp,
-        "w",
-        encoding="utf-8"
-    ) as f:
+    return text.strip()
 
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
 
-    os.replace(
-        temp,
-        MANIFEST_PATH
+def normalize_for_dedupe(text):
+    text = clean_text(text)
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
     )
 
-
-# ============================================================
-# PAGE CACHE
-# ============================================================
-
-def get_page_cache_path(
-    book_hash,
-    page_number
-):
-
-    book_dir = os.path.join(
-        PAGE_CACHE_DIR,
-        book_hash
-    )
-
-    os.makedirs(
-        book_dir,
-        exist_ok=True
-    )
-
-    return os.path.join(
-        book_dir,
-        f"{page_number}.txt"
-    )
+    return text[:500].strip().lower()
 
 
-def save_page_cache(
-    book_hash,
-    page_number,
-    text
-):
+def first_value(data, keys):
+    if not isinstance(data, dict):
+        return None
 
-    path = get_page_cache_path(
-        book_hash,
-        page_number
-    )
+    for key in keys:
+        if key in data:
+            value = data[key]
 
-    with open(
-        path,
-        "w",
-        encoding="utf-8"
-    ) as f:
+            if value is not None and value != "":
+                return value
 
-        f.write(
-            text or ""
-        )
+    return None
 
 
-def load_page_cache(
-    book_hash,
-    page_number
-):
+def recursive_dicts(value):
+    """
+    Yield semua dictionary secara recursive.
+    """
+    if isinstance(value, dict):
+        yield value
 
-    path = get_page_cache_path(
-        book_hash,
-        page_number
-    )
+        for v in value.values():
+            yield from recursive_dicts(v)
 
-    if not os.path.exists(
-        path
-    ):
+    elif isinstance(value, list):
+        for item in value:
+            yield from recursive_dicts(item)
 
+
+def recursive_find_value(value, keys):
+    """
+    Cari value pertama daripada key tertentu
+    dalam struktur JSON yang sangat bersarang.
+    """
+    keys = {
+        str(k).lower()
+        for k in keys
+    }
+
+    for d in recursive_dicts(value):
+        for k, v in d.items():
+            if str(k).lower() in keys:
+                if v is not None and v != "":
+                    return v
+
+    return None
+
+
+def ensure_int(value):
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
         return None
 
     try:
+        return int(value)
+    except Exception:
+        pass
 
+    match = re.search(
+        r"\d+",
+        str(value)
+    )
+
+    if match:
+        try:
+            return int(match.group())
+        except Exception:
+            return None
+
+    return None
+
+
+# =========================================================
+# PDF / TXT EXTRACTION
+# =========================================================
+
+def extract_pdf_text_direct(path):
+    """
+    Cuba extract teks PDF secara biasa dahulu.
+    """
+    try:
+        reader = PdfReader(path)
+
+        pages = []
+
+        for i, page in enumerate(reader.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+
+            text = clean_text(text)
+
+            pages.append(
+                {
+                    "page": i,
+                    "text": text,
+                }
+            )
+
+        return pages
+
+    except Exception as e:
+        print(
+            f"⚠️ PDF direct extraction error: {path}: {e}"
+        )
+
+        return []
+
+
+def pdf_page_cache_path(book_hash, page):
+    directory = os.path.join(
+        CACHE_DIR,
+        book_hash
+    )
+
+    os.makedirs(directory, exist_ok=True)
+
+    return os.path.join(
+        directory,
+        f"{page}.txt"
+    )
+
+
+def read_page_cache(book_hash, page):
+    path = pdf_page_cache_path(
+        book_hash,
+        page
+    )
+
+    if not os.path.exists(path):
+        return None
+
+    try:
         with open(
             path,
             "r",
             encoding="utf-8"
         ) as f:
-
             return f.read()
 
     except Exception:
-
         return None
 
 
-# ============================================================
-# CATEGORY
-# ============================================================
-
-CATEGORY_MAP = {
-
-    "FIQH":
-        "FIQH",
-
-    "TAUHID":
-        "TAUHID",
-
-    "HADIS":
-        "HADIS",
-
-    "TAFSIR":
-        "TAFSIR",
-
-    "SIRAH":
-        "SIRAH",
-
-    "AKHLAK":
-        "AKHLAK",
-
-    "USUL FIQH":
-        "USUL FIQH",
-
-}
-
-
-def normalize_category(
-    category
-):
-
-    category = (
-        category or ""
-    ).strip().upper()
-
-    return CATEGORY_MAP.get(
-        category,
-        category
+def write_page_cache(book_hash, page, text):
+    path = pdf_page_cache_path(
+        book_hash,
+        page
     )
 
+    try:
+        with open(
+            path,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            f.write(text)
 
-def category_from_path(
-    path
-):
-
-    relative = os.path.relpath(
-        path,
-        KITAB_DIR
-    )
-
-    parts = relative.split(
-        os.sep
-    )
-
-    if len(parts) >= 2:
-
-        return normalize_category(
-            parts[0]
+    except Exception as e:
+        print(
+            f"⚠️ Cache write error: {e}"
         )
 
-    return "FIQH"
 
+def extract_pdf_with_ocr(path, book_hash):
+    """
+    OCR PDF secara page-by-page.
+    Cache setiap page supaya tidak OCR semula.
+    """
 
-# ============================================================
-# PDF EXTRACTION
-# ============================================================
+    results = []
 
-def extract_pdf_pages(
-    pdf_path,
-    book_hash
-):
+    try:
+        reader = PdfReader(path)
 
-    print(
-        f"📖 Membaca PDF: "
-        f"{os.path.basename(pdf_path)}"
-    )
+        total_pages = len(reader.pages)
 
-    reader = PdfReader(
-        pdf_path
-    )
+    except Exception:
+        total_pages = 0
 
-    total_pages = len(
-        reader.pages
-    )
+    if total_pages == 0:
+        return results
 
     print(
-        f"📖 PDF: "
-        f"{os.path.basename(pdf_path)} "
-        f"({total_pages} halaman)"
+        f"📖 OCR pages: {total_pages}"
     )
 
-    pages = []
-
-    for index in range(
-        total_pages
+    for page_number in range(
+        1,
+        total_pages + 1
     ):
-
-        page_number = index + 1
-
-        SYNC_STATUS[
-            "current_page"
-        ] = page_number
-
-        SYNC_STATUS[
-            "total_pages"
-        ] = total_pages
-
-        cached = load_page_cache(
+        cached = read_page_cache(
             book_hash,
             page_number
         )
 
         if cached is not None:
-
-            pages.append(
+            results.append(
                 {
-                    "page_number":
-                        page_number,
-
-                    "text":
-                        cached
+                    "page": page_number,
+                    "text": cached,
                 }
             )
 
-            SYNC_STATUS[
-                "processed_pages"
-            ] = page_number
-
             continue
 
-        print(
-            f"🔍 OCR halaman "
-            f"{page_number}/{total_pages}"
-        )
-
-        text = ""
-
         try:
-
-            native_text = (
-                reader
-                .pages[index]
-                .extract_text()
-                or ""
+            images = convert_from_path(
+                path,
+                dpi=OCR_DPI,
+                first_page=page_number,
+                last_page=page_number,
+                fmt="jpeg",
             )
 
-            native_text = normalize_text(
-                native_text
-            )
-
-            if len(
-                native_text
-            ) >= MIN_TEXT_CHARS:
-
-                text = native_text
+            if not images:
+                text = ""
 
             else:
-
-                images = convert_from_path(
-                    pdf_path,
-                    dpi=OCR_DPI,
-                    first_page=page_number,
-                    last_page=page_number
+                text = pytesseract.image_to_string(
+                    images[0],
+                    lang="ara+msa+eng"
                 )
 
-                if images:
+            text = clean_text(text)
 
-                    image = images[0]
-
-                    try:
-
-                        text = (
-                            pytesseract
-                            .image_to_string(
-                                image,
-                                lang="ara+msa+eng"
-                            )
-                        )
-
-                    finally:
-
-                        try:
-                            image.close()
-                        except Exception:
-                            pass
-
-                        del images
-
-                    text = normalize_text(
-                        text
-                    )
-
-        except Exception as e:
-
-            print(
-                f"❌ OCR error "
-                f"halaman {page_number}:",
-                e
+            write_page_cache(
+                book_hash,
+                page_number,
+                text
             )
 
-            text = ""
+            results.append(
+                {
+                    "page": page_number,
+                    "text": text,
+                }
+            )
 
-        save_page_cache(
-            book_hash,
-            page_number,
-            text
-        )
+            del images
 
-        pages.append(
-            {
-                "page_number":
-                    page_number,
+            gc.collect()
 
-                "text":
-                    text
-            }
-        )
+        except Exception as e:
+            print(
+                f"⚠️ OCR page {page_number}: {e}"
+            )
 
-        SYNC_STATUS[
-            "processed_pages"
-        ] = page_number
+            results.append(
+                {
+                    "page": page_number,
+                    "text": "",
+                }
+            )
 
-        gc.collect()
-
-    return pages
-
-
-# ============================================================
-# TXT EXTRACTION
-# ============================================================
-
-def extract_txt(
-    txt_path
-):
-
-    with open(
-        txt_path,
-        "r",
-        encoding="utf-8",
-        errors="ignore"
-    ) as f:
-
-        text = f.read()
-
-    text = normalize_text(
-        text
-    )
-
-    return [
-        {
-            "page_number":
-                1,
-
-            "text":
-                text
-        }
-    ]
+    return results
 
 
-# ============================================================
-# DOCUMENT EXTRACTION
-# ============================================================
-
-def extract_document(
-    path,
-    book_hash
-):
-
-    extension = os.path.splitext(
-        path
-    )[1].lower()
-
-    if extension == ".pdf":
-
-        return extract_pdf_pages(
+def extract_txt(path):
+    try:
+        with open(
             path,
-            book_hash
+            "r",
+            encoding="utf-8",
+            errors="ignore"
+        ) as f:
+            text = f.read()
+
+        text = clean_text(text)
+
+        return [
+            {
+                "page": 1,
+                "text": text,
+            }
+        ]
+
+    except Exception as e:
+        print(
+            f"❌ TXT error: {path}: {e}"
         )
+
+        return []
+
+
+def extract_book_pages(path):
+    extension = Path(path).suffix.lower()
 
     if extension == ".txt":
+        return extract_txt(path)
 
-        return extract_txt(
+    if extension == ".pdf":
+        book_hash = sha256_file(path)
+
+        direct_pages = extract_pdf_text_direct(
             path
+        )
+
+        direct_char_count = sum(
+            len(p["text"])
+            for p in direct_pages
+        )
+
+        if direct_char_count >= MIN_TEXT_CHARS:
+            print(
+                f"📄 PDF text extraction berjaya: "
+                f"{direct_char_count} chars"
+            )
+
+            for page in direct_pages:
+                if page["text"]:
+                    write_page_cache(
+                        book_hash,
+                        page["page"],
+                        page["text"]
+                    )
+
+            return direct_pages
+
+        print(
+            "🖨️ PDF kemungkinan scan. "
+            "Gunakan OCR."
+        )
+
+        return extract_pdf_with_ocr(
+            path,
+            book_hash
         )
 
     return []
 
 
-# ============================================================
-# GEMINI EMBEDDING
-# ============================================================
+# =========================================================
+# BOOK DISCOVERY
+# =========================================================
 
-def embed_documents(
-    texts
-):
+def discover_books():
+    root = "/app/kitab"
 
-    if not embeddings:
+    print(
+        f"📂 Searching: {root}"
+    )
 
-        raise RuntimeError(
-            "Gemini embeddings belum tersedia"
+    if not os.path.exists(root):
+        print(
+            "⚠️ Folder /app/kitab tidak wujud."
         )
 
-    all_vectors = []
+        return []
+
+    files = []
+
+    for path in glob.glob(
+        root + "/**/*",
+        recursive=True
+    ):
+        if not os.path.isfile(path):
+            continue
+
+        ext = Path(path).suffix.lower()
+
+        if ext not in [".pdf", ".txt"]:
+            continue
+
+        relative = os.path.relpath(
+            path,
+            root
+        )
+
+        parts = Path(relative).parts
+
+        if len(parts) >= 2:
+            category = normalize_category(
+                parts[0]
+            )
+        else:
+            category = "FIQH"
+
+        files.append(
+            {
+                "path": path,
+                "category": category or "FIQH",
+            }
+        )
+
+    print(
+        f"📚 Jumlah kitab: {len(files)}"
+    )
+
+    return files
+
+
+# =========================================================
+# MANIFEST
+# =========================================================
+
+def load_manifest():
+    if not os.path.exists(
+        MANIFEST_FILE
+    ):
+        return {}
+
+    try:
+        with open(
+            MANIFEST_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            return json.load(f)
+
+    except Exception:
+        return {}
+
+
+def save_manifest(manifest):
+    try:
+        with open(
+            MANIFEST_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                manifest,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+    except Exception as e:
+        print(
+            f"⚠️ Manifest error: {e}"
+        )
+
+
+# =========================================================
+# EMBEDDING
+# =========================================================
+
+def create_embeddings(texts):
+    if not embeddings:
+        raise RuntimeError(
+            "GOOGLE_API_KEY belum diset."
+        )
+
+    all_embeddings = []
 
     for start in range(
         0,
         len(texts),
         EMBEDDING_BATCH_SIZE
     ):
-
         batch = texts[
             start:
-            start
-            + EMBEDDING_BATCH_SIZE
+            start + EMBEDDING_BATCH_SIZE
         ]
 
         print(
@@ -938,1516 +779,944 @@ def embed_documents(
             f"{len(texts)}"
         )
 
-        vectors = (
-            embeddings
-            .embed_documents(
-                batch
-            )
+        result = embeddings.embed_documents(
+            batch
         )
 
-        all_vectors.extend(
-            vectors
-        )
+        all_embeddings.extend(result)
 
-        time.sleep(
-            0.1
-        )
-
-    return all_vectors
+    return all_embeddings
 
 
-def embed_query(
-    query
-):
+# =========================================================
+# SUPABASE
+# =========================================================
 
-    if not embeddings:
-
-        raise RuntimeError(
-            "Gemini embeddings belum tersedia"
-        )
-
-    return embeddings.embed_query(
-        query
-    )
-
-
-# ============================================================
-# SUPABASE BOOK FUNCTIONS
-# ============================================================
-
-def get_book_by_hash(
-    book_hash
-):
-
-    if not supabase:
-        return None
-
-    try:
-
-        result = (
-            supabase
-            .table("books")
-            .select("*")
-            .eq(
-                "file_hash",
-                book_hash
-            )
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-
-            return result.data[0]
-
-    except Exception as e:
-
-        print(
-            "❌ get_book_by_hash:",
-            e
-        )
-
-    return None
-
-
-def create_or_update_book(
-    kitab_name,
-    category,
-    file_name,
-    file_path,
-    book_hash,
-    total_pages
-):
-
-    if not supabase:
-        return None
-
-    existing = get_book_by_hash(
-        book_hash
-    )
-
-    payload = {
-
-        "kitab_name":
-            kitab_name,
-
-        "category":
-            category,
-
-        "file_name":
-            file_name,
-
-        "file_path":
-            file_path,
-
-        "file_hash":
-            book_hash,
-
-        "total_pages":
-            total_pages,
-
-        "processed_pages":
-            0,
-
-        "total_chunks":
-            0,
-
-        "status":
-            "PROCESSING",
-
-        "current_page":
-            0,
-
-        "error_message":
-            None,
-    }
-
-    try:
-
-        if existing:
-
-            result = (
-                supabase
-                .table("books")
-                .update(
-                    payload
-                )
-                .eq(
-                    "id",
-                    existing["id"]
-                )
-                .execute()
-            )
-
-        else:
-
-            result = (
-                supabase
-                .table("books")
-                .insert(
-                    payload
-                )
-                .execute()
-            )
-
-        if result.data:
-
-            return result.data[0]
-
-    except Exception as e:
-
-        print(
-            "❌ create/update book:",
-            e
-        )
-
-    return None
-
-
-def update_book(
-    book_id,
-    values
-):
-
-    if not supabase or not book_id:
-        return
-
-    try:
-
-        (
-            supabase
-            .table("books")
-            .update(values)
-            .eq(
-                "id",
-                book_id
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ update_book:",
-            e
-        )
-
-
-def delete_source(
-    book_hash
-):
-
+def delete_book_from_supabase(book_hash):
     if not supabase:
         return
 
     try:
+        supabase.table(
+            "kitab_chunks"
+        ).delete().eq(
+            "book_hash",
+            book_hash
+        ).execute()
 
-        supabase.rpc(
-            "delete_book_chunks",
-            {
-                "target_file_hash":
-                    book_hash
-            }
+        supabase.table(
+            "books"
+        ).delete().eq(
+            "book_hash",
+            book_hash
         ).execute()
 
         print(
-            "🗑️ Supabase data deleted:",
-            book_hash[:16]
+            f"🗑️ Supabase data deleted: "
+            f"{book_hash[:16]}"
         )
 
     except Exception as e:
-
         print(
-            "⚠️ Delete chunks:",
-            e
+            f"⚠️ Delete Supabase error: {e}"
         )
 
 
-# ============================================================
-# PROCESS BOOK
-# ============================================================
+def process_book(book, manifest):
+    path = book["path"]
+    category = book["category"]
 
-def process_book(
-    path,
-    category
-):
-
-    file_name = os.path.basename(
-        path
-    )
-
-    kitab_name = os.path.splitext(
-        file_name
-    )[0]
+    filename = os.path.basename(path)
 
     print()
     print("=" * 60)
-
     print(
-        f"📚 PROCESS: {file_name}"
+        f"📚 PROCESS: {filename}"
     )
-
     print(
         f"📂 CATEGORY: {category}"
     )
 
-    book_hash = file_hash(
-        path
-    )
+    try:
+        book_hash = sha256_file(path)
+
+    except Exception as e:
+        print(
+            f"❌ Hash error: {e}"
+        )
+
+        return
 
     print(
         f"🔑 HASH: {book_hash[:16]}"
     )
 
-    delete_source(
-        book_hash
+    previous = manifest.get(
+        path
     )
 
-    SYNC_STATUS[
-        "current_book"
-    ] = kitab_name
-
-    SYNC_STATUS[
-        "current_page"
-    ] = 0
-
-    SYNC_STATUS[
-        "processed_pages"
-    ] = 0
-
-    SYNC_STATUS[
-        "total_chunks"
-    ] = 0
-
-    try:
-
-        pages = extract_document(
-            path,
-            book_hash
-        )
-
-        total_pages = len(
-            pages
-        )
-
-        book = create_or_update_book(
-            kitab_name,
-            category,
-            file_name,
-            path,
-            book_hash,
-            total_pages
-        )
-
-        book_id = (
-            book["id"]
-            if book
-            else None
-        )
-
-        documents = []
-
-        for page in pages:
-
-            text = normalize_text(
-                page.get(
-                    "text",
-                    ""
-                )
+    if previous:
+        if previous.get(
+            "hash"
+        ) == book_hash:
+            print(
+                f"⏭️ SKIP: {filename} "
+                f"(tiada perubahan)"
             )
 
-            if not text:
-                continue
+            return
 
-            page_number = (
-                page["page_number"]
-            )
-
-            chunks = (
-                text_splitter
-                .split_text(
-                    text
-                )
-            )
-
-            for chunk_number, chunk in enumerate(
-                chunks,
-                start=1
-            ):
-
-                chunk = normalize_text(
-                    chunk
-                )
-
-                if not chunk:
-                    continue
-
-                documents.append(
-                    {
-                        "content":
-                            chunk,
-
-                        "page_number":
-                            page_number,
-
-                        "chunk_number":
-                            chunk_number
-                    }
-                )
-
-        print(
-            f"📦 Jumlah chunks: "
-            f"{len(documents)}"
-        )
-
-        if not documents:
-
-            if book_id:
-
-                update_book(
-                    book_id,
-                    {
-                        "status":
-                            "FAILED",
-
-                        "error_message":
-                            "Tiada teks berjaya diekstrak",
-
-                        "total_chunks":
-                            0
-                    }
-                )
-
-            return False
-
-        SYNC_STATUS[
-            "message"
-        ] = "Embedding"
-
-        if book_id:
-
-            update_book(
-                book_id,
-                {
-                    "status":
-                        "EMBEDDING",
-
-                    "total_chunks":
-                        len(documents),
-
-                    "processed_pages":
-                        total_pages
-                }
-            )
-
-        texts = [
-            item["content"]
-            for item in documents
-        ]
-
-        vectors = embed_documents(
-            texts
-        )
-
-        rows = []
-
-        for i, item in enumerate(
-            documents
-        ):
-
-            rows.append(
-                {
-                    "book_id":
-                        book_id,
-
-                    "content":
-                        item["content"],
-
-                    "embedding":
-                        vectors[i],
-
-                    "kitab_name":
-                        kitab_name,
-
-                    "category":
-                        category,
-
-                    "page_number":
-                        item["page_number"],
-
-                    "chunk_number":
-                        item["chunk_number"],
-
-                    "file_hash":
-                        book_hash
-                }
-            )
-
-        SYNC_STATUS[
-            "message"
-        ] = "Simpan ke Supabase"
-
-        if supabase:
-
-            for start in range(
-                0,
-                len(rows),
-                100
-            ):
-
-                batch = rows[
-                    start:
-                    start + 100
-                ]
-
-                (
-                    supabase
-                    .table("kitab_chunks")
-                    .upsert(
-                        batch,
-                        on_conflict=
-                        "file_hash,page_number,chunk_number"
-                    )
-                    .execute()
-                )
-
-                print(
-                    f"💾 Supabase "
-                    f"{start + 1}-"
-                    f"{min(start + len(batch), len(rows))}"
-                )
-
-        SYNC_STATUS[
-            "total_chunks"
-        ] = len(rows)
-
-        if book_id:
-
-            update_book(
-                book_id,
-                {
-                    "status":
-                        "READY",
-
-                    "processed_pages":
-                        total_pages,
-
-                    "total_chunks":
-                        len(rows),
-
-                    "current_page":
-                        total_pages,
-
-                    "error_message":
-                        None
-                }
-            )
-
-        print(
-            f"✅ READY: {kitab_name}"
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "❌ PROCESS ERROR:",
-            e
-        )
-
-        existing = get_book_by_hash(
-            book_hash
-        )
-
-        if existing:
-
-            update_book(
-                existing["id"],
-                {
-                    "status":
-                        "FAILED",
-
-                    "error_message":
-                        str(e)
-                }
-            )
-
-        SYNC_STATUS[
-            "error"
-        ] = str(e)
-
-        return False
-
-    finally:
-
-        gc.collect()
-
-
-# ============================================================
-# DISCOVER BOOKS
-# ============================================================
-
-def discover_books():
-
-    books = []
-
-    if not os.path.isdir(
-        KITAB_DIR
-    ):
-
-        return books
-
-    patterns = [
-        "**/*.pdf",
-        "**/*.txt"
-    ]
-
-    for pattern in patterns:
-
-        full_pattern = os.path.join(
-            KITAB_DIR,
-            pattern
-        )
-
-        books.extend(
-            glob.glob(
-                full_pattern,
-                recursive=True
-            )
-        )
-
-    return sorted(
-        set(books)
+    print(
+        f"🆕 PROCESS: {filename}"
     )
 
+    pages = extract_book_pages(
+        path
+    )
 
-# ============================================================
-# SYNC BOOKS
-# ============================================================
-
-def sync_books():
-
-    if sync_lock.locked():
-
+    if not pages:
         print(
-            "⚠️ Sync sedang berjalan"
+            "⚠️ Tiada halaman ditemui."
         )
 
         return
 
-    with sync_lock:
+    documents = []
 
-        SYNC_STATUS[
-            "running"
-        ] = True
+    for page_data in pages:
+        page_number = page_data["page"]
+        text = clean_text(
+            page_data["text"]
+        )
 
-        SYNC_STATUS[
-            "message"
-        ] = "Mencari kitab"
+        if len(text) < MIN_TEXT_CHARS:
+            continue
 
-        SYNC_STATUS[
-            "error"
-        ] = None
+        documents.append(
+            {
+                "page": page_number,
+                "text": text,
+            }
+        )
 
-        SYNC_STATUS[
-            "started_at"
-        ] = time.time()
+    if not documents:
+        print(
+            "⚠️ Tiada teks mencukupi."
+        )
 
-        try:
+        return
 
-            print()
-            print("=" * 60)
-            print("🔄 SYNC KITAB")
-            print("=" * 60)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=150,
+        separators=[
+            "\n\n",
+            "\n",
+            ". ",
+            " ",
+        ],
+    )
 
-            books = discover_books()
+    chunks = []
 
-            print(
-                f"📂 Searching: {KITAB_DIR}"
+    for doc in documents:
+        split_texts = splitter.split_text(
+            doc["text"]
+        )
+
+        for index, chunk in enumerate(
+            split_texts
+        ):
+            chunk = clean_text(chunk)
+
+            if not chunk:
+                continue
+
+            chunks.append(
+                {
+                    "text": chunk,
+                    "page": doc["page"],
+                    "chunk_index": index,
+                }
             )
 
-            print(
-                f"📚 Jumlah kitab: "
-                f"{len(books)}"
-            )
+    print(
+        f"📦 Jumlah chunks: {len(chunks)}"
+    )
 
-            manifest = load_manifest()
-
-            for path in books:
-
-                file_name = os.path.basename(
-                    path
-                )
-
-                category = category_from_path(
-                    path
-                )
-
-                current_hash = file_hash(
-                    path
-                )
-
-                previous = manifest.get(
-                    path
-                )
-
-                if (
-                    previous
-                    and previous.get(
-                        "hash"
-                    )
-                    == current_hash
-                ):
-
-                    print(
-                        f"⏭️ SKIP: {file_name}"
-                    )
-
-                    continue
-
-                print(
-                    f"🆕 PROCESS: {file_name}"
-                )
-
-                success = process_book(
-                    path,
-                    category
-                )
-
-                if success:
-
-                    manifest[path] = {
-
-                        "hash":
-                            current_hash,
-
-                        "category":
-                            category,
-
-                        "updated_at":
-                            time.time()
-                    }
-
-                    save_manifest(
-                        manifest
-                    )
-
-        except Exception as e:
-
-            print(
-                "❌ SYNC ERROR:",
-                e
-            )
-
-            SYNC_STATUS[
-                "error"
-            ] = str(e)
-
-        finally:
-
-            SYNC_STATUS[
-                "running"
-            ] = False
-
-            SYNC_STATUS[
-                "message"
-            ] = "Selesai"
-
-            SYNC_STATUS[
-                "finished_at"
-            ] = time.time()
-
-            print(
-                "🏁 SYNC SELESAI"
-            )
-
-
-# ============================================================
-# SUPABASE VECTOR SEARCH
-# ============================================================
-
-def search_supabase(
-    query,
-    category=None,
-    match_count=None
-):
+    if not chunks:
+        return
 
     if not supabase:
-        return []
+        print(
+            "⚠️ Supabase tidak dikonfigurasi."
+        )
 
-    if match_count is None:
+        return
 
-        match_count = SEARCH_K
+    delete_book_from_supabase(
+        book_hash
+    )
+
+    texts = [
+        chunk["text"]
+        for chunk in chunks
+    ]
 
     try:
-
-        query_vector = embed_query(
-            query
+        vectors = create_embeddings(
+            texts
         )
 
     except Exception as e:
-
         print(
-            "❌ Query embedding:",
-            e
+            f"❌ Embedding error: {e}"
         )
 
-        return []
+        return
+
+    # -----------------------------------------------------
+    # BOOK
+    # -----------------------------------------------------
+
+    book_name = Path(
+        filename
+    ).stem
 
     try:
-
-        result = supabase.rpc(
-            "match_kitab_chunks",
+        supabase.table(
+            "books"
+        ).insert(
             {
-                "query_embedding":
-                    query_vector,
-
-                "match_count":
-                    match_count,
-
-                "filter_category":
-                    category
+                "book_hash": book_hash,
+                "book_name": book_name,
+                "category": category,
+                "file_name": filename,
             }
         ).execute()
 
-        return result.data or []
+    except Exception as e:
+        print(
+            f"⚠️ Book insert error: {e}"
+        )
+
+    # -----------------------------------------------------
+    # CHUNKS
+    # -----------------------------------------------------
+
+    for index, (chunk, vector) in enumerate(
+        zip(chunks, vectors),
+        start=1
+    ):
+        row = {
+            "book_hash": book_hash,
+            "book_name": book_name,
+            "category": category,
+            "page": chunk["page"],
+            "chunk_index": chunk["chunk_index"],
+            "content": chunk["text"],
+            "embedding": vector,
+        }
+
+        try:
+            supabase.table(
+                "kitab_chunks"
+            ).insert(
+                row
+            ).execute()
+
+            print(
+                f"💾 Supabase "
+                f"{index}-{len(chunks)}"
+            )
+
+        except Exception as e:
+            print(
+                f"❌ Chunk insert error "
+                f"{index}: {e}"
+            )
+
+    manifest[path] = {
+        "hash": book_hash,
+        "category": category,
+        "book_name": book_name,
+        "updated": time.time(),
+    }
+
+    save_manifest(
+        manifest
+    )
+
+    print(
+        f"✅ READY: {book_name}"
+    )
+
+
+def sync_books():
+    print()
+    print("=" * 60)
+    print("🔄 SYNC KITAB")
+    print("=" * 60)
+
+    books = discover_books()
+
+    manifest = load_manifest()
+
+    for book in books:
+        try:
+            process_book(
+                book,
+                manifest
+            )
+
+        except Exception as e:
+            print(
+                f"❌ PROCESS ERROR: "
+                f"{book.get('path')}: {e}"
+            )
+
+    print()
+    print(
+        "🏁 SYNC SELESAI"
+    )
+
+
+# =========================================================
+# LOCAL SUPABASE VECTOR SEARCH
+# =========================================================
+
+def search_supabase(
+    question,
+    category=None,
+    match_count=None
+):
+    if not supabase:
+        return []
+
+    if not embeddings:
+        return []
+
+    match_count = (
+        match_count
+        or SEARCH_K
+    )
+
+    try:
+        query_vector = embeddings.embed_query(
+            question
+        )
 
     except Exception as e:
+        print(
+            f"❌ Query embedding error: {e}"
+        )
+
+        return []
+
+    try:
+        params = {
+            "query_embedding": query_vector,
+            "match_count": match_count,
+        }
+
+        if category:
+            params[
+                "filter_category"
+            ] = category
+
+        response = supabase.rpc(
+            "match_kitab_chunks",
+            params
+        ).execute()
+
+        rows = response.data or []
+
+        results = []
+
+        for row in rows:
+            results.append(
+                {
+                    "source_type": "local",
+                    "content": row.get(
+                        "content",
+                        ""
+                    ),
+                    "kitab_name": row.get(
+                        "book_name",
+                        "Kitab Tempatan"
+                    ),
+                    "category": row.get(
+                        "category"
+                    ),
+                    "page": row.get(
+                        "page"
+                    ),
+                    "score": row.get(
+                        "similarity"
+                    ),
+                }
+            )
 
         print(
-            "❌ Vector search:",
-            e
+            f"📚 LOCAL SEARCH: "
+            f"{len(results)} result"
+        )
+
+        return results
+
+    except Exception as e:
+        print(
+            f"❌ Supabase search error: {e}"
         )
 
         return []
 
 
-# ============================================================
-# TURATH SERVICE
-# ============================================================
+# =========================================================
+# TURATH HTTP SERVICE
+# =========================================================
 
 def turath_request(
     endpoint,
     params=None,
     timeout=None
 ):
+    timeout = (
+        timeout
+        or TURATH_TIMEOUT
+    )
 
-    if timeout is None:
+    params = params or {}
 
-        timeout = TURATH_TIMEOUT
+    query = urllib.parse.urlencode(
+        {
+            k: str(v)
+            for k, v in params.items()
+            if v is not None
+        }
+    )
+
+    url = (
+        TURATH_SERVICE_URL.rstrip("/")
+        + endpoint
+    )
+
+    if query:
+        url += "?" + query
+
+    print(
+        f"🌐 TURATH REQUEST: {url}"
+    )
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": (
+                "TanyaFiqhBot/1.0"
+            ),
+        },
+    )
 
     try:
-
-        params = params or {}
-
-        query_string = (
-            urllib.parse.urlencode(
-                params
-            )
-        )
-
-        base_url = (
-            TURATH_SERVICE_URL
-            .rstrip("/")
-        )
-
-        endpoint = (
-            "/"
-            + endpoint.lstrip("/")
-        )
-
-        url = (
-            f"{base_url}"
-            f"{endpoint}"
-        )
-
-        if query_string:
-
-            url += (
-                "?"
-                + query_string
-            )
-
-        request_obj = (
-            urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent":
-                        "TanyaFiqhBot/1.0"
-                }
-            )
-        )
-
         with urllib.request.urlopen(
-            request_obj,
+            request,
             timeout=timeout
         ) as response:
 
-            raw = (
-                response
-                .read()
-                .decode("utf-8")
+            raw = response.read()
+
+            return json.loads(
+                raw.decode(
+                    "utf-8"
+                )
             )
 
-        return json.loads(
-            raw
-        )
-
     except Exception as e:
-
         print(
-            "❌ Turath request:",
-            e
+            f"❌ TURATH REQUEST ERROR: "
+            f"{e}"
         )
 
-        return {
-            "ok":
-                False,
-
-            "error":
-                str(e)
-        }
+        return None
 
 
-def turath_search(
-    query
-):
+def turath_search(query):
+    if not TURATH_ENABLED:
+        return None
 
-    cached = get_turath_memory_cache(
-        query
-    )
-
-    if cached is not None:
-
-        print(
-            "⚡ TURATH CACHE:",
-            query
-        )
-
-        return cached
-
-    print(
-        "🌐 TURATH SEARCH:",
-        query
-    )
-
-    result = turath_request(
+    return turath_request(
         "/search",
         {
-            "q":
-                query
+            "q": query[:500]
         },
         timeout=TURATH_TIMEOUT
     )
 
-    if result.get("ok"):
 
-        set_turath_memory_cache(
-            query,
-            result
-        )
-
-    return result
-
-
-def turath_book(
-    book_id
-):
-
-    return turath_request(
-        f"/book/{book_id}"
-    )
-
-
-def turath_page(
+def turath_get_page(
     book_id,
-    page_number
+    page
 ):
-
-    return turath_request(
-        f"/page/{book_id}/{page_number}"
-    )
-
-
-# ============================================================
-# TURATH GENERIC HELPERS
-# ============================================================
-
-def find_dicts(
-    obj
-):
-
-    results = []
-
-    if isinstance(
-        obj,
-        dict
-    ):
-
-        results.append(
-            obj
-        )
-
-        for value in obj.values():
-
-            results.extend(
-                find_dicts(
-                    value
-                )
-            )
-
-    elif isinstance(
-        obj,
-        list
-    ):
-
-        for item in obj:
-
-            results.extend(
-                find_dicts(
-                    item
-                )
-            )
-
-    return results
-
-
-def first_value(
-    data,
-    keys
-):
-
-    if not isinstance(
-        data,
-        dict
-    ):
-
+    if not book_id or page is None:
         return None
 
-    for key in keys:
-
-        if key not in data:
-            continue
-
-        value = data[key]
-
-        if value is None:
-            continue
-
-        if isinstance(
-            value,
-            str
-        ):
-
-            value = value.strip()
-
-            if not value:
-                continue
-
-        return value
-
-    return None
-
-
-def is_probable_text(
-    value
-):
-
-    if not isinstance(
-        value,
-        str
-    ):
-
-        return False
-
-    value = strip_html(
-        value
+    return turath_request(
+        f"/page/{book_id}/{page}",
+        timeout=TURATH_TIMEOUT
     )
 
-    if len(value) < 30:
-        return False
 
-    return True
+def turath_get_book(book_id):
+    if not book_id:
+        return None
+
+    return turath_request(
+        f"/book/{book_id}",
+        timeout=TURATH_TIMEOUT
+    )
 
 
-def find_text_fields(
-    item
-):
+# =========================================================
+# TURATH CACHE
+# =========================================================
 
-    if not isinstance(
-        item,
-        dict
-    ):
-
-        return []
-
-    text_keys = [
-
-        "text",
-
-        "content",
-
-        "snippet",
-
-        "excerpt",
-
-        "passage",
-
-        "quote",
-
-        "body",
-
-        "description",
-
-        "matchedText",
-
-        "matched_text",
-
-        "pageText",
-
-        "page_text",
-
-        "html",
-
-        "textHtml",
-
-        "text_html",
-
-    ]
-
-    results = []
-
-    for key in text_keys:
-
-        value = item.get(
-            key
+def turath_cache_file(query):
+    key = hashlib.sha256(
+        query.encode(
+            "utf-8"
         )
+    ).hexdigest()
 
-        if is_probable_text(
-            value
-        ):
-
-            results.append(
-                strip_html(
-                    value
-                )
-            )
-
-    return results
-
-
-def find_book_id(
-    item
-):
-
-    return first_value(
-        item,
-        [
-            "bookId",
-            "book_id",
-            "bookID",
-            "book",
-
-            "id"
-        ]
+    return os.path.join(
+        TURATH_CACHE_DIR,
+        key + ".json"
     )
 
 
-def find_page_number(
-    item
-):
-
-    value = first_value(
-        item,
-        [
-            "pageNumber",
-            "page_number",
-            "page",
-
-            "pageNo",
-            "page_no",
-
-            "number"
-        ]
+def read_turath_cache(query):
+    path = turath_cache_file(
+        query
     )
 
-    if value is None:
+    if not os.path.exists(path):
         return None
 
     try:
-
-        return int(
-            value
+        age = (
+            time.time()
+            - os.path.getmtime(path)
         )
+
+        if age > TURATH_CACHE_TTL:
+            return None
+
+        with open(
+            path,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            return json.load(f)
 
     except Exception:
+        return None
 
-        return value
 
-
-def extract_turath_books(
-    result
+def write_turath_cache(
+    query,
+    data
 ):
-
-    if not result:
-        return []
-
-    raw = result.get(
-        "result",
-        result
+    path = turath_cache_file(
+        query
     )
 
-    candidates = find_dicts(
-        raw
-    )
+    try:
+        with open(
+            path,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False
+            )
 
-    books = []
-    seen = set()
-
-    for item in candidates:
-
-        book_id = first_value(
-            item,
-            [
-                "bookId",
-                "book_id",
-                "bookID",
-
-                "id"
-            ]
+    except Exception as e:
+        print(
+            f"⚠️ Turath cache error: {e}"
         )
 
-        title = first_value(
-            item,
-            [
-                "title",
-                "bookTitle",
-                "book_title",
 
-                "name"
-            ]
-        )
+# =========================================================
+# TURATH EXTRACTION
+# =========================================================
 
-        author = first_value(
-            item,
-            [
-                "author",
-                "authorName",
-                "author_name",
-
-                "author_title"
-            ]
-        )
-
-        if (
-            not book_id
-            and not title
-        ):
-
-            continue
-
-        identifier = str(
-            book_id
-            or title
-        )
-
-        if identifier in seen:
-            continue
-
-        seen.add(
-            identifier
-        )
-
-        books.append(
-            {
-                "id":
-                    book_id,
-
-                "title":
-                    title
-                    or "Tanpa tajuk",
-
-                "author":
-                    author
-                    or "Tidak dinyatakan",
-
-                "raw":
-                    item
-            }
-        )
-
-    return books
+TEXT_KEYS = [
+    "content",
+    "text",
+    "snippet",
+    "excerpt",
+    "passage",
+    "body",
+    "matchedText",
+    "matchText",
+    "highlight",
+    "html",
+]
 
 
-# ============================================================
-# TURATH SEARCH RESULT → RAG CONTEXT
-# ============================================================
+BOOK_ID_KEYS = [
+    "bookId",
+    "book_id",
+    "bookID",
+    "book",
+]
+
+
+PAGE_KEYS = [
+    "page",
+    "pageNumber",
+    "page_number",
+    "pageNo",
+    "page_num",
+    "printedPage",
+    "printed_page",
+    "pageId",
+    "page_id",
+    "internalPage",
+]
+
+
+TITLE_KEYS = [
+    "bookTitle",
+    "book_title",
+    "title",
+    "name",
+]
+
+
+AUTHOR_KEYS = [
+    "authorName",
+    "author_name",
+    "author",
+]
+
 
 def extract_turath_passages(
-    result
+    result,
+    limit=5
 ):
-
     """
-    Cuba mengesan petikan teks daripada
-    pelbagai kemungkinan struktur JSON
-    Turath SDK.
+    Ambil passage sebenar daripada hasil Turath.
 
-    Tidak bergantung kepada satu struktur
-    response sahaja.
+    Kita tidak menganggap struktur JSON tertentu.
+    Fungsi ini berjalan secara recursive kerana
+    envelope API boleh berubah.
     """
 
     if not result:
         return []
-
-    raw = result.get(
-        "result",
-        result
-    )
-
-    candidates = find_dicts(
-        raw
-    )
 
     passages = []
 
     seen = set()
 
-    for item in candidates:
+    root = result
 
-        texts = find_text_fields(
-            item
-        )
+    # Kalau wrapper kita ialah:
+    # {"ok": true, "query": "...", "result": ...}
+    if isinstance(root, dict):
+        if "result" in root:
+            root = root["result"]
 
-        if not texts:
+    for d in recursive_dicts(root):
+
+        text_value = None
+
+        for key in TEXT_KEYS:
+            if key in d:
+                value = d.get(key)
+
+                if isinstance(
+                    value,
+                    str
+                ):
+                    cleaned = clean_text(
+                        value
+                    )
+
+                    if len(cleaned) >= 20:
+                        text_value = cleaned
+                        break
+
+        if not text_value:
             continue
 
-        book_id = find_book_id(
-            item
+        # ---------------------------------------------
+        # BOOK ID
+        # ---------------------------------------------
+
+        book_id = first_value(
+            d,
+            BOOK_ID_KEYS
         )
+
+        if isinstance(
+            book_id,
+            dict
+        ):
+            book_id = first_value(
+                book_id,
+                [
+                    "id",
+                    "bookId",
+                    "book_id",
+                ]
+            )
+
+        book_id = ensure_int(
+            book_id
+        )
+
+        # ---------------------------------------------
+        # PAGE
+        # ---------------------------------------------
+
+        page = first_value(
+            d,
+            PAGE_KEYS
+        )
+
+        if isinstance(
+            page,
+            dict
+        ):
+            page = first_value(
+                page,
+                [
+                    "number",
+                    "page",
+                    "pageNumber",
+                    "id",
+                ]
+            )
+
+        page = ensure_int(
+            page
+        )
+
+        # ---------------------------------------------
+        # TITLE
+        # ---------------------------------------------
 
         title = first_value(
-            item,
-            [
-                "title",
-                "bookTitle",
-                "book_title",
-                "bookName",
-                "book_name"
-            ]
+            d,
+            TITLE_KEYS
         )
+
+        if isinstance(
+            title,
+            dict
+        ):
+            title = first_value(
+                title,
+                [
+                    "title",
+                    "name",
+                ]
+            )
+
+        title = (
+            str(title).strip()
+            if title
+            else "Turath"
+        )
+
+        # ---------------------------------------------
+        # AUTHOR
+        # ---------------------------------------------
 
         author = first_value(
-            item,
-            [
-                "author",
-                "authorName",
-                "author_name"
-            ]
+            d,
+            AUTHOR_KEYS
         )
 
-        page = find_page_number(
-            item
+        if isinstance(
+            author,
+            dict
+        ):
+            author = first_value(
+                author,
+                [
+                    "name",
+                    "fullName",
+                    "full_name",
+                ]
+            )
+
+        if author:
+            author = str(
+                author
+            ).strip()
+
+        # ---------------------------------------------
+        # DEDUPE
+        # ---------------------------------------------
+
+        dedupe_key = (
+            normalize_for_dedupe(
+                text_value
+            )
         )
 
-        for text_value in texts:
+        if dedupe_key in seen:
+            continue
 
-            text_value = normalize_text(
-                text_value
-            )
+        seen.add(
+            dedupe_key
+        )
 
-            if len(
-                text_value
-            ) < 30:
+        passages.append(
+            {
+                "source_type": "turath",
+                "content": text_value,
+                "kitab_name": title,
+                "author": author,
+                "book_id": book_id,
+                "page": page,
+                "url": (
+                    f"https://app.turath.io/book/"
+                    f"{book_id}"
+                    if book_id
+                    else None
+                ),
+            }
+        )
 
-                continue
-
-            fingerprint = (
-                str(book_id)
-                + "|"
-                + str(page)
-                + "|"
-                + text_value[:250]
-            )
-
-            if fingerprint in seen:
-                continue
-
-            seen.add(
-                fingerprint
-            )
-
-            passages.append(
-                {
-                    "source_type":
-                        "TURATH",
-
-                    "book_id":
-                        book_id,
-
-                    "kitab_name":
-                        title
-                        or "Kitab Turath",
-
-                    "author":
-                        author
-                        or "Tidak dinyatakan",
-
-                    "page_number":
-                        page,
-
-                    "content":
-                        text_value
-                }
-            )
+        if len(passages) >= limit:
+            break
 
     return passages
 
 
-def enrich_turath_passages(
-    passages
+def extract_turath_candidates(
+    result,
+    limit=5
 ):
-
     """
-    Jika hasil search hanya memberikan
-    metadata / page number tetapi tiada
-    petikan teks, cuba ambil kandungan
-    halaman melalui endpoint /page.
+    Ambil book_id/page daripada search result
+    walaupun search result tidak memberikan
+    passage secara terus.
     """
 
-    enriched = []
+    if not result:
+        return []
 
-    for item in passages:
+    root = result
 
-        content = normalize_text(
-            item.get(
-                "content",
-                ""
-            )
-        )
+    if isinstance(root, dict):
+        if "result" in root:
+            root = root["result"]
 
-        book_id = item.get(
-            "book_id"
-        )
-
-        page_number = item.get(
-            "page_number"
-        )
-
-        if (
-            content
-            and len(content) >= 30
-        ):
-
-            enriched.append(
-                item
-            )
-
-            continue
-
-        if (
-            book_id
-            and page_number
-        ):
-
-            page_result = turath_page(
-                book_id,
-                page_number
-            )
-
-            if page_result.get(
-                "ok"
-            ):
-
-                page_passages = (
-                    extract_turath_passages(
-                        page_result
-                    )
-                )
-
-                for passage in page_passages:
-
-                    passage["book_id"] = (
-                        passage.get(
-                            "book_id"
-                        )
-                        or book_id
-                    )
-
-                    passage["page_number"] = (
-                        passage.get(
-                            "page_number"
-                        )
-                        or page_number
-                    )
-
-                    if not passage.get(
-                        "kitab_name"
-                    ):
-
-                        passage[
-                            "kitab_name"
-                        ] = item.get(
-                            "kitab_name",
-                            "Kitab Turath"
-                        )
-
-                    enriched.append(
-                        passage
-                    )
-
-    return enriched
-
-
-def limit_turath_passages(
-    passages,
-    max_results=None
-):
-
-    if max_results is None:
-
-        max_results = TURATH_SEARCH_K
-
-    final = []
+    candidates = []
 
     seen = set()
 
-    for item in passages:
+    for d in recursive_dicts(root):
 
-        content = normalize_text(
-            item.get(
-                "content",
-                ""
-            )
+        book_id = first_value(
+            d,
+            BOOK_ID_KEYS
         )
 
-        if not content:
+        if isinstance(
+            book_id,
+            dict
+        ):
+            book_id = first_value(
+                book_id,
+                [
+                    "id",
+                    "bookId",
+                    "book_id",
+                ]
+            )
+
+        book_id = ensure_int(
+            book_id
+        )
+
+        if not book_id:
             continue
 
-        if len(content) > MAX_TURATH_TEXT:
+        page = first_value(
+            d,
+            PAGE_KEYS
+        )
 
-            content = (
-                content[
-                    :MAX_TURATH_TEXT
+        if isinstance(
+            page,
+            dict
+        ):
+            page = first_value(
+                page,
+                [
+                    "number",
+                    "page",
+                    "pageNumber",
+                    "id",
                 ]
-                + "..."
             )
 
-        kitab = item.get(
-            "kitab_name",
-            "Kitab Turath"
+        page = ensure_int(
+            page
         )
 
-        page = item.get(
-            "page_number"
+        title = first_value(
+            d,
+            TITLE_KEYS
         )
+
+        if isinstance(
+            title,
+            dict
+        ):
+            title = first_value(
+                title,
+                [
+                    "title",
+                    "name",
+                ]
+            )
+
+        title = (
+            str(title).strip()
+            if title
+            else "Turath"
+        )
+
+        author = first_value(
+            d,
+            AUTHOR_KEYS
+        )
+
+        if isinstance(
+            author,
+            dict
+        ):
+            author = first_value(
+                author,
+                [
+                    "name",
+                    "fullName",
+                    "full_name",
+                ]
+            )
 
         key = (
-            str(kitab)
-            + "|"
-            + str(page)
-            + "|"
-            + content[:300]
+            book_id,
+            page
         )
 
         if key in seen:
@@ -2457,1139 +1726,439 @@ def limit_turath_passages(
             key
         )
 
-        new_item = dict(
-            item
+        candidates.append(
+            {
+                "book_id": book_id,
+                "page": page,
+                "kitab_name": title,
+                "author": author,
+            }
         )
 
-        new_item[
-            "content"
-        ] = content
-
-        final.append(
-            new_item
-        )
-
-        if len(final) >= max_results:
+        if len(candidates) >= limit:
             break
 
-    return final
+    return candidates
 
 
-def search_turath_for_rag(
-    query
+def extract_page_text(
+    page_result
 ):
+    """
+    Ambil teks daripada response getPage.
+    """
 
-    try:
+    if not page_result:
+        return ""
 
-        result = turath_search(
-            query
+    root = page_result
+
+    if isinstance(root, dict):
+        if "result" in root:
+            root = root["result"]
+
+    # Cuba key yang biasa dahulu
+    for key in [
+        "text",
+        "content",
+        "body",
+        "html",
+    ]:
+        value = recursive_find_value(
+            root,
+            [key]
         )
 
-        if not result.get(
-            "ok"
+        if isinstance(
+            value,
+            str
         ):
+            cleaned = clean_text(
+                value
+            )
 
-            print(
-                "⚠️ Turath tidak tersedia:",
-                result.get(
-                    "error"
+            if len(cleaned) >= 20:
+                return cleaned
+
+    # Fallback: cari string panjang
+    # dalam struktur response
+    candidates = []
+
+    def walk(value):
+        if isinstance(
+            value,
+            str
+        ):
+            cleaned = clean_text(
+                value
+            )
+
+            if len(cleaned) >= 50:
+                candidates.append(
+                    cleaned
                 )
-            )
 
-            return []
+        elif isinstance(
+            value,
+            dict
+        ):
+            for v in value.values():
+                walk(v)
 
-        passages = (
-            extract_turath_passages(
-                result
-            )
-        )
+        elif isinstance(
+            value,
+            list
+        ):
+            for v in value:
+                walk(v)
 
+    walk(root)
+
+    if not candidates:
+        return ""
+
+    candidates.sort(
+        key=len,
+        reverse=True
+    )
+
+    return candidates[0]
+
+
+def extract_page_metadata(
+    page_result
+):
+    """
+    Cuba ambil title, author dan page
+    daripada getPage.
+    """
+
+    if not page_result:
+        return {}
+
+    root = page_result
+
+    if isinstance(root, dict):
+        if "result" in root:
+            root = root["result"]
+
+    title = recursive_find_value(
+        root,
+        TITLE_KEYS
+    )
+
+    author = recursive_find_value(
+        root,
+        AUTHOR_KEYS
+    )
+
+    page = recursive_find_value(
+        root,
+        PAGE_KEYS
+    )
+
+    return {
+        "kitab_name": (
+            str(title).strip()
+            if title
+            else None
+        ),
+        "author": (
+            str(author).strip()
+            if author
+            else None
+        ),
+        "page": ensure_int(
+            page
+        ),
+    }
+
+
+# =========================================================
+# TURATH SEARCH → PAGE
+# =========================================================
+
+def search_turath_passages(
+    question,
+    limit=None
+):
+    """
+    ALIRAN UTAMA TURATH:
+
+    1. search(query)
+    2. Cuba ambil passage terus
+    3. Jika search hanya beri book/page,
+       panggil getPage(book_id, page)
+    4. Gabungkan teks sebenar
+    """
+
+    if not TURATH_ENABLED:
         print(
-            f"📖 Turath petikan awal: "
-            f"{len(passages)}"
-        )
-
-        if not passages:
-
-            return []
-
-        passages = enrich_turath_passages(
-            passages
-        )
-
-        passages = limit_turath_passages(
-            passages,
-            TURATH_SEARCH_K
-        )
-
-        print(
-            f"✅ Turath digunakan: "
-            f"{len(passages)} petikan"
-        )
-
-        return passages
-
-    except Exception as e:
-
-        print(
-            "❌ Turath RAG error:",
-            e
+            "ℹ️ TURATH disabled."
         )
 
         return []
 
-
-# ============================================================
-# FLASK: HOME
-# ============================================================
-
-@app.route("/")
-def home():
-
-    return """
-    <!DOCTYPE html>
-
-    <html lang="ms">
-
-    <head>
-
-        <meta charset="UTF-8">
-
-        <meta name="viewport"
-              content="width=device-width,
-                       initial-scale=1">
-
-        <title>TanyaFiqhBot</title>
-
-        <style>
-
-            body {
-                font-family:
-                    Arial,
-                    sans-serif;
-
-                background:
-                    #f5f5f5;
-
-                margin: 0;
-
-                padding: 30px;
-            }
-
-            .container {
-                max-width: 900px;
-
-                margin: auto;
-            }
-
-            .card {
-                background: white;
-
-                padding: 25px;
-
-                border-radius: 14px;
-
-                margin-bottom: 20px;
-
-                box-shadow:
-                    0 3px 12px
-                    rgba(0,0,0,.08);
-            }
-
-            a {
-                text-decoration: none;
-            }
-
-            .button {
-                display: inline-block;
-
-                padding: 12px 18px;
-
-                background: #222;
-
-                color: white;
-
-                border-radius: 8px;
-
-                margin: 5px;
-            }
-
-        </style>
-
-    </head>
-
-    <body>
-
-        <div class="container">
-
-            <div class="card">
-
-                <h1>
-                    📚 TanyaFiqhBot
-                </h1>
-
-                <p>
-                    Sistem RAG kitab Islam
-                    + Turath
-                </p>
-
-                <a class="button"
-                   href="/turath">
-                    🔎 Cari Turath
-                </a>
-
-                <a class="button"
-                   href="/books">
-                    📚 Kitab Tempatan
-                </a>
-
-                <a class="button"
-                   href="/status">
-                    📊 Status
-                </a>
-
-                <a class="button"
-                   href="/health">
-                    ❤️ Health
-                </a>
-
-            </div>
-
-        </div>
-
-    </body>
-
-    </html>
-    """
-
-
-# ============================================================
-# FLASK: HEALTH
-# ============================================================
-
-@app.route("/health")
-def health():
-
-    return jsonify({
-
-        "ok":
-            True,
-
-        "service":
-            "TanyaFiqhBot",
-
-        "supabase":
-            supabase is not None,
-
-        "gemini":
-            embeddings is not None,
-
-        "llm_model":
-            LLM_MODEL,
-
-        "kitab_dir":
-            KITAB_DIR,
-
-        "turath_service":
-            TURATH_SERVICE_URL
-
-    })
-
-
-# ============================================================
-# FLASK: STATUS
-# ============================================================
-
-@app.route("/status")
-def status():
-
-    try:
-
-        supabase_status = (
-            "CONNECTED"
-            if supabase
-            else "DISCONNECTED"
-        )
-
-        return jsonify({
-
-            "ok":
-                True,
-
-            "sync":
-                SYNC_STATUS,
-
-            "supabase":
-                supabase_status,
-
-            "gemini":
-                embeddings is not None,
-
-            "llm_model":
-                LLM_MODEL,
-
-            "kitab_directory":
-                KITAB_DIR,
-
-            "kitab_directory_exists":
-                os.path.isdir(
-                    KITAB_DIR
-                ),
-
-            "turath_service":
-                TURATH_SERVICE_URL
-
-        })
-
-    except Exception as e:
-
-        return jsonify({
-
-            "ok":
-                False,
-
-            "error":
-                str(e)
-
-        }), 500
-
-
-# ============================================================
-# FLASK: BOOKS
-# ============================================================
-
-@app.route("/books")
-def books():
-
-    if not supabase:
-
-        return jsonify({
-
-            "ok":
-                False,
-
-            "error":
-                "Supabase tidak connected"
-
-        }), 500
-
-    try:
-
-        result = (
-            supabase
-            .table("books")
-            .select("*")
-            .order(
-                "id",
-                desc=True
-            )
-            .execute()
-        )
-
-        return jsonify({
-
-            "ok":
-                True,
-
-            "books":
-                result.data or []
-
-        })
-
-    except Exception as e:
-
-        return jsonify({
-
-            "ok":
-                False,
-
-            "error":
-                str(e)
-
-        }), 500
-
-
-# ============================================================
-# FLASK: TURATH SEARCH
-# ============================================================
-
-@app.route("/turath")
-def turath_search_page():
-
-    query = (
-        request.args
-        .get(
-            "q",
-            ""
-        )
-        .strip()
+    limit = (
+        limit
+        or TURATH_SEARCH_K
     )
 
-    books = []
+    question = clean_text(
+        question
+    )
 
-    passages = []
+    if not question:
+        return []
 
-    raw_result = None
+    print()
+    print(
+        "🔎 TURATH SEARCH:"
+        f" {question}"
+    )
 
-    error_message = None
+    # -----------------------------------------------------
+    # CACHE
+    # -----------------------------------------------------
 
-    if query:
+    cached = read_turath_cache(
+        question
+    )
 
-        raw_result = turath_search(
-            query
+    if cached is not None:
+        print(
+            "💾 TURATH CACHE HIT"
         )
 
-        if not raw_result.get(
-            "ok"
+        return cached[:limit]
+
+    # -----------------------------------------------------
+    # SEARCH
+    # -----------------------------------------------------
+
+    search_result = turath_search(
+        question
+    )
+
+    if not search_result:
+        print(
+            "⚠️ Turath search tiada response."
+        )
+
+        return []
+
+    # -----------------------------------------------------
+    # STEP 1
+    # SEARCH RESULT TERUS ADA TEXT
+    # -----------------------------------------------------
+
+    passages = extract_turath_passages(
+        search_result,
+        limit=limit
+    )
+
+    print(
+        f"📖 TURATH DIRECT PASSAGES: "
+        f"{len(passages)}"
+    )
+
+    # -----------------------------------------------------
+    # STEP 2
+    # JIKA TIADA TEXT, CARI BOOK/PAGE
+    # -----------------------------------------------------
+
+    candidates = extract_turath_candidates(
+        search_result,
+        limit=limit * 2
+    )
+
+    print(
+        f"📚 TURATH CANDIDATES: "
+        f"{len(candidates)}"
+    )
+
+    # -----------------------------------------------------
+    # Kalau direct passages ada tetapi
+    # metadata kurang, cuba lengkapkan metadata
+    # -----------------------------------------------------
+
+    for passage in passages:
+
+        if (
+            passage.get("book_id")
+            and
+            passage.get("page")
         ):
+            continue
 
-            error_message = (
-                raw_result.get(
-                    "error",
-                    "Turath error"
-                )
-            )
+        # Cari candidate yang paling dekat
+        # berdasarkan kitab jika ada.
+        for candidate in candidates:
 
-        else:
-
-            books = (
-                extract_turath_books(
-                    raw_result
-                )
-            )
-
-            passages = (
-                extract_turath_passages(
-                    raw_result
-                )
-            )
-
-            passages = limit_turath_passages(
-                passages,
-                TURATH_SEARCH_K
-            )
-
-    cards = ""
-
-    if error_message:
-
-        cards = f"""
-        <div class="error">
-            <b>❌ Turath Error</b>
-            <br>
-            {html.escape(
-                error_message
-            )}
-        </div>
-        """
-
-    elif (
-        query
-        and not books
-        and not passages
-    ):
-
-        cards = """
-        <div class="empty">
-            Tiada keputusan ditemui.
-        </div>
-        """
-
-    else:
-
-        if passages:
-
-            cards += """
-            <h2>
-                📖 Petikan Ditemui
-            </h2>
-            """
-
-            for passage in passages:
-
-                title = html.escape(
-                    str(
-                        passage.get(
-                            "kitab_name",
-                            "Kitab Turath"
-                        )
-                    )
+            if passage.get(
+                "kitab_name"
+            ) == candidate.get(
+                "kitab_name"
+            ):
+                passage[
+                    "book_id"
+                ] = candidate.get(
+                    "book_id"
                 )
 
-                author = html.escape(
-                    str(
-                        passage.get(
-                            "author",
-                            "Tidak dinyatakan"
-                        )
-                    )
+                passage[
+                    "page"
+                ] = candidate.get(
+                    "page"
                 )
 
-                page = passage.get(
-                    "page_number"
-                )
+                break
 
-                content = html.escape(
-                    str(
-                        passage.get(
-                            "content",
-                            ""
-                        )
-                    )
-                )
+    # -----------------------------------------------------
+    # Ambil halaman sebenar untuk candidate
+    # -----------------------------------------------------
 
-                page_text = (
-                    f" • Hlm. {page}"
-                    if page
-                    else ""
-                )
+    existing_keys = set()
 
-                cards += f"""
-
-                <div class="passage-card">
-
-                    <h3>
-                        📚 {title}
-                    </h3>
-
-                    <div class="author">
-                        👤 {author}
-                        {page_text}
-                    </div>
-
-                    <div class="content">
-                        {content}
-                    </div>
-
-                </div>
-
-                """
-
-        if books:
-
-            cards += """
-            <h2>
-                📚 Kitab Berkaitan
-            </h2>
-            """
-
-            for book in books:
-
-                book_id = book.get(
-                    "id"
-                )
-
-                title = html.escape(
-                    str(
-                        book.get(
-                            "title",
-                            "Tanpa tajuk"
-                        )
-                    )
-                )
-
-                author = html.escape(
-                    str(
-                        book.get(
-                            "author",
-                            "Tidak dinyatakan"
-                        )
-                    )
-                )
-
-                if book_id:
-
-                    action = f"""
-                    <a class="book-button"
-                       href="/turath/book/{html.escape(str(book_id))}">
-                        📖 Lihat Kitab
-                    </a>
-                    """
-
-                else:
-
-                    action = ""
-
-                cards += f"""
-
-                <div class="book-card">
-
-                    <h3>
-                        {title}
-                    </h3>
-
-                    <div class="author">
-                        👤 {author}
-                    </div>
-
-                    <div class="book-id">
-                        ID:
-                        {html.escape(
-                            str(
-                                book_id or "-"
-                            )
-                        )}
-                    </div>
-
-                    {action}
-
-                </div>
-
-                """
-
-    page = f"""
-    <!DOCTYPE html>
-
-    <html lang="ms">
-
-    <head>
-
-        <meta charset="UTF-8">
-
-        <meta name="viewport"
-              content="width=device-width,
-                       initial-scale=1">
-
-        <title>
-            Turath Search
-            - TanyaFiqhBot
-        </title>
-
-        <style>
-
-            body {{
-                font-family:
-                    Arial,
-                    sans-serif;
-
-                background:
-                    #f4f6f8;
-
-                margin: 0;
-
-                padding: 25px;
-            }}
-
-            .container {{
-                max-width:
-                    1000px;
-
-                margin: auto;
-            }}
-
-            .header {{
-                background: white;
-
-                padding: 25px;
-
-                border-radius: 15px;
-
-                box-shadow:
-                    0 3px 12px
-                    rgba(0,0,0,.08);
-            }}
-
-            h1 {{
-                margin-top: 0;
-            }}
-
-            form {{
-                display: flex;
-
-                gap: 10px;
-
-                margin-top: 20px;
-            }}
-
-            input {{
-                flex: 1;
-
-                padding: 14px;
-
-                border:
-                    1px solid #ccc;
-
-                border-radius: 9px;
-
-                font-size: 16px;
-            }}
-
-            button {{
-                padding:
-                    14px 22px;
-
-                border: 0;
-
-                border-radius: 9px;
-
-                cursor: pointer;
-
-                font-size: 16px;
-            }}
-
-            .passage-card {{
-                background: white;
-
-                margin-top: 15px;
-
-                padding: 20px;
-
-                border-radius: 12px;
-
-                box-shadow:
-                    0 2px 8px
-                    rgba(0,0,0,.06);
-            }}
-
-            .passage-card h3 {{
-                margin-top: 0;
-            }}
-
-            .content {{
-                margin-top: 15px;
-
-                line-height: 1.7;
-
-                white-space: pre-wrap;
-            }}
-
-            .book-card {{
-                background: white;
-
-                margin-top: 15px;
-
-                padding: 20px;
-
-                border-radius: 12px;
-
-                box-shadow:
-                    0 2px 8px
-                    rgba(0,0,0,.06);
-            }}
-
-            .book-card h3 {{
-                margin-top: 0;
-            }}
-
-            .author {{
-                margin: 8px 0;
-
-                color: #555;
-            }}
-
-            .book-id {{
-                color: #777;
-
-                font-size: 13px;
-
-                margin-bottom: 15px;
-            }}
-
-            .book-button {{
-                display:
-                    inline-block;
-
-                padding:
-                    10px 15px;
-
-                background: #222;
-
-                color: white;
-
-                text-decoration:
-                    none;
-
-                border-radius: 8px;
-            }}
-
-            .error {{
-                background: #ffe5e5;
-
-                color: #900;
-
-                padding: 15px;
-
-                border-radius: 10px;
-
-                margin-top: 20px;
-            }}
-
-            .empty {{
-                background: white;
-
-                padding: 20px;
-
-                margin-top: 20px;
-
-                border-radius: 10px;
-            }}
-
-            .back {{
-                display:
-                    inline-block;
-
-                margin-top: 15px;
-
-                text-decoration:
-                    none;
-            }}
-
-        </style>
-
-    </head>
-
-    <body>
-
-        <div class="container">
-
-            <div class="header">
-
-                <h1>
-                    📚 Turath Search
-                </h1>
-
-                <p>
-                    Cari kitab dan petikan
-                    dalam pangkalan Turath.
-                </p>
-
-                <form
-                    method="get"
-                    action="/turath"
-                >
-
-                    <input
-                        type="text"
-                        name="q"
-                        value="{html.escape(query)}"
-                        placeholder=
-                        "Contoh: Fathul Muin, solat, zakat..."
-                    >
-
-                    <button type="submit">
-                        🔍 Cari
-                    </button>
-
-                </form>
-
-                <a class="back"
-                   href="/">
-                    ← Kembali
-                </a>
-
-            </div>
-
-            <div>
-
-                {cards}
-
-            </div>
-
-        </div>
-
-    </body>
-
-    </html>
-    """
-
-    return page
-
-
-# ============================================================
-# FLASK: TURATH BOOK
-# ============================================================
-
-@app.route(
-    "/turath/book/<book_id>"
-)
-def turath_book_page(
-    book_id
-):
-
-    result = turath_book(
-        book_id
-    )
-
-    if not result.get(
-        "ok"
-    ):
-
-        return f"""
-        <h2>❌ Turath Error</h2>
-
-        <pre>
-        {html.escape(
-            str(
-                result.get(
-                    "error"
-                )
-            )
-        )}
-        </pre>
-
-        <a href="/turath">
-            ← Kembali
-        </a>
-        """, 500
-
-    raw = result.get(
-        "result",
-        result
-    )
-
-    formatted = json.dumps(
-        raw,
-        ensure_ascii=False,
-        indent=2
-    )
-
-    return f"""
-    <!DOCTYPE html>
-
-    <html lang="ms">
-
-    <head>
-
-        <meta charset="UTF-8">
-
-        <meta name="viewport"
-              content="width=device-width,
-                       initial-scale=1">
-
-        <title>
-            Turath Book
-        </title>
-
-        <style>
-
-            body {{
-                font-family:
-                    Arial;
-
-                max-width:
-                    1000px;
-
-                margin: auto;
-
-                padding: 25px;
-
-                background:
-                    #f5f5f5;
-            }}
-
-            .card {{
-                background: white;
-
-                padding: 25px;
-
-                border-radius: 12px;
-            }}
-
-            pre {{
-                white-space:
-                    pre-wrap;
-
-                word-break:
-                    break-word;
-            }}
-
-        </style>
-
-    </head>
-
-    <body>
-
-        <div class="card">
-
-            <h1>
-                📖 Turath Book
-            </h1>
-
-            <p>
-                Book ID:
-                {html.escape(
-                    str(book_id)
-                )}
-            </p>
-
-            <pre>
-{html.escape(formatted)}
-            </pre>
-
-            <a href="/turath">
-                ← Kembali
-            </a>
-
-        </div>
-
-    </body>
-
-    </html>
-    """
-
-
-# ============================================================
-# SOURCE HELPERS
-# ============================================================
-
-def prepare_local_results(
-    results
-):
-
-    prepared = []
-
-    for item in results:
-
-        new_item = dict(
-            item
+    for p in passages:
+        key = (
+            p.get("book_id"),
+            p.get("page")
         )
 
-        new_item[
-            "source_type"
-        ] = "LOCAL"
-
-        prepared.append(
-            new_item
+        existing_keys.add(
+            key
         )
 
-    return prepared
+    for candidate in candidates:
 
+        if len(passages) >= limit:
+            break
 
-def prepare_all_results(
-    local_results,
-    turath_results
-):
-
-    combined = []
-
-    combined.extend(
-        prepare_local_results(
-            local_results
-        )
-    )
-
-    combined.extend(
-        turath_results
-    )
-
-    return combined
-
-
-def format_source_line(
-    item
-):
-
-    source_type = item.get(
-        "source_type",
-        "LOCAL"
-    )
-
-    kitab = item.get(
-        "kitab_name",
-        "Kitab"
-    )
-
-    page = item.get(
-        "page_number"
-    )
-
-    if source_type == "TURATH":
-
-        author = item.get(
-            "author"
+        book_id = candidate.get(
+            "book_id"
         )
 
-        line = (
-            f"🌐 {kitab}"
+        page = candidate.get(
+            "page"
         )
 
-        if author:
+        if not book_id:
+            continue
 
-            line += (
-                f" — {author}"
+        if page is None:
+            continue
+
+        key = (
+            book_id,
+            page
+        )
+
+        if key in existing_keys:
+            continue
+
+        print(
+            "📖 TURATH GET PAGE: "
+            f"book={book_id}, "
+            f"page={page}"
+        )
+
+        page_result = turath_get_page(
+            book_id,
+            page
+        )
+
+        if not page_result:
+            continue
+
+        text = extract_page_text(
+            page_result
+        )
+
+        if len(text) < 20:
+            print(
+                "⚠️ Turath page tiada "
+                "teks yang mencukupi."
             )
 
-        if page:
+            continue
 
-            line += (
-                f", hlm. {page}"
-            )
-
-        return line
-
-    line = (
-        f"📚 {kitab}"
-    )
-
-    if page:
-
-        line += (
-            f", hlm. {page}"
+        metadata = extract_page_metadata(
+            page_result
         )
 
-    return line
+        title = (
+            metadata.get(
+                "kitab_name"
+            )
+            or candidate.get(
+                "kitab_name"
+            )
+            or "Turath"
+        )
 
+        author = (
+            metadata.get(
+                "author"
+            )
+            or candidate.get(
+                "author"
+            )
+        )
 
-def format_sources(
-    results
-):
+        real_page = (
+            metadata.get(
+                "page"
+            )
+            or page
+        )
 
-    sources = []
+        passage = {
+            "source_type": "turath",
+            "content": text,
+            "kitab_name": title,
+            "author": author,
+            "book_id": book_id,
+            "page": real_page,
+            "url": (
+                f"https://app.turath.io/book/"
+                f"{book_id}"
+            ),
+        }
+
+        # Dedupe
+        key_text = normalize_for_dedupe(
+            text
+        )
+
+        if any(
+            normalize_for_dedupe(
+                p.get("content", "")
+            ) == key_text
+            for p in passages
+        ):
+            continue
+
+        passages.append(
+            passage
+        )
+
+        existing_keys.add(
+            key
+        )
+
+    # -----------------------------------------------------
+    # Potong teks Turath
+    # -----------------------------------------------------
+
+    final = []
 
     seen = set()
 
-    for item in results:
+    for passage in passages:
 
-        source = format_source_line(
-            item
-        )
-
-        if source in seen:
-            continue
-
-        seen.add(
-            source
-        )
-
-        sources.append(
-            source
-        )
-
-    return sources
-
-
-# ============================================================
-# GENERATE ANSWER
-# ============================================================
-
-def generate_answer(
-    question,
-    results
-):
-
-    if not llm:
-
-        return (
-            "Maaf, sistem AI belum "
-            "bersedia."
-        )
-
-    if not results:
-
-        return (
-            "Maaf, saya tidak menemui "
-            "rujukan yang mencukupi."
-        )
-
-    context_parts = []
-
-    for i, item in enumerate(
-        results,
-        start=1
-    ):
-
-        content = normalize_text(
-            item.get(
+        content = clean_text(
+            passage.get(
                 "content",
                 ""
             )
@@ -3598,155 +2167,482 @@ def generate_answer(
         if not content:
             continue
 
-        source_type = item.get(
+        key = normalize_for_dedupe(
+            content
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(
+            key
+        )
+
+        passage["content"] = (
+            content[
+                :TURATH_CONTEXT_LIMIT
+            ]
+        )
+
+        final.append(
+            passage
+        )
+
+        if len(final) >= limit:
+            break
+
+    print(
+        f"✅ TURATH FINAL: "
+        f"{len(final)} passages"
+    )
+
+    # -----------------------------------------------------
+    # CACHE
+    # -----------------------------------------------------
+
+    if final:
+        write_turath_cache(
+            question,
+            final
+        )
+
+    return final
+
+
+# =========================================================
+# TURATH BOOK EXTRACTION
+# Untuk endpoint /turath lama
+# =========================================================
+
+def extract_turath_books(
+    result,
+    limit=20
+):
+    books = []
+
+    seen = set()
+
+    if not result:
+        return books
+
+    root = result
+
+    if isinstance(root, dict):
+        if "result" in root:
+            root = root["result"]
+
+    for d in recursive_dicts(root):
+
+        book_id = first_value(
+            d,
+            BOOK_ID_KEYS
+        )
+
+        if isinstance(
+            book_id,
+            dict
+        ):
+            book_id = first_value(
+                book_id,
+                [
+                    "id",
+                    "bookId",
+                    "book_id",
+                ]
+            )
+
+        book_id = ensure_int(
+            book_id
+        )
+
+        if not book_id:
+            continue
+
+        title = first_value(
+            d,
+            TITLE_KEYS
+        )
+
+        if isinstance(
+            title,
+            dict
+        ):
+            title = first_value(
+                title,
+                [
+                    "title",
+                    "name",
+                ]
+            )
+
+        title = (
+            str(title)
+            if title
+            else "Turath"
+        )
+
+        author = first_value(
+            d,
+            AUTHOR_KEYS
+        )
+
+        if isinstance(
+            author,
+            dict
+        ):
+            author = first_value(
+                author,
+                [
+                    "name",
+                    "fullName",
+                ]
+            )
+
+        key = (
+            book_id,
+            title
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(
+            key
+        )
+
+        books.append(
+            {
+                "book_id": book_id,
+                "title": title,
+                "author": author,
+                "url": (
+                    f"https://app.turath.io/book/"
+                    f"{book_id}"
+                ),
+            }
+        )
+
+        if len(books) >= limit:
+            break
+
+    return books
+
+
+# =========================================================
+# CONTEXT BUILDER
+# =========================================================
+
+def build_context(
+    results
+):
+    blocks = []
+
+    total_chars = 0
+
+    for index, result in enumerate(
+        results,
+        start=1
+    ):
+        source_type = result.get(
             "source_type",
-            "LOCAL"
+            "local"
         )
 
-        kitab = item.get(
-            "kitab_name",
-            "Tidak diketahui"
+        content = clean_text(
+            result.get(
+                "content",
+                ""
+            )
         )
 
-        category = item.get(
-            "category",
-            ""
+        if not content:
+            continue
+
+        if source_type == "turath":
+
+            content = content[
+                :TURATH_CONTEXT_LIMIT
+            ]
+
+            kitab = result.get(
+                "kitab_name"
+            ) or "Turath"
+
+            author = result.get(
+                "author"
+            )
+
+            page = result.get(
+                "page"
+            )
+
+            header = (
+                f"[SUMBER TURATH #{index}]\n"
+                f"Kitab: {kitab}"
+            )
+
+            if author:
+                header += (
+                    f"\nPengarang: {author}"
+                )
+
+            if page:
+                header += (
+                    f"\nHalaman: {page}"
+                )
+
+        else:
+
+            content = content[
+                :LOCAL_CONTEXT_LIMIT
+            ]
+
+            kitab = result.get(
+                "kitab_name"
+            ) or "Kitab Tempatan"
+
+            page = result.get(
+                "page"
+            )
+
+            category = result.get(
+                "category"
+            )
+
+            header = (
+                f"[SUMBER KITAB TEMPATAN #{index}]\n"
+                f"Kitab: {kitab}"
+            )
+
+            if category:
+                header += (
+                    f"\nKategori: {category}"
+                )
+
+            if page:
+                header += (
+                    f"\nHalaman: {page}"
+                )
+
+        block = (
+            header
+            + "\n"
+            + "Teks:\n"
+            + content
         )
 
-        page = item.get(
-            "page_number"
+        if (
+            total_chars
+            + len(block)
+            > TOTAL_CONTEXT_LIMIT
+        ):
+            break
+
+        blocks.append(
+            block
         )
 
-        author = item.get(
-            "author"
+        total_chars += len(block)
+
+    return "\n\n".join(
+        blocks
+    )
+
+
+# =========================================================
+# SOURCE FORMAT
+# =========================================================
+
+def format_sources(
+    results
+):
+    lines = []
+
+    seen = set()
+
+    for result in results:
+
+        source_type = result.get(
+            "source_type"
         )
 
-        if source_type == "TURATH":
+        if source_type == "turath":
 
-            source_label = (
-                "TURATH"
+            book_id = result.get(
+                "book_id"
+            )
+
+            page = result.get(
+                "page"
+            )
+
+            kitab = result.get(
+                "kitab_name"
+            ) or "Turath"
+
+            author = result.get(
+                "author"
+            )
+
+            url = result.get(
+                "url"
+            )
+
+            key = (
+                "turath",
+                book_id,
+                page,
+                kitab
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(
+                key
+            )
+
+            line = f"• {kitab}"
+
+            if author:
+                line += (
+                    f" — {author}"
+                )
+
+            if page:
+                line += (
+                    f", halaman {page}"
+                )
+
+            if url:
+                line += (
+                    f"\n  {url}"
+                )
+
+            lines.append(
+                line
             )
 
         else:
 
-            source_label = (
-                "KITAB TEMPATAN"
+            kitab = result.get(
+                "kitab_name"
+            ) or "Kitab Tempatan"
+
+            page = result.get(
+                "page"
             )
 
-        context_parts.append(
-            f"""
-SUMBER {i}
-Jenis sumber: {source_label}
-Kitab: {kitab}
-Penulis: {author or "Tidak dinyatakan"}
-Kategori: {category or "Tidak dinyatakan"}
-Halaman: {page or "Tidak dinyatakan"}
+            category = result.get(
+                "category"
+            )
 
-Kandungan:
-{content}
-"""
-        )
+            key = (
+                "local",
+                kitab,
+                page
+            )
 
-    context = (
-        "\n\n".join(
-            context_parts
-        )
+            if key in seen:
+                continue
+
+            seen.add(
+                key
+            )
+
+            line = f"• {kitab}"
+
+            if category:
+                line += (
+                    f" [{category}]"
+                )
+
+            if page:
+                line += (
+                    f", halaman {page}"
+                )
+
+            lines.append(
+                line
+            )
+
+    return "\n".join(
+        lines
     )
 
+
+# =========================================================
+# GEMINI ANSWER
+# =========================================================
+
+def generate_answer(
+    question,
+    results
+):
+    if not llm:
+        return (
+            "❌ Gemini belum dikonfigurasi."
+        )
+
+    context = build_context(
+        results
+    )
+
+    if not context:
+        return (
+            "❌ Tiada kandungan rujukan "
+            "yang boleh digunakan."
+        )
+
     prompt = f"""
-Anda ialah TanyaFiqhBot,
-pembantu rujukan ilmu Islam.
+Anda ialah TanyaFiqhBot, pembantu rujukan
+ilmu Islam dalam Bahasa Melayu.
 
-Tugas anda ialah menjawab
-soalan pengguna berdasarkan
-SUMBER yang diberikan sahaja.
-
-Jawab dalam Bahasa Melayu
-yang jelas, sopan dan mudah
-difahami.
-
-PRINSIP WAJIB:
-
-1. Gunakan kandungan sumber
-   yang diberikan sebagai asas
-   jawapan.
-
-2. Jangan mereka-reka dalil,
-   hadis, hukum, nama kitab,
-   nombor halaman atau fakta
-   yang tiada dalam sumber.
-
-3. Jika sumber tidak mencukupi
-   untuk menentukan jawapan,
-   nyatakan dengan jelas:
-   "Rujukan yang ditemui belum
-   mencukupi untuk memberikan
-   jawapan yang pasti."
-
-4. Jika sumber mengandungi
-   pandangan ulama yang berbeza,
-   jelaskan perbezaan tersebut
-   secara ringkas.
-
-5. Jangan mengatakan semua
-   ulama bersetuju jika sumber
-   tidak menyatakan demikian.
-
-6. Jangan membuat fatwa baharu
-   berdasarkan andaian sendiri.
-
-7. Jangan gunakan pengetahuan
-   luar sebagai fakta utama
-   jika perkara tersebut tiada
-   dalam sumber.
-
-8. Jika terdapat petikan Arab
-   yang penting, boleh sertakan
-   petikan pendek dan kemudian
-   berikan maksudnya.
-
-9. Jika pengguna bertanya soalan
-   yang tidak berkaitan dengan
-   kandungan sumber, nyatakan
-   bahawa sumber yang tersedia
-   tidak mencukupi.
-
-10. Jangan sebut "database",
-    "vector", "embedding",
-    "RAG", "API" atau istilah
-    teknikal sistem kepada pengguna.
-
-FORMAT JAWAPAN:
-
-Berikan jawapan dahulu.
-
-Jika sesuai, gunakan:
-
-📌 Ringkasan:
-...
-
-Kemudian:
-
-📚 Rujukan:
-- Nama kitab, halaman
-
-Jika sumber Turath digunakan,
-nyatakan ia sebagai:
-
-🌐 Turath:
-- Nama kitab, halaman
-
-SOALAN PENGGUNA:
-
+Soalan pengguna:
 {question}
 
-SUMBER RUJUKAN:
+Berikut ialah sumber yang ditemui daripada
+kitab tempatan dan/atau Turath.
 
 {context}
+
+ARAHAN PENTING:
+
+1. Jawab dalam Bahasa Melayu yang jelas.
+2. Jawapan mesti berdasarkan teks sumber yang
+   diberikan di atas.
+3. Jangan reka nama kitab, pengarang, halaman
+   atau fakta yang tiada dalam sumber.
+4. Jika sumber tidak mencukupi untuk menentukan
+   jawapan, nyatakan bahawa maklumat sumber
+   tidak mencukupi.
+5. Bezakan antara pendapat ulama jika teks sumber
+   menunjukkan lebih daripada satu pendapat.
+6. Jangan mendakwa sesuatu sebagai ijmak jika
+   sumber tidak menyatakan demikian.
+7. Jangan gunakan pengetahuan luar untuk
+   menggantikan sumber yang diberikan.
+8. Jangan buat bahagian "Rujukan" sendiri.
+   Sistem akan menambah rujukan secara automatik.
+9. Jika sumber Turath digunakan, utamakan teks
+   Turath yang diberikan sebagai sumber primer.
+10. Jika soalan meminta hukum, terangkan hukum
+    berdasarkan teks dan nyatakan ringkas dalil
+    atau alasan jika memang terdapat dalam sumber.
+
+Format jawapan:
+
+Jawapan:
+...
+
+Penjelasan:
+...
+
+Jika sumber tidak mencukupi, beritahu dengan
+jelas bahawa rujukan yang ditemui belum mencukupi.
 """
 
     try:
-
         response = llm.invoke(
             [
                 HumanMessage(
@@ -3755,214 +2651,330 @@ SUMBER RUJUKAN:
             ]
         )
 
-        answer = response.content
-
-        if isinstance(
-            answer,
-            list
+        if hasattr(
+            response,
+            "content"
         ):
+            answer = response.content
+        else:
+            answer = str(response)
 
-            answer = "\n".join(
-                str(x)
-                for x in answer
-            )
-
-        return str(
+        return clean_text(
             answer
-        ).strip()
+        )
 
     except Exception as e:
-
         print(
-            "❌ LLM error:",
-            e
+            f"❌ LLM error: {e}"
         )
 
         return (
-            "Maaf, berlaku masalah "
-            "semasa menghasilkan jawapan."
+            "❌ Berlaku masalah ketika "
+            "menjana jawapan."
         )
 
 
-# ============================================================
-# TELEGRAM CATEGORY
-# ============================================================
+# =========================================================
+# TELEGRAM MESSAGE SPLITTER
+# =========================================================
 
-COMMAND_CATEGORIES = {
+async def send_long_message(
+    update,
+    text,
+    max_length=3800
+):
+    if not text:
+        return
 
-    "fiqh":
-        "FIQH",
+    text = str(text)
 
-    "tauhid":
-        "TAUHID",
+    while len(text) > max_length:
 
-    "hadis":
-        "HADIS",
+        split_at = text.rfind(
+            "\n",
+            0,
+            max_length
+        )
 
-    "tafsir":
-        "TAFSIR",
+        if split_at < 1000:
+            split_at = max_length
 
-    "sirah":
-        "SIRAH",
+        part = text[
+            :split_at
+        ]
 
-    "akhlak":
-        "AKHLAK",
+        await update.message.reply_text(
+            part
+        )
 
-    "usulfiqh":
-        "USUL FIQH",
+        text = text[
+            split_at:
+        ].lstrip()
 
-    "semua":
-        None
-}
+    if text:
+        await update.message.reply_text(
+            text
+        )
 
 
-# ============================================================
-# TELEGRAM /START
-# ============================================================
+# =========================================================
+# ANSWER QUESTION
+# =========================================================
+
+async def answer_question(
+    update,
+    question,
+    category=None
+):
+    question = clean_text(
+        question
+    )
+
+    if not question:
+        return
+
+    category = normalize_category(
+        category
+    )
+
+    print()
+    print("=" * 60)
+    print(
+        "❓ QUESTION:"
+        f" {question}"
+    )
+
+    if category:
+        print(
+            f"📂 CATEGORY: {category}"
+        )
+
+    try:
+        await update.message.reply_text(
+            "🔎 Sedang mencari rujukan "
+            "kitab tempatan + Turath..."
+        )
+    except Exception:
+        pass
+
+    # =====================================================
+    # SEARCH LOCAL
+    # =====================================================
+
+    local_results = search_supabase(
+        question,
+        category=category,
+        match_count=SEARCH_K
+    )
+
+    # =====================================================
+    # SEARCH TURATH
+    # =====================================================
+
+    turath_results = []
+
+    try:
+        turath_results = search_turath_passages(
+            question,
+            limit=TURATH_SEARCH_K
+        )
+
+    except Exception as e:
+        print(
+            f"❌ Turath search exception: {e}"
+        )
+
+    # =====================================================
+    # COMBINE
+    # =====================================================
+
+    results = (
+        local_results
+        + turath_results
+    )
+
+    print()
+    print(
+        f"📚 LOCAL: "
+        f"{len(local_results)}"
+    )
+
+    print(
+        f"📖 TURATH: "
+        f"{len(turath_results)}"
+    )
+
+    print(
+        f"📦 TOTAL: "
+        f"{len(results)}"
+    )
+
+    if not results:
+
+        await send_long_message(
+            update,
+            "❌ Maaf, saya tidak menemui "
+            "rujukan yang sesuai dalam "
+            "kitab tempatan atau Turath."
+        )
+
+        return
+
+    # =====================================================
+    # GENERATE ANSWER
+    # =====================================================
+
+    answer = generate_answer(
+        question,
+        results
+    )
+
+    # =====================================================
+    # SOURCES
+    # =====================================================
+
+    sources = format_sources(
+        results
+    )
+
+    if sources:
+        answer += (
+            "\n\n📚 Rujukan:\n"
+            + sources
+        )
+
+    # =====================================================
+    # SOURCE STATUS
+    # =====================================================
+
+    source_count = []
+
+    if local_results:
+        source_count.append(
+            f"Kitab tempatan: "
+            f"{len(local_results)}"
+        )
+
+    if turath_results:
+        source_count.append(
+            f"Turath: "
+            f"{len(turath_results)}"
+        )
+
+    if source_count:
+        answer += (
+            "\n\n🔎 Sumber ditemui: "
+            + " | ".join(
+                source_count
+            )
+        )
+
+    await send_long_message(
+        update,
+        answer
+    )
+
+
+# =========================================================
+# TELEGRAM COMMANDS
+# =========================================================
 
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
     text = """
-📚 *TanyaFiqhBot*
+🤖 TanyaFiqhBot
 
-Assalamualaikum.
+Pembantu rujukan ilmu Islam
+berdasarkan kitab.
 
-Saya boleh membantu mencari
-jawapan berdasarkan kitab Islam
-yang tersedia dalam sistem.
+📚 Sumber:
+• Kitab tempatan
+• Turath
 
-📖 Kategori:
-
-/fiqh
-/tauhid
-/hadis
-/tafsir
-/sirah
-/akhlak
-/usulfiqh
-/semua
+Kategori:
+• FIQH
+• TAUHID
+• HADIS
+• TAFSIR
+• SIRAH
+• AKHLAK
+• USUL FIQH
 
 Contoh:
 
-/fiqh apakah hukum solat berjemaah?
+/fiqh Apakah hukum qunut Subuh?
+
+/hadis Apakah hadis tentang niat?
+
+/tafsir Apakah maksud ayat Kursi?
 
 Atau terus taip soalan anda.
-
-🔎 TanyaFiqhBot akan mencari
-rujukan daripada kitab tempatan
-dan Turath.
 """
 
     await update.message.reply_text(
-        text,
-        parse_mode="Markdown"
+        text
     )
 
 
-# ============================================================
-# TELEGRAM /STATUS
-# ============================================================
-
-async def telegram_status(
+async def status_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    turath_status = (
+        "ON"
+        if TURATH_ENABLED
+        else "OFF"
+    )
 
-    try:
+    supabase_status = (
+        "ON"
+        if supabase
+        else "OFF"
+    )
 
-        status = SYNC_STATUS
+    gemini_status = (
+        "ON"
+        if llm
+        else "OFF"
+    )
 
-        if status["running"]:
+    text = f"""
+🤖 TanyaFiqhBot Status
 
-            text = (
-                "🔄 *Sedang proses kitab*\n\n"
-                f"📚 {status['current_book']}\n"
-                f"📖 "
-                f"{status['current_page']}/"
-                f"{status['total_pages']}\n"
-                f"📦 Chunks: "
-                f"{status['total_chunks']}\n"
-                f"⚙️ {status['message']}"
-            )
+Gemini: {gemini_status}
+Supabase: {supabase_status}
+Turath: {turath_status}
 
-        else:
+LLM:
+{LLM_MODEL}
 
-            text = (
-                "✅ *Status TanyaFiqhBot*\n\n"
+Embedding:
+{EMBEDDING_MODEL}
 
-                f"💾 Supabase: "
-                f"{'CONNECTED' if supabase else 'OFF'}\n"
+Turath service:
+{TURATH_SERVICE_URL}
+"""
 
-                f"🧠 Gemini: "
-                f"{'CONNECTED' if embeddings else 'OFF'}\n"
+    await update.message.reply_text(
+        text
+    )
 
-                f"🤖 Model: "
-                f"{LLM_MODEL}\n"
-
-                f"🌐 Turath: "
-                f"{TURATH_SERVICE_URL}\n"
-
-                f"📌 Status: "
-                f"{status['message']}"
-            )
-
-        await update.message.reply_text(
-            text,
-            parse_mode="Markdown"
-        )
-
-    except Exception as e:
-
-        await update.message.reply_text(
-            f"❌ Gagal mendapatkan status.\n\n{e}"
-        )
-
-
-# ============================================================
-# TELEGRAM CATEGORY HANDLERS
-# ============================================================
 
 async def category_command(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
+    category
 ):
-
-    command = (
-        update.message.text
-        .split()[0]
-        .replace(
-            "/",
-            ""
+    if context.args:
+        question = " ".join(
+            context.args
         )
-        .lower()
-    )
-
-    category = (
-        COMMAND_CATEGORIES.get(
-            command
-        )
-    )
-
-    question = (
-        update.message.text
-        .replace(
-            update.message.text.split()[0],
-            "",
-            1
-        )
-        .strip()
-    )
-
-    if not question:
-
+    else:
         await update.message.reply_text(
-            f"Taip soalan selepas "
-            f"/{command}.\n\n"
-            f"Contoh:\n"
-            f"/{command} apakah hukum..."
+            f"Taip soalan selepas /"
+            f"{category.lower().replace(' ', '')}."
         )
 
         return
@@ -3974,365 +2986,496 @@ async def category_command(
     )
 
 
-# ============================================================
-# TELEGRAM NORMAL MESSAGE
-# ============================================================
+async def fiqh_command(
+    update,
+    context
+):
+    await category_command(
+        update,
+        context,
+        "FIQH"
+    )
 
-async def normal_message(
+
+async def tauhid_command(
+    update,
+    context
+):
+    await category_command(
+        update,
+        context,
+        "TAUHID"
+    )
+
+
+async def hadis_command(
+    update,
+    context
+):
+    await category_command(
+        update,
+        context,
+        "HADIS"
+    )
+
+
+async def tafsir_command(
+    update,
+    context
+):
+    await category_command(
+        update,
+        context,
+        "TAFSIR"
+    )
+
+
+async def sirah_command(
+    update,
+    context
+):
+    await category_command(
+        update,
+        context,
+        "SIRAH"
+    )
+
+
+async def akhlak_command(
+    update,
+    context
+):
+    await category_command(
+        update,
+        context,
+        "AKHLAK"
+    )
+
+
+async def usul_command(
+    update,
+    context
+):
+    await category_command(
+        update,
+        context,
+        "USUL FIQH"
+    )
+
+
+async def message_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not update.message:
+        return
 
     question = (
-        update.message.text or ""
+        update.message.text
+        or ""
     ).strip()
 
     if not question:
         return
 
+    category = detect_category_from_text(
+        question
+    )
+
+    # Buang command kategori daripada soalan
+    question = re.sub(
+        r"^/(fiqh|tauhid|akidah|hadis|hadith|tafsir|sirah|akhlak|usul)\b",
+        "",
+        question,
+        flags=re.I
+    ).strip()
+
     await answer_question(
         update,
         question,
-        None
+        category
     )
 
 
-# ============================================================
-# ANSWER QUESTION
-# ============================================================
+# =========================================================
+# FLASK ROUTES
+# =========================================================
 
-async def answer_question(
-    update,
-    question,
-    category
+@app.route("/")
+def home():
+    return jsonify(
+        {
+            "ok": True,
+            "service": "TanyaFiqhBot",
+            "turath": TURATH_ENABLED,
+            "llm_model": LLM_MODEL,
+        }
+    )
+
+
+@app.route("/health")
+def health():
+    return jsonify(
+        {
+            "ok": True,
+            "service": "TanyaFiqhBot",
+            "turath_enabled": TURATH_ENABLED,
+        }
+    )
+
+
+@app.route("/status")
+def status():
+    return jsonify(
+        {
+            "ok": True,
+            "gemini": bool(llm),
+            "embeddings": bool(
+                embeddings
+            ),
+            "supabase": bool(
+                supabase
+            ),
+            "turath": TURATH_ENABLED,
+            "turath_service": TURATH_SERVICE_URL,
+        }
+    )
+
+
+@app.route("/books")
+def books_route():
+    books = discover_books()
+
+    output = []
+
+    for book in books:
+        output.append(
+            {
+                "file": os.path.basename(
+                    book["path"]
+                ),
+                "category": book[
+                    "category"
+                ],
+                "path": book[
+                    "path"
+                ],
+            }
+        )
+
+    return jsonify(
+        {
+            "ok": True,
+            "count": len(output),
+            "books": output,
+        }
+    )
+
+
+@app.route("/turath")
+def turath_route():
+    query = request.args.get(
+        "q",
+        ""
+    ).strip()
+
+    if not query:
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "Parameter q diperlukan"
+                ),
+            }
+        ), 400
+
+    result = turath_search(
+        query
+    )
+
+    passages = extract_turath_passages(
+        result,
+        limit=TURATH_SEARCH_K
+    )
+
+    candidates = extract_turath_candidates(
+        result,
+        limit=TURATH_SEARCH_K
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "query": query,
+            "passages": passages,
+            "candidates": candidates,
+            "raw": result,
+        }
+    )
+
+
+@app.route(
+    "/turath/book/<book_id>"
+)
+def turath_book_route(
+    book_id
 ):
+    book_id_int = ensure_int(
+        book_id
+    )
 
-    try:
+    if not book_id_int:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Book ID tidak sah",
+            }
+        ), 400
 
-        await update.message.reply_text(
-            "🔎 Sedang mencari rujukan kitab..."
-        )
+    result = turath_get_book(
+        book_id_int
+    )
 
-        # ----------------------------------------------------
-        # 1. CARI KITAB TEMPATAN
-        # ----------------------------------------------------
-
-        local_results = search_supabase(
-            question,
-            category=category,
-            match_count=SEARCH_K
-        )
-
-        print(
-            f"📚 Local results: "
-            f"{len(local_results)}"
-        )
-
-        # ----------------------------------------------------
-        # 2. CARI TURATH
-        # ----------------------------------------------------
-
-        turath_results = (
-            search_turath_for_rag(
-                question
-            )
-        )
-
-        print(
-            f"🌐 Turath results: "
-            f"{len(turath_results)}"
-        )
-
-        # ----------------------------------------------------
-        # 3. GABUNGKAN
-        # ----------------------------------------------------
-
-        results = (
-            prepare_all_results(
-                local_results,
-                turath_results
-            )
-        )
-
-        # ----------------------------------------------------
-        # 4. TIADA HASIL
-        # ----------------------------------------------------
-
-        if not results:
-
-            await update.message.reply_text(
-                "❌ Maaf, saya tidak menemui "
-                "rujukan yang mencukupi "
-                "dalam kitab tempatan atau Turath."
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # 5. GENERATE ANSWER
-        # ----------------------------------------------------
-
-        answer = generate_answer(
-            question,
-            results
-        )
-
-        # ----------------------------------------------------
-        # 6. SUMBER
-        # ----------------------------------------------------
-
-        sources = format_sources(
-            results
-        )
-
-        # Elakkan sumber terlalu panjang
-        sources = sources[:10]
-
-        if sources:
-
-            answer += (
-                "\n\n"
-                "━━━━━━━━━━━━━━\n"
-                "🔎 Sumber ditemui:\n"
-            )
-
-            for source in sources:
-
-                answer += (
-                    f"\n{source}"
-                )
-
-        # ----------------------------------------------------
-        # 7. TELEGRAM LIMIT
-        # ----------------------------------------------------
-
-        if len(answer) > 3900:
-
-            answer = (
-                answer[:3900]
-                + "\n\n..."
-            )
-
-        await update.message.reply_text(
-            answer
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ Answer error:",
-            e
-        )
-
-        await update.message.reply_text(
-            "❌ Maaf, berlaku masalah "
-            "semasa memproses soalan."
-        )
+    return jsonify(
+        {
+            "ok": True,
+            "book_id": book_id_int,
+            "result": result,
+        }
+    )
 
 
-# ============================================================
-# TELEGRAM BOT
-# ============================================================
+@app.route(
+    "/turath/page/<book_id>/<page>"
+)
+def turath_page_route(
+    book_id,
+    page
+):
+    book_id_int = ensure_int(
+        book_id
+    )
 
-def telegram_thread():
+    page_int = ensure_int(
+        page
+    )
+
+    if not book_id_int or page_int is None:
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "Book ID atau page "
+                    "tidak sah"
+                ),
+            }
+        ), 400
+
+    result = turath_get_page(
+        book_id_int,
+        page_int
+    )
+
+    text = extract_page_text(
+        result
+    )
+
+    metadata = extract_page_metadata(
+        result
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "book_id": book_id_int,
+            "page": page_int,
+            "text": text,
+            "metadata": metadata,
+            "raw": result,
+        }
+    )
+
+
+# =========================================================
+# TELEGRAM STARTUP
+# =========================================================
+
+telegram_application = None
+
+
+def telegram_worker():
+    global telegram_application
 
     if not TELEGRAM_TOKEN:
-
         print(
-            "⚠️ TELEGRAM_TOKEN tidak ditetapkan"
+            "⚠️ TELEGRAM_TOKEN belum diset."
         )
 
         return
 
-    print(
-        "🤖 Starting Telegram Bot..."
-    )
-
-    application = (
-        Application
-        .builder()
-        .token(
-            TELEGRAM_TOKEN
+    try:
+        telegram_application = (
+            Application.builder()
+            .token(TELEGRAM_TOKEN)
+            .build()
         )
-        .build()
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start_command
+        telegram_application.add_handler(
+            CommandHandler(
+                "start",
+                start_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "status",
-            telegram_status
+        telegram_application.add_handler(
+            CommandHandler(
+                "status",
+                status_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "fiqh",
-            category_command
+        telegram_application.add_handler(
+            CommandHandler(
+                "fiqh",
+                fiqh_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "tauhid",
-            category_command
+        telegram_application.add_handler(
+            CommandHandler(
+                "tauhid",
+                tauhid_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "hadis",
-            category_command
+        telegram_application.add_handler(
+            CommandHandler(
+                "hadis",
+                hadis_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "tafsir",
-            category_command
+        telegram_application.add_handler(
+            CommandHandler(
+                "tafsir",
+                tafsir_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "sirah",
-            category_command
+        telegram_application.add_handler(
+            CommandHandler(
+                "sirah",
+                sirah_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "akhlak",
-            category_command
+        telegram_application.add_handler(
+            CommandHandler(
+                "akhlak",
+                akhlak_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "usulfiqh",
-            category_command
+        telegram_application.add_handler(
+            CommandHandler(
+                "usul",
+                usul_command
+            )
         )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "semua",
-            category_command
+        telegram_application.add_handler(
+            MessageHandler(
+                filters.TEXT
+                & ~filters.COMMAND,
+                message_handler
+            )
         )
-    )
 
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            normal_message
+        print(
+            "✅ Telegram polling started"
         )
-    )
 
-    print(
-        "✅ Telegram polling started"
-    )
+        # Penting:
+        # stop_signals=None kerana polling
+        # berjalan dalam background thread.
+        telegram_application.run_polling(
+            stop_signals=None
+        )
 
-    application.run_polling(
-        stop_signals=None
-    )
+    except Exception as e:
+        print(
+            f"❌ Telegram worker error: {e}"
+        )
 
 
-# ============================================================
-# STARTUP SYNC
-# ============================================================
+# =========================================================
+# STARTUP
+# =========================================================
 
-def startup_sync():
-
+def startup():
     print()
     print("=" * 60)
-    print("TanyaFiqhBot")
+    print(
+        "🚀 START TanyaFiqhBot"
+    )
     print("=" * 60)
 
     print(
-        f"Kitab directory: {KITAB_DIR}"
+        f"🤖 LLM: {LLM_MODEL}"
     )
 
     print(
-        f"Kitab folder exists: "
-        f"{os.path.isdir(KITAB_DIR)}"
+        f"🧠 Embedding: "
+        f"{EMBEDDING_MODEL}"
     )
 
     print(
-        "Supabase:",
-        "CONNECTED"
-        if supabase
-        else "DISCONNECTED"
+        f"🌐 Turath: "
+        f"{TURATH_ENABLED}"
     )
 
     print(
-        "Gemini:",
-        "CONNECTED"
-        if embeddings
-        else "DISCONNECTED"
+        f"🔗 Turath service: "
+        f"{TURATH_SERVICE_URL}"
     )
 
     print(
-        "LLM:",
-        LLM_MODEL
+        f"💾 DATA_DIR: "
+        f"{DATA_DIR}"
     )
 
-    print(
-        "Turath:",
-        TURATH_SERVICE_URL
+    # Sync kitab tempatan
+    try:
+        sync_books()
+
+    except Exception as e:
+        print(
+            f"❌ Sync error: {e}"
+        )
+
+    # Telegram
+    thread = threading.Thread(
+        target=telegram_worker,
+        daemon=True
     )
 
-    print("=" * 60)
-
-    sync_books()
+    thread.start()
 
 
-# ============================================================
-# START BACKGROUND SERVICES
-# ============================================================
+# =========================================================
+# RUN
+# =========================================================
 
-def start_background_services():
+startup()
 
-    sync_thread = threading.Thread(
-        target=startup_sync,
-        daemon=True,
-        name="KitabSync"
-    )
-
-    sync_thread.start()
-
-    telegram = threading.Thread(
-        target=telegram_thread,
-        daemon=True,
-        name="TelegramBot"
-    )
-
-    telegram.start()
-
-
-start_background_services()
-
-
-# ============================================================
-# LOCAL RUN
-# ============================================================
 
 if __name__ == "__main__":
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
-
     app.run(
         host="0.0.0.0",
-        port=port
+        port=int(
+            os.getenv(
+                "PORT",
+                "10000"
+            )
+        )
     )
