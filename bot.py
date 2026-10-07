@@ -9,9 +9,9 @@ from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
 # --- 1. SETUP RAG (BACA SEMUA KITAB DALAM FOLDER) ---
 FOLDER_PATH = "kitab"
@@ -36,16 +36,24 @@ system_prompt = (
     "Jawab soalan pengguna HANYA berdasarkan konteks kitab-kitab yang diberikan di bawah.\n"
     "Jika jawapan tiada dalam konteks, beritahu secara berhemah bahawa rujukan tiada dalam kitab.\n"
     "Gunakan bahasa Melayu yang sopan, jelas, dan sertakan rujukan nama kitab jika berkaitan.\n\n"
-    "Konteks:\n{context}"
+    "Konteks:\n{context}\n\n"
+    "Soalan: {question}"
 )
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    ("human", "{input}"),
-])
+prompt = ChatPromptTemplate.from_template(system_prompt)
 
-question_answer_chain = create_stuff_documents_chain(llm, prompt)
-rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+# Format dokumen supaya bersambung kemas menjadi konteks teks
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+# Binaan RAG manual yang lebih stabil (tanpa langchain.chains)
+rag_chain = (
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+
 print("Semua kitab dan prompt berjaya dimuat naik ke dalam sistem AI!")
 
 # --- 3. SETUP WEB SERVER KECIL UNTUK RENDER (SUPAYA BOT HIDUP 24 JAM) ---
@@ -68,8 +76,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Soalan diterima: {user_query}")
     
     try:
-        response = rag_chain.invoke({"input": user_query})
-        answer = response["answer"]
+        # Jalankan RAG chain manual kita
+        answer = rag_chain.invoke(user_query)
     except Exception as e:
         answer = "Maaf, berlaku ralat semasa memproses soalan anda."
         print(f"Ralat: {e}")
