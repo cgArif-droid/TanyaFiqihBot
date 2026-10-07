@@ -21,9 +21,15 @@ loader = PyPDFDirectoryLoader(FOLDER_PATH)
 docs = loader.load()
 print(f"Jumlah mukasurat/dokumen dikesan: {len(docs)}")
 
+# Pecahkan teks kepada bahagian kecil
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 splits = text_splitter.split_documents(docs)
 
+# PENAPIS PENTING: Buang muka surat kosong atau teks yang tiada isi supaya sistem tidak 'crash'
+splits = [doc for doc in splits if doc.page_content.strip()]
+print(f"Jumlah pecahan teks selepas ditapis: {len(splits)}")
+
+# Masukkan ke dalam pangkalan data (Chroma)
 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
@@ -42,11 +48,11 @@ system_prompt = (
 
 prompt = ChatPromptTemplate.from_template(system_prompt)
 
-# Format dokumen supaya bersambung kemas menjadi konteks teks
-def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
+# Format dokumen supaya bersambung kemas menjadi teks
+def format_docs(docs_list):
+    return "\n\n".join(doc.page_content for doc in docs_list)
 
-# Binaan RAG manual yang lebih stabil (tanpa langchain.chains)
+# Binaan RAG (LangChain) yang stabil
 rag_chain = (
     {"context": retriever | format_docs, "question": RunnablePassthrough()}
     | prompt
@@ -76,10 +82,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Soalan diterima: {user_query}")
     
     try:
-        # Jalankan RAG chain manual kita
+        # Cari jawapan menggunakan sistem RAG
         answer = rag_chain.invoke(user_query)
     except Exception as e:
-        answer = "Maaf, berlaku ralat semasa memproses soalan anda."
+        answer = "Maaf, berlaku ralat semasa memproses soalan anda. Sila cuba lagi sebentar lagi."
         print(f"Ralat: {e}")
     
     await update.message.reply_text(answer)
@@ -97,5 +103,8 @@ async def main():
     await application.run_polling()
 
 if __name__ == '__main__':
+    # Jalankan web server Flask di latar belakang
     keep_alive()
+    
+    # Jalankan bot Telegram
     asyncio.run(main())
