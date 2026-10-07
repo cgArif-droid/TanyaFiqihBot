@@ -1,1784 +1,1274 @@
 import http from "node:http";
 import { search, getBookInfo, getPage } from "turath-sdk";
 
-const PORT = Number(process.env.TURATH_PORT || 8765);
-
-const MAX_TURATH_RESULTS = 10;
-const SEARCH_PAGES = 3;
-const RESULTS_PER_QUERY = 20;
+const PORT = 8765;
+const HOST = "127.0.0.1";
 
 /*
-============================================================
-CATEGORY ID
-============================================================
-
-PENTING:
-
-Isi ID kategori Turath sebenar melalui Render Environment.
-
-Contoh:
-
-TURATH_SHAFII_CATEGORY_ID=...
-TURATH_HANAFI_CATEGORY_ID=...
-TURATH_MALIKI_CATEGORY_ID=...
-TURATH_HANBALI_CATEGORY_ID=...
-
-JANGAN teka nombor ID.
-
-SDK rasmi Turath memang menerima category sebagai nombor.
+|--------------------------------------------------------------------------
+| CONFIG
+|--------------------------------------------------------------------------
 */
 
-const CATEGORY_IDS = {
-  shafii: toNumber(process.env.TURATH_SHAFII_CATEGORY_ID),
-  hanafi: toNumber(process.env.TURATH_HANAFI_CATEGORY_ID),
-  maliki: toNumber(process.env.TURATH_MALIKI_CATEGORY_ID),
-  hanbali: toNumber(process.env.TURATH_HANBALI_CATEGORY_ID)
+const SEARCH_PAGES = 10;
+const RESULTS_PER_PAGE = 20;
+
+/*
+ * Soalan biasa:
+ *   Syafie = 10
+ *
+ * Perbandingan:
+ *   Syafie = 10
+ *   Hanafi = 2
+ *   Maliki = 2
+ *   Hanbali = 2
+ */
+
+const NORMAL_LIMITS = {
+    shafii: 10
+};
+
+const COMPARISON_LIMITS = {
+    shafii: 10,
+    hanafi: 2,
+    maliki: 2,
+    hanbali: 2
 };
 
 
-/* ============================================================
-   HTTP
-============================================================ */
-
-function sendJson(res, data, status = 200) {
-
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*"
-  });
-
-  res.end(
-    JSON.stringify(data)
-  );
-}
-
-
-/* ============================================================
-   HELPERS
-============================================================ */
+/*
+|--------------------------------------------------------------------------
+| CATEGORY ID
+|--------------------------------------------------------------------------
+*/
 
 function toNumber(value) {
-
-  const n = Number(value);
-
-  return Number.isFinite(n)
-    ? n
-    : null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
 }
 
+const CATEGORY_IDS = {
+    hanafi: toNumber(process.env.TURATH_HANAFI_CATEGORY_ID),
+    maliki: toNumber(process.env.TURATH_MALIKI_CATEGORY_ID),
+    shafii: toNumber(process.env.TURATH_SHAFII_CATEGORY_ID),
+    hanbali: toNumber(process.env.TURATH_HANBALI_CATEGORY_ID)
+};
 
-function cleanText(value) {
-
-  if (typeof value !== "string") {
-    return "";
-  }
-
-  return value
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-
-function normalizeArabic(text) {
-
-  return String(text || "")
-    .normalize("NFKC")
-    .replace(
-      /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]/g,
-      ""
-    )
-    .replace(/[إأآٱ]/g, "ا")
-    .replace(/ى/g, "ي")
-    .replace(/ة/g, "ه")
-    .replace(/ؤ/g, "و")
-    .replace(/ئ/g, "ي")
-    .replace(/ـ/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
+const CATEGORY_NAMES = {
+    hanafi: "الفقه الحنفي",
+    maliki: "الفقه المالكي",
+    shafii: "الفقه الشافعي",
+    hanbali: "الفقه الحنبلي"
+};
 
 
-/* ============================================================
-   CATEGORY NAME
-============================================================ */
-
-function categoryName(mode) {
-
-  if (mode === "comparison") {
-    return "الفقه الشافعي + الحنفي + المالكي + الحنبلي";
-  }
-
-  return "الفقه الشافعي";
-}
-
-
-/* ============================================================
-   QUERY MAP BM → ARABIC
-============================================================ */
+/*
+|--------------------------------------------------------------------------
+| QUERY MAP
+|--------------------------------------------------------------------------
+*/
 
 const QUERY_MAP = {
 
-  "mandi":
-    [
-      "الغسل",
-      "الاغتسال",
-      "غسل الجنابة",
-      "الجنابة"
+    wuduk: [
+        "الوضوء",
+        "أحكام الوضوء",
+        "فرائض الوضوء",
+        "نواقض الوضوء"
     ],
 
-  "mandi wajib":
-    [
-      "الغسل الواجب",
-      "غسل الجنابة",
-      "الجنابة",
-      "الاغتسال"
+    "air sembahyang": [
+        "الوضوء",
+        "أحكام الوضوء",
+        "نواقض الوضوء"
     ],
 
-  "mandi junub":
-    [
-      "غسل الجنابة",
-      "الجنابة",
-      "الغسل"
+    solat: [
+        "الصلاة",
+        "أحكام الصلاة",
+        "شروط الصلاة",
+        "أركان الصلاة"
     ],
 
-  "wuduk":
-    [
-      "الوضوء",
-      "نواقض الوضوء",
-      "الطهارة"
+    sembahyang: [
+        "الصلاة",
+        "أحكام الصلاة",
+        "شروط الصلاة",
+        "أركان الصلاة"
     ],
 
-  "wudhu":
-    [
-      "الوضوء",
-      "نواقض الوضوء",
-      "الطهارة"
+    puasa: [
+        "الصيام",
+        "أحكام الصيام",
+        "شروط الصيام",
+        "مفسدات الصيام"
     ],
 
-  "solat":
-    [
-      "الصلاة",
-      "أحكام الصلاة",
-      "صفة الصلاة"
+    zakat: [
+        "الزكاة",
+        "أحكام الزكاة",
+        "نصاب الزكاة",
+        "مصارف الزكاة"
     ],
 
-  "sembahyang":
-    [
-      "الصلاة",
-      "أحكام الصلاة"
+    haji: [
+        "الحج",
+        "أحكام الحج",
+        "مناسك الحج"
     ],
 
-  "puasa":
-    [
-      "الصيام",
-      "الصوم",
-      "أحكام الصيام"
+    umrah: [
+        "العمرة",
+        "أحكام العمرة",
+        "مناسك العمرة"
     ],
 
-  "zakat":
-    [
-      "الزكاة",
-      "أحكام الزكاة"
+    tayammum: [
+        "التيمم",
+        "أحكام التيمم",
+        "شروط التيمم"
     ],
 
-  "haji":
-    [
-      "الحج",
-      "أحكام الحج"
+    najis: [
+        "النجاسة",
+        "أحكام النجاسة",
+        "إزالة النجاسة"
     ],
 
-  "umrah":
-    [
-      "العمرة",
-      "أحكام العمرة"
+    bersuci: [
+        "الطهارة",
+        "أحكام الطهارة"
     ],
 
-  "najis":
-    [
-      "النجاسة",
-      "النجس",
-      "أحكام النجاسة"
+    taharah: [
+        "الطهارة",
+        "أحكام الطهارة"
     ],
 
-  "hadas":
-    [
-      "الحدث",
-      "الطهارة",
-      "الحدث الأكبر",
-      "الحدث الأصغر"
+    nikah: [
+        "النكاح",
+        "أحكام النكاح",
+        "الزواج"
     ],
 
-  "aurat":
-    [
-      "العورة",
-      "ستر العورة",
-      "أحكام العورة"
+    kahwin: [
+        "النكاح",
+        "أحكام النكاح",
+        "الزواج"
     ],
 
-  "nikah":
-    [
-      "النكاح",
-      "الزواج",
-      "أحكام النكاح"
+    talak: [
+        "الطلاق",
+        "أحكام الطلاق"
     ],
 
-  "kahwin":
-    [
-      "النكاح",
-      "الزواج",
-      "أحكام النكاح"
+    cerai: [
+        "الطلاق",
+        "أحكام الطلاق"
     ],
 
-  "cerai":
-    [
-      "الطلاق",
-      "أحكام الطلاق"
+    faraid: [
+        "الفرائض",
+        "الميراث",
+        "أحكام المواريث"
     ],
 
-  "talak":
-    [
-      "الطلاق",
-      "أحكام الطلاق"
+    pusaka: [
+        "الميراث",
+        "أحكام المواريث"
     ],
 
-  "haid":
-    [
-      "الحيض",
-      "أحكام الحيض"
+    jual: [
+        "البيع",
+        "أحكام البيع"
     ],
 
-  "nifas":
-    [
-      "النفاس",
-      "أحكام النفاس"
+    beli: [
+        "البيع",
+        "أحكام البيع"
     ],
 
-  "istihadah":
-    [
-      "الاستحاضة",
-      "أحكام الاستحاضة"
+    riba: [
+        "الربا",
+        "أحكام الربا"
     ],
 
-  "tayammum":
-    [
-      "التيمم",
-      "أحكام التيمم"
+    hutang: [
+        "الدين",
+        "القرض",
+        "أحكام الديون"
     ],
 
-  "azan":
-    [
-      "الأذان",
-      "أحكام الأذان"
+    pinjaman: [
+        "القرض",
+        "أحكام القرض"
     ],
 
-  "iqamah":
-    [
-      "الإقامة",
-      "أحكام الإقامة"
+    korban: [
+        "الأضحية",
+        "أحكام الأضحية"
     ],
 
-  "riba":
-    [
-      "الربا",
-      "أحكام الربا"
+    aqiqah: [
+        "العقيقة",
+        "أحكام العقيقة"
     ],
 
-  "sedekah":
-    [
-      "الصدقة",
-      "أحكام الصدقة"
+    qasar: [
+        "القصر",
+        "قصر الصلاة",
+        "صلاة المسافر"
     ],
 
-  "wakaf":
-    [
-      "الوقف",
-      "أحكام الوقف"
+    jamak: [
+        "الجمع",
+        "جمع الصلاة",
+        "صلاة المسافر"
     ],
 
-  "wasiat":
-    [
-      "الوصية",
-      "أحكام الوصية"
+    musafir: [
+        "السفر",
+        "صلاة المسافر",
+        "أحكام المسافر"
     ],
 
-  "faraid":
-    [
-      "الفرائض",
-      "الميراث",
-      "أحكام الميراث"
+    aurat: [
+        "العورة",
+        "أحكام العورة",
+        "ستر العورة"
     ],
 
-  "waris":
-    [
-      "الميراث",
-      "الوارث",
-      "أحكام المواريث"
+    haid: [
+        "الحيض",
+        "أحكام الحيض"
     ],
 
-  "hutang":
-    [
-      "الدين",
-      "الديون",
-      "القرض"
+    nifas: [
+        "النفاس",
+        "أحكام النفاس"
     ],
 
-  "jual beli":
-    [
-      "البيع",
-      "الشراء",
-      "أحكام البيع"
-    ],
-
-  "sentuh perempuan":
-    [
-      "لمس المرأة",
-      "مس المرأة",
-      "نقض الوضوء بلمس المرأة"
-    ],
-
-  "sentuh isteri":
-    [
-      "لمس الزوجة",
-      "مس الزوجة",
-      "نقض الوضوء بلمس الزوجة"
-    ],
-
-  "jamak":
-    [
-      "الجمع بين الصلاتين",
-      "جمع الصلاة",
-      "الجمع بين الصلوات"
-    ],
-
-  "qasar":
-    [
-      "القصر",
-      "قصر الصلاة",
-      "صلاة المسافر"
-    ],
-
-  "musafir":
-    [
-      "السفر",
-      "المسافر",
-      "أحكام السفر"
-    ],
-
-  "solat musafir":
-    [
-      "صلاة المسافر",
-      "قصر الصلاة",
-      "جمع الصلاة"
+    istihadah: [
+        "الاستحاضة",
+        "أحكام الاستحاضة"
     ]
 };
 
 
-/* ============================================================
-   ARABIC QUERY GENERATOR
-============================================================ */
+/*
+|--------------------------------------------------------------------------
+| Arabic detection
+|--------------------------------------------------------------------------
+*/
+
+function containsArabic(text) {
+    return /[\u0600-\u06FF]/.test(text);
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Build Arabic queries
+|--------------------------------------------------------------------------
+*/
 
 function arabicQueries(originalQuery) {
 
-  const q =
-    String(originalQuery || "")
-      .toLowerCase()
-      .trim();
+    const query = String(originalQuery || "").trim();
 
-  const queries = [];
-
-  /*
-  Exact phrase
-  */
-
-  if (QUERY_MAP[q]) {
-
-    queries.push(
-      ...QUERY_MAP[q]
-    );
-  }
-
-  /*
-  Keyword matching
-  */
-
-  for (
-    const [keyword, arabic]
-    of Object.entries(QUERY_MAP)
-  ) {
-
-    if (
-      q.includes(keyword)
-    ) {
-
-      queries.push(
-        ...arabic
-      );
-    }
-  }
-
-  /*
-  Arabic question itself
-  */
-
-  if (
-    /[\u0600-\u06FF]/.test(q)
-  ) {
-
-    queries.push(
-      originalQuery
-    );
-  }
-
-  /*
-  Fallback BM.
-  Turath mungkin tidak sebaik carian Arab,
-  tetapi ini masih digunakan sebagai fallback.
-  */
-
-  if (
-    queries.length === 0
-  ) {
-
-    queries.push(
-      originalQuery
-    );
-  }
-
-  return [
-    ...new Set(
-      queries
-        .map(
-          x => String(x).trim()
-        )
-        .filter(Boolean)
-    )
-  ];
-}
-
-
-/* ============================================================
-   COMPARISON DETECTION
-============================================================ */
-
-function isMadhhabComparison(query) {
-
-  const original =
-    String(query || "")
-      .toLowerCase();
-
-  const q =
-    normalizeArabic(
-      query
-    );
-
-  const words = [
-
-    "perbandingan",
-    "banding",
-    "beza",
-    "perbezaan",
-    "bandingkan",
-    "perbandingan mazhab",
-    "antara mazhab",
-    "menurut mazhab",
-    "mazhab mana",
-    "mazhab syafie dan hanafi",
-    "mazhab syafii dan hanafi",
-    "syafie vs hanafi",
-    "syafii vs hanafi",
-    "syafie dan maliki",
-    "syafie dan hanbali"
-
-  ];
-
-  if (
-    words.some(
-      word =>
-        original.includes(word)
-    )
-  ) {
-
-    return true;
-  }
-
-  /*
-  Arabic comparison
-  */
-
-  const arabicWords = [
-
-    "مقارنة",
-    "الفرق بين",
-    "المذاهب",
-    "المذهب الشافعي والحنفي",
-    "المذهب الشافعي والمالكي",
-    "المذهب الشافعي والحنبلي",
-    "بين المذاهب"
-
-  ];
-
-  return arabicWords.some(
-    word =>
-      q.includes(
-        normalizeArabic(word)
-      )
-  );
-}
-
-
-/* ============================================================
-   CATEGORY CONFIG
-============================================================ */
-
-function getCategoryConfig(mode) {
-
-  if (mode === "comparison") {
-
-    return [
-
-      {
-        key: "shafii",
-        name: "الفقه الشافعي",
-        id: CATEGORY_IDS.shafii
-      },
-
-      {
-        key: "hanafi",
-        name: "الفقه الحنفي",
-        id: CATEGORY_IDS.hanafi
-      },
-
-      {
-        key: "maliki",
-        name: "الفقه المالكي",
-        id: CATEGORY_IDS.maliki
-      },
-
-      {
-        key: "hanbali",
-        name: "الفقه الحنبلي",
-        id: CATEGORY_IDS.hanbali
-      }
-
-    ];
-
-  }
-
-  return [
-
-    {
-      key: "shafii",
-      name: "الفقه الشافعي",
-      id: CATEGORY_IDS.shafii
+    if (!query) {
+        return [];
     }
 
-  ];
-}
-
-
-/* ============================================================
-   CATEGORY VALIDATION
-============================================================ */
-
-function validateCategories(mode) {
-
-  const categories =
-    getCategoryConfig(
-      mode
-    );
-
-  const missing =
-    categories.filter(
-      item =>
-        !item.id
-    );
-
-  if (
-    missing.length
-  ) {
-
-    throw new Error(
-      "CATEGORY ID belum lengkap: "
-      +
-      missing
-        .map(
-          x => x.name
-        )
-        .join(", ")
-    );
-  }
-
-  return categories;
-}
-
-
-/* ============================================================
-   NORMALIZE HIT
-============================================================ */
-
-function normalizeHit(
-  hit,
-  category
-) {
-
-  const meta =
-    hit?.meta || {};
-
-  const bookId =
-    toNumber(
-      hit?.book_id
-    );
-
-  const page =
-    toNumber(
-      meta?.page
-    );
-
-  const pageId =
-    toNumber(
-      meta?.page_id
-    );
-
-  const text =
-    cleanText(
-      hit?.text
-    );
-
-  const snippet =
-    cleanText(
-      hit?.snip
-    );
-
-  return {
-
-    source_type:
-      "turath",
-
-    category:
-      category?.name
-      || null,
-
-    category_key:
-      category?.key
-      || null,
-
-    category_id:
-      category?.id
-      || null,
-
-    content:
-      text || snippet,
-
-    snippet,
-
-    kitab_name:
-      meta?.book_name
-      || "Turath",
-
-    author:
-      meta?.author_name
-      || null,
-
-    book_id:
-      bookId,
-
-    page,
-
-    page_id:
-      pageId,
-
-    vol:
-      meta?.vol
-      || null,
-
-    headings:
-      Array.isArray(
-        meta?.headings
-      )
-        ? meta.headings
-        : [],
-
-    url:
-      bookId
-        ? `https://app.turath.io/book/${bookId}`
-        : null
-  };
-}
-
-
-/* ============================================================
-   SCORE
-============================================================ */
-
-function scoreHit(
-  hit,
-  query
-) {
-
-  const content =
-    normalizeArabic(
-      hit.content
-      || ""
-    );
-
-  const snippet =
-    normalizeArabic(
-      hit.snippet
-      || ""
-    );
-
-  const q =
-    normalizeArabic(
-      query
-    );
-
-  let score = 0;
-
-  /*
-  Exact phrase
-  */
-
-  if (
-    q
-    &&
-    content.includes(q)
-  ) {
-
-    score += 100;
-  }
-
-  /*
-  Snippet exact
-  */
-
-  if (
-    q
-    &&
-    snippet.includes(q)
-  ) {
-
-    score += 40;
-  }
-
-  /*
-  Word matching
-  */
-
-  const words =
-    q
-      .split(/\s+/)
-      .filter(
-        word =>
-          word.length >= 2
-      );
-
-  for (
-    const word of words
-  ) {
-
-    if (
-      content.includes(word)
-    ) {
-
-      score += 8;
-    }
-
-    if (
-      snippet.includes(word)
-    ) {
-
-      score += 3;
-    }
-  }
-
-  /*
-  Prefer useful passages
-  */
-
-  if (
-    content.length >= 200
-  ) {
-
-    score += 4;
-  }
-
-  if (
-    content.length >= 500
-  ) {
-
-    score += 3;
-  }
-
-  return score;
-}
-
-
-/* ============================================================
-   SEARCH CATEGORY
-============================================================ */
-
-async function searchCategory(
-  query,
-  category
-) {
-
-  const results = [];
-
-  for (
-    let page = 1;
-    page <= SEARCH_PAGES;
-    page++
-  ) {
-
-    try {
-
-      console.log(
-        `🔎 TURATH `
-        + `${category.name} `
-        + `| page=${page} `
-        + `| ${query}`
-      );
-
-      const result =
-        await search(
-          query,
-          {
-            category:
-              category.id,
-
-            page
-          }
-        );
-
-      const hits =
-        Array.isArray(
-          result?.data
-        )
-          ? result.data
-          : [];
-
-      for (
-        const raw of hits
-      ) {
-
-        const hit =
-          normalizeHit(
-            raw,
-            category
-          );
-
-        if (
-          !hit.book_id
-          ||
-          !hit.content
-        ) {
-
-          continue;
-        }
-
-        results.push({
-
-          ...hit,
-
-          matched_query:
-            query,
-
-          score:
-            scoreHit(
-              hit,
-              query
-            )
-
-        });
-      }
-
-      /*
-      Tidak perlu page seterusnya
-      kalau API sudah tidak pulangkan data.
-      */
-
-      if (
-        hits.length === 0
-      ) {
-
-        break;
-      }
-
-    } catch (error) {
-
-      console.error(
-        `❌ SEARCH ERROR `
-        + `${category.name}:`,
-        error?.message
-        || error
-      );
-
-      break;
-    }
-  }
-
-  return results;
-}
-
-
-/* ============================================================
-   DEDUPLICATE
-============================================================ */
-
-function deduplicate(
-  results
-) {
-
-  const map =
-    new Map();
-
-  for (
-    const item of results
-  ) {
-
-    const key =
-      [
-        item.book_id,
-        item.page_id,
-        item.content
-      ].join("|");
-
-    if (
-      !map.has(key)
-    ) {
-
-      map.set(
-        key,
-        item
-      );
-
-    } else {
-
-      const old =
-        map.get(key);
-
-      if (
-        item.score >
-        old.score
-      ) {
-
-        map.set(
-          key,
-          item
-        );
-      }
-    }
-  }
-
-  return [
-    ...map.values()
-  ];
-}
-
-
-/* ============================================================
-   SELECT TOP 10
-============================================================ */
-
-function selectTopResults(
-  results,
-  limit = MAX_TURATH_RESULTS
-) {
-
-  const unique =
-    deduplicate(
-      results
-    );
-
-  unique.sort(
-    (a, b) =>
-      b.score - a.score
-  );
-
-  return unique.slice(
-    0,
-    limit
-  );
-}
-
-
-/* ============================================================
-   BALANCED COMPARISON RESULTS
-============================================================ */
-
-function selectComparisonResults(
-  results,
-  limit = MAX_TURATH_RESULTS
-) {
-
-  const unique =
-    deduplicate(
-      results
-    );
-
-  /*
-  Asingkan mengikut mazhab.
-  */
-
-  const groups = {
-
-    shafii: [],
-    hanafi: [],
-    maliki: [],
-    hanbali: []
-
-  };
-
-  for (
-    const item of unique
-  ) {
-
-    if (
-      groups[item.category_key]
-    ) {
-
-      groups[
-        item.category_key
-      ].push(item);
-    }
-  }
-
-  for (
-    const key of Object.keys(groups)
-  ) {
-
-    groups[key].sort(
-      (a, b) =>
-        b.score - a.score
-    );
-  }
-
-  /*
-  Ambil sekurang-kurangnya
-  1 daripada setiap mazhab
-  jika tersedia.
-  */
-
-  const selected = [];
-
-  const categoryOrder = [
-    "shafii",
-    "hanafi",
-    "maliki",
-    "hanbali"
-  ];
-
-  for (
-    const key of categoryOrder
-  ) {
-
-    if (
-      groups[key].length
-      &&
-      selected.length < limit
-    ) {
-
-      selected.push(
-        groups[key].shift()
-      );
-    }
-  }
-
-  /*
-  Isi baki berdasarkan score.
-  */
-
-  const remaining = [
-
-    ...groups.shafii,
-    ...groups.hanafi,
-    ...groups.maliki,
-    ...groups.hanbali
-
-  ];
-
-  remaining.sort(
-    (a, b) =>
-      b.score - a.score
-  );
-
-  for (
-    const item of remaining
-  ) {
-
-    if (
-      selected.length >= limit
-    ) {
-
-      break;
-    }
-
-    selected.push(
-      item
-    );
-  }
-
-  /*
-  Final sort by score.
-  */
-
-  selected.sort(
-    (a, b) =>
-      b.score - a.score
-  );
-
-  return selected.slice(
-    0,
-    limit
-  );
-}
-
-
-/* ============================================================
-   SEARCH SHAFII
-============================================================ */
-
-async function searchShafii(
-  originalQuery
-) {
-
-  const queries =
-    arabicQueries(
-      originalQuery
-    );
-
-  console.log("");
-  console.log(
-    "☪️ MODE: FIQH SYAFIE"
-  );
-
-  console.log(
-    "🌐 ARABIC QUERIES:",
-    queries.join(" | ")
-  );
-
-  const categories =
-    validateCategories(
-      "shafii"
-    );
-
-  const candidates = [];
-
-  /*
-  Cari setiap query.
-  */
-
-  for (
-    const query of queries
-  ) {
-
-    for (
-      const category
-      of categories
-    ) {
-
-      const hits =
-        await searchCategory(
-          query,
-          category
-        );
-
-      candidates.push(
-        ...hits
-      );
+    const results = [];
+
+    /*
+     * Jika pengguna terus bertanya dalam Arab,
+     * gunakan soalan Arab itu sendiri.
+     */
+
+    if (containsArabic(query)) {
+        results.push(query);
     }
 
     /*
-    Jangan terlalu banyak
-    request kalau sudah banyak.
-    */
+     * Cari keyword Bahasa Melayu.
+     */
 
-    if (
-      candidates.length >= 80
-    ) {
+    const lower = query.toLowerCase();
 
-      break;
+    for (const [keyword, arabicTerms] of Object.entries(QUERY_MAP)) {
+
+        if (lower.includes(keyword)) {
+            results.push(...arabicTerms);
+        }
     }
-  }
 
-  return selectTopResults(
-    candidates,
-    MAX_TURATH_RESULTS
-  );
+    /*
+     * Kalau tiada mapping,
+     * gunakan soalan asal sebagai fallback.
+     */
+
+    if (results.length === 0) {
+        results.push(query);
+    }
+
+    return [...new Set(results)].slice(0, 20);
 }
 
 
-/* ============================================================
-   SEARCH COMPARISON
-============================================================ */
+/*
+|--------------------------------------------------------------------------
+| Detect comparison
+|--------------------------------------------------------------------------
+*/
 
-async function searchComparison(
-  originalQuery
+function isMadhhabComparison(text) {
+
+    const q = String(text || "").toLowerCase();
+
+    const terms = [
+        "banding",
+        "bandingkan",
+        "perbandingan",
+        "perbezaan mazhab",
+        "beza mazhab",
+        "mazhab mana",
+        "empat mazhab",
+        "4 mazhab",
+
+        "syafie dan hanafi",
+        "syafii dan hanafi",
+
+        "syafie dan maliki",
+        "syafii dan maliki",
+
+        "syafie dan hanbali",
+        "syafii dan hanbali",
+
+        "hanafi dan maliki",
+        "hanafi dan hanbali",
+        "maliki dan hanbali"
+    ];
+
+    if (terms.some(term => q.includes(term))) {
+        return true;
+    }
+
+    /*
+     * Arabic comparison
+     */
+
+    if (
+        q.includes("مقارنة") ||
+        q.includes("المذاهب") ||
+        q.includes("الحنفي") ||
+        q.includes("المالكي") ||
+        q.includes("الحنبلي")
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Validate category
+|--------------------------------------------------------------------------
+*/
+
+function validateCategory(categoryKey) {
+
+    if (!CATEGORY_IDS[categoryKey]) {
+
+        throw new Error(
+            `CATEGORY ID tidak ditetapkan untuk ${categoryKey}`
+        );
+    }
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Normalize result
+|--------------------------------------------------------------------------
+*/
+
+function normalizeHit(
+    hit,
+    categoryKey,
+    query,
+    page
 ) {
 
-  const queries =
-    arabicQueries(
-      originalQuery
-    );
+    if (!hit) {
+        return null;
+    }
 
-  console.log("");
-  console.log(
-    "🌍 MODE: PERBANDINGAN MAZHAB"
-  );
+    return {
 
-  console.log(
-    "🌐 ARABIC QUERIES:",
-    queries.join(" | ")
-  );
+        book_id: hit.book_id,
 
-  const categories =
-    validateCategories(
-      "comparison"
-    );
+        author_id: hit.author_id,
 
-  const candidates = [];
+        category_id:
+            hit.cat_id ||
+            CATEGORY_IDS[categoryKey],
 
-  for (
-    const query of queries
-  ) {
+        category:
+            CATEGORY_NAMES[categoryKey],
+
+        meta:
+            hit.meta || "",
+
+        snippet:
+            hit.snip || "",
+
+        text:
+            hit.text || "",
+
+        search_query:
+            query,
+
+        search_page:
+            page
+    };
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Unique key
+|--------------------------------------------------------------------------
+*/
+
+function resultKey(item) {
+
+    return [
+        item.book_id,
+        item.meta,
+        item.text
+    ].join("|");
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Search MANY pages
+|--------------------------------------------------------------------------
+|
+| Ini sengaja cari banyak dahulu.
+|
+*/
+
+async function searchCategoryMany(
+    query,
+    categoryKey
+) {
+
+    validateCategory(categoryKey);
+
+    const results = [];
+    const seen = new Set();
 
     for (
-      const category
-      of categories
+        let page = 1;
+        page <= SEARCH_PAGES;
+        page++
     ) {
 
-      const hits =
-        await searchCategory(
-          query,
-          category
+        let response;
+
+        try {
+
+            response = await search(
+                query,
+                {
+                    category:
+                        CATEGORY_IDS[categoryKey],
+
+                    page
+                }
+            );
+
+        } catch (error) {
+
+            console.error(
+                `❌ TURATH ERROR`,
+                categoryKey,
+                `page=${page}`,
+                error?.message || error
+            );
+
+            continue;
+        }
+
+        const data =
+            Array.isArray(response?.data)
+                ? response.data
+                : [];
+
+        console.log(
+            `🔎 ${categoryKey} | "${query}" | page=${page} | ${data.length} results`
         );
 
-      candidates.push(
-        ...hits
-      );
+        if (data.length === 0) {
+            break;
+        }
+
+        for (const hit of data) {
+
+            const item =
+                normalizeHit(
+                    hit,
+                    categoryKey,
+                    query,
+                    page
+                );
+
+            if (!item) {
+                continue;
+            }
+
+            const key =
+                resultKey(item);
+
+            if (seen.has(key)) {
+                continue;
+            }
+
+            seen.add(key);
+
+            results.push(item);
+        }
     }
 
-    if (
-      candidates.length >= 100
-    ) {
-
-      break;
-    }
-  }
-
-  return selectComparisonResults(
-    candidates,
-    MAX_TURATH_RESULTS
-  );
-}
-
-
-/* ============================================================
-   MAIN SEARCH
-============================================================ */
-
-async function performSearch(
-  originalQuery
-) {
-
-  const comparison =
-    isMadhhabComparison(
-      originalQuery
+    console.log(
+        `📚 ${categoryKey} collected = ${results.length}`
     );
 
-  console.log("");
-  console.log(
-    "============================================"
-  );
-
-  console.log(
-    "🔎 SOALAN:",
-    originalQuery
-  );
-
-  console.log(
-    "⚖️ COMPARISON:",
-    comparison
-  );
-
-  console.log(
-    "============================================"
-  );
-
-  let passages = [];
-
-  if (
-    comparison
-  ) {
-
-    passages =
-      await searchComparison(
-        originalQuery
-      );
-
-  } else {
-
-    passages =
-      await searchShafii(
-        originalQuery
-      );
-  }
-
-  return {
-
-    passages,
-
-    comparison,
-
-    queries:
-      arabicQueries(
-        originalQuery
-      )
-
-  };
+    return results;
 }
 
 
-/* ============================================================
-   HEALTH
-============================================================ */
+/*
+|--------------------------------------------------------------------------
+| Search one category using MANY queries
+|--------------------------------------------------------------------------
+*/
 
-function categoryStatus() {
+async function collectCategory(
+    originalQuery,
+    categoryKey
+) {
 
-  return {
+    const queries =
+        arabicQueries(originalQuery);
 
-    shafii:
-      CATEGORY_IDS.shafii,
+    const all = [];
+    const seen = new Set();
 
-    hanafi:
-      CATEGORY_IDS.hanafi,
+    console.log(
+        `🔍 ${categoryKey} queries:`,
+        queries
+    );
 
-    maliki:
-      CATEGORY_IDS.maliki,
+    /*
+     * Setiap query akan cari banyak page.
+     */
 
-    hanbali:
-      CATEGORY_IDS.hanbali
+    for (const query of queries) {
 
-  };
-}
+        const results =
+            await searchCategoryMany(
+                query,
+                categoryKey
+            );
 
+        for (const item of results) {
 
-/* ============================================================
-   HTTP SERVER
-============================================================ */
+            const key =
+                resultKey(item);
 
-const server =
-  http.createServer(
-    async (
-      req,
-      res
-    ) => {
-
-      try {
-
-        const url =
-          new URL(
-            req.url,
-            `http://127.0.0.1:${PORT}`
-          );
-
-
-        /* ====================================================
-           HEALTH
-        ==================================================== */
-
-        if (
-          url.pathname ===
-          "/health"
-        ) {
-
-          return sendJson(
-            res,
-            {
-
-              ok: true,
-
-              service:
-                "turath",
-
-              max_results:
-                MAX_TURATH_RESULTS,
-
-              categories:
-                categoryStatus()
-
+            if (seen.has(key)) {
+                continue;
             }
-          );
+
+            seen.add(key);
+
+            all.push(item);
         }
-
-
-        /* ====================================================
-           CATEGORIES
-        ==================================================== */
-
-        if (
-          url.pathname ===
-          "/categories"
-        ) {
-
-          return sendJson(
-            res,
-            {
-
-              ok: true,
-
-              categories: [
-
-                {
-                  key:
-                    "shafii",
-
-                  name:
-                    "الفقه الشافعي",
-
-                  id:
-                    CATEGORY_IDS.shafii
-                },
-
-                {
-                  key:
-                    "hanafi",
-
-                  name:
-                    "الفقه الحنفي",
-
-                  id:
-                    CATEGORY_IDS.hanafi
-                },
-
-                {
-                  key:
-                    "maliki",
-
-                  name:
-                    "الفقه المالكي",
-
-                  id:
-                    CATEGORY_IDS.maliki
-                },
-
-                {
-                  key:
-                    "hanbali",
-
-                  name:
-                    "الفقه الحنبلي",
-
-                  id:
-                    CATEGORY_IDS.hanbali
-                }
-
-              ]
-
-            }
-          );
-        }
-
-
-        /* ====================================================
-           SEARCH
-        ==================================================== */
-
-        if (
-          url.pathname ===
-          "/search"
-        ) {
-
-          const originalQuery =
-            (
-              url.searchParams.get(
-                "q"
-              )
-              || ""
-            ).trim();
-
-          if (
-            !originalQuery
-          ) {
-
-            return sendJson(
-              res,
-              {
-
-                ok: false,
-
-                error:
-                  "Parameter q diperlukan"
-
-              },
-              400
-            );
-          }
-
-          const result =
-            await performSearch(
-              originalQuery
-            );
-
-          return sendJson(
-            res,
-            {
-
-              ok: true,
-
-              query:
-                originalQuery,
-
-              mode:
-                result.comparison
-                  ? "comparison"
-                  : "shafii",
-
-              category:
-                categoryName(
-                  result.comparison
-                    ? "comparison"
-                    : "shafii"
-                ),
-
-              arabic_queries:
-                result.queries,
-
-              count:
-                result.passages.length,
-
-              passages:
-                result.passages
-
-            }
-          );
-        }
-
-
-        /* ====================================================
-           BOOK INFO
-        ==================================================== */
-
-        if (
-          url.pathname.startsWith(
-            "/book/"
-          )
-        ) {
-
-          const id =
-            toNumber(
-              url.pathname
-                .split("/")[2]
-            );
-
-          if (!id) {
-
-            return sendJson(
-              res,
-              {
-
-                ok: false,
-
-                error:
-                  "Book ID diperlukan"
-
-              },
-              400
-            );
-          }
-
-          const result =
-            await getBookInfo(
-              id
-            );
-
-          return sendJson(
-            res,
-            {
-
-              ok: true,
-
-              book_id:
-                id,
-
-              result
-
-            }
-          );
-        }
-
-
-        /* ====================================================
-           PAGE
-        ==================================================== */
-
-        if (
-          url.pathname.startsWith(
-            "/page/"
-          )
-        ) {
-
-          const parts =
-            url.pathname.split(
-              "/"
-            );
-
-          const bookId =
-            toNumber(
-              parts[2]
-            );
-
-          const pageNumber =
-            toNumber(
-              parts[3]
-            );
-
-          if (
-            !bookId
-            ||
-            pageNumber === null
-          ) {
-
-            return sendJson(
-              res,
-              {
-
-                ok: false,
-
-                error:
-                  "Book ID dan page diperlukan"
-
-              },
-              400
-            );
-          }
-
-          const result =
-            await getPage(
-              bookId,
-              pageNumber
-            );
-
-          return sendJson(
-            res,
-            {
-
-              ok: true,
-
-              book_id:
-                bookId,
-
-              page:
-                pageNumber,
-
-              text:
-                result?.text
-                || "",
-
-              metadata:
-                result?.meta
-                || null,
-
-              result
-
-            }
-          );
-        }
-
-
-        /* ====================================================
-           404
-        ==================================================== */
-
-        return sendJson(
-          res,
-          {
-
-            ok: false,
-
-            error:
-              "Endpoint tidak dijumpai"
-
-          },
-          404
-        );
-
-      } catch (error) {
-
-        console.error(
-          "❌ TURATH ERROR:",
-          error?.message
-          || error
-        );
-
-        return sendJson(
-          res,
-          {
-
-            ok: false,
-
-            error:
-              error?.message
-              || String(error)
-
-          },
-          500
-        );
-      }
     }
-  );
+
+    console.log(
+        `📦 ${categoryKey} TOTAL UNIQUE = ${all.length}`
+    );
+
+    return all;
+}
 
 
-/* ============================================================
-   START
-============================================================ */
+/*
+|--------------------------------------------------------------------------
+| Score result
+|--------------------------------------------------------------------------
+|
+| Kita cuba letakkan hasil yang lebih relevan
+| di bahagian atas.
+|--------------------------------------------------------------------------
+*/
 
-server.listen(
-  PORT,
-  "127.0.0.1",
-  () => {
+function scoreResult(
+    item,
+    originalQuery
+) {
+
+    let score = 0;
+
+    const query =
+        String(originalQuery || "")
+            .toLowerCase();
+
+    const text =
+        `${item.text} ${item.snippet} ${item.meta}`
+            .toLowerCase();
+
+    /*
+     * Match Arabic query
+     */
+
+    const arabicQs =
+        arabicQueries(originalQuery);
+
+    for (const q of arabicQs) {
+
+        const words =
+            q
+                .split(/\s+/)
+                .filter(Boolean);
+
+        for (const word of words) {
+
+            if (
+                word.length >= 3 &&
+                text.includes(word)
+            ) {
+                score += 2;
+            }
+        }
+    }
+
+    /*
+     * Panjang teks yang munasabah.
+     */
+
+    if (item.text.length > 100) {
+        score += 1;
+    }
+
+    /*
+     * Snippet tersedia.
+     */
+
+    if (item.snippet) {
+        score += 1;
+    }
+
+    /*
+     * Search page awal biasanya lebih relevan.
+     */
+
+    if (item.search_page === 1) {
+        score += 2;
+    }
+
+    return score;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Rank + limit
+|--------------------------------------------------------------------------
+*/
+
+function rankAndLimit(
+    results,
+    originalQuery,
+    limit
+) {
+
+    const scored =
+        results.map(item => ({
+            ...item,
+            relevance:
+                scoreResult(
+                    item,
+                    originalQuery
+                )
+        }));
+
+    scored.sort(
+        (a, b) =>
+            b.relevance -
+            a.relevance
+    );
+
+    return scored.slice(
+        0,
+        limit
+    );
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| NORMAL FIQH
+|--------------------------------------------------------------------------
+|
+| Syafie = 10
+|--------------------------------------------------------------------------
+*/
+
+async function searchNormal(
+    originalQuery
+) {
+
+    const all =
+        await collectCategory(
+            originalQuery,
+            "shafii"
+        );
+
+    const selected =
+        rankAndLimit(
+            all,
+            originalQuery,
+            NORMAL_LIMITS.shafii
+        );
+
+    console.log(
+        `✅ NORMAL FINAL SYAFII = ${selected.length}`
+    );
+
+    return selected;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| COMPARISON
+|--------------------------------------------------------------------------
+|
+| Syafie = 10
+| Hanafi = 2
+| Maliki = 2
+| Hanbali = 2
+|--------------------------------------------------------------------------
+*/
+
+async function searchComparison(
+    originalQuery
+) {
+
+    const categoryResults = {};
+
+    /*
+     * Cari semua kategori.
+     * Bukan 2 sahaja.
+     * Kita cari banyak dahulu.
+     */
+
+    for (const categoryKey of [
+        "shafii",
+        "hanafi",
+        "maliki",
+        "hanbali"
+    ]) {
+
+        categoryResults[categoryKey] =
+            await collectCategory(
+                originalQuery,
+                categoryKey
+            );
+    }
+
+    /*
+     * Kemudian baru pilih jumlah akhir.
+     */
+
+    const final = [];
+
+    for (const categoryKey of [
+        "shafii",
+        "hanafi",
+        "maliki",
+        "hanbali"
+    ]) {
+
+        const limit =
+            COMPARISON_LIMITS[
+                categoryKey
+            ];
+
+        const selected =
+            rankAndLimit(
+                categoryResults[
+                    categoryKey
+                ],
+                originalQuery,
+                limit
+            );
+
+        final.push(...selected);
+
+        console.log(
+            `✅ ${CATEGORY_NAMES[categoryKey]} FINAL = ${selected.length}`
+        );
+    }
+
+    return final;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| MAIN SEARCH
+|--------------------------------------------------------------------------
+*/
+
+async function performSearch(
+    originalQuery
+) {
+
+    const comparison =
+        isMadhhabComparison(
+            originalQuery
+        );
 
     console.log("");
     console.log(
-      "============================================"
+        "================================================"
+    );
+    console.log(
+        "📚 TURATH SEARCH"
+    );
+    console.log(
+        `❓ ${originalQuery}`
+    );
+    console.log(
+        `🧭 MODE = ${
+            comparison
+                ? "COMPARISON"
+                : "SHAFII"
+        }`
+    );
+    console.log(
+        "================================================"
     );
 
-    console.log(
-      `🚀 TURATH SERVICE`
-    );
+    const passages =
+        comparison
+            ? await searchComparison(
+                originalQuery
+            )
+            : await searchNormal(
+                originalQuery
+            );
 
     console.log(
-      `📡 http://127.0.0.1:${PORT}`
+        `🏁 FINAL TURATH RESULTS = ${passages.length}`
     );
 
-    console.log(
-      `📚 MAX SOURCES: ${MAX_TURATH_RESULTS}`
+    return {
+
+        mode:
+            comparison
+                ? "comparison"
+                : "shafii",
+
+        requested:
+            comparison
+                ? COMPARISON_LIMITS
+                : NORMAL_LIMITS,
+
+        count:
+            passages.length,
+
+        passages
+    };
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| JSON
+|--------------------------------------------------------------------------
+*/
+
+function sendJson(
+    res,
+    statusCode,
+    data
+) {
+
+    const body =
+        JSON.stringify(data);
+
+    res.writeHead(
+        statusCode,
+        {
+            "Content-Type":
+                "application/json; charset=utf-8",
+
+            "Content-Length":
+                Buffer.byteLength(body)
+        }
     );
 
-    console.log(
-      "☪️ SHAFII CATEGORY:",
-      CATEGORY_IDS.shafii
+    res.end(body);
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Read POST body
+|--------------------------------------------------------------------------
+*/
+
+function readBody(req) {
+
+    return new Promise(
+        (resolve, reject) => {
+
+            let body = "";
+
+            req.on(
+                "data",
+                chunk => {
+                    body += chunk;
+                }
+            );
+
+            req.on(
+                "end",
+                () => {
+
+                    try {
+
+                        resolve(
+                            body
+                                ? JSON.parse(body)
+                                : {}
+                        );
+
+                    } catch (error) {
+
+                        reject(error);
+
+                    }
+                }
+            );
+
+            req.on(
+                "error",
+                reject
+            );
+        }
+    );
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| HTTP SERVER
+|--------------------------------------------------------------------------
+*/
+
+const server =
+    http.createServer(
+        async (req, res) => {
+
+            try {
+
+                /*
+                 * HEALTH
+                 */
+
+                if (
+                    req.method === "GET" &&
+                    req.url === "/health"
+                ) {
+
+                    return sendJson(
+                        res,
+                        200,
+                        {
+                            ok: true,
+
+                            service:
+                                "turath",
+
+                            search_pages:
+                                SEARCH_PAGES,
+
+                            normal_limits:
+                                NORMAL_LIMITS,
+
+                            comparison_limits:
+                                COMPARISON_LIMITS,
+
+                            categories:
+                                CATEGORY_IDS
+                        }
+                    );
+                }
+
+
+                /*
+                 * CATEGORIES
+                 */
+
+                if (
+                    req.method === "GET" &&
+                    req.url === "/categories"
+                ) {
+
+                    return sendJson(
+                        res,
+                        200,
+                        {
+                            ids:
+                                CATEGORY_IDS,
+
+                            names:
+                                CATEGORY_NAMES
+                        }
+                    );
+                }
+
+
+                /*
+                 * SEARCH
+                 */
+
+                if (
+                    req.method === "POST" &&
+                    req.url === "/search"
+                ) {
+
+                    const body =
+                        await readBody(req);
+
+                    const query =
+                        String(
+                            body.query || ""
+                        ).trim();
+
+                    if (!query) {
+
+                        return sendJson(
+                            res,
+                            400,
+                            {
+                                error:
+                                    "Query kosong"
+                            }
+                        );
+                    }
+
+                    const result =
+                        await performSearch(
+                            query
+                        );
+
+                    return sendJson(
+                        res,
+                        200,
+                        result
+                    );
+                }
+
+
+                /*
+                 * BOOK
+                 */
+
+                if (
+                    req.method === "GET" &&
+                    req.url.startsWith(
+                        "/book/"
+                    )
+                ) {
+
+                    const id =
+                        Number(
+                            req.url
+                                .split("/")[2]
+                                .split("?")[0]
+                        );
+
+                    if (
+                        !Number.isFinite(id)
+                    ) {
+
+                        return sendJson(
+                            res,
+                            400,
+                            {
+                                error:
+                                    "Book ID tidak sah"
+                            }
+                        );
+                    }
+
+                    const result =
+                        await getBookInfo(
+                            id
+                        );
+
+                    return sendJson(
+                        res,
+                        200,
+                        result
+                    );
+                }
+
+
+                /*
+                 * PAGE
+                 */
+
+                if (
+                    req.method === "GET" &&
+                    req.url.startsWith(
+                        "/page/"
+                    )
+                ) {
+
+                    const parts =
+                        req.url.split("/");
+
+                    const bookId =
+                        Number(parts[2]);
+
+                    const page =
+                        Number(
+                            parts[3]
+                                ?.split("?")[0]
+                        );
+
+                    if (
+                        !Number.isFinite(bookId) ||
+                        !Number.isFinite(page)
+                    ) {
+
+                        return sendJson(
+                            res,
+                            400,
+                            {
+                                error:
+                                    "Book ID/page tidak sah"
+                            }
+                        );
+                    }
+
+                    const result =
+                        await getPage(
+                            bookId,
+                            page
+                        );
+
+                    return sendJson(
+                        res,
+                        200,
+                        result
+                    );
+                }
+
+
+                /*
+                 * NOT FOUND
+                 */
+
+                return sendJson(
+                    res,
+                    404,
+                    {
+                        error:
+                            "Not found"
+                    }
+                );
+
+            } catch (error) {
+
+                console.error(
+                    "❌ TURATH SERVICE ERROR:",
+                    error
+                );
+
+                return sendJson(
+                    res,
+                    500,
+                    {
+                        error:
+                            error?.message ||
+                            String(error)
+                    }
+                );
+            }
+        }
     );
 
-    console.log(
-      "🕌 HANAFI CATEGORY:",
-      CATEGORY_IDS.hanafi
-    );
 
-    console.log(
-      "🕌 MALIKI CATEGORY:",
-      CATEGORY_IDS.maliki
-    );
+/*
+|--------------------------------------------------------------------------
+| START
+|--------------------------------------------------------------------------
+*/
 
-    console.log(
-      "🕌 HANBALI CATEGORY:",
-      CATEGORY_IDS.hanbali
-    );
+server.listen(
+    PORT,
+    HOST,
+    () => {
 
-    console.log(
-      "============================================"
-    );
-  }
+        console.log("");
+        console.log(
+            "=============================================="
+        );
+
+        console.log(
+            "🚀 TURATH SERVICE STARTED"
+        );
+
+        console.log(
+            `📡 http://${HOST}:${PORT}`
+        );
+
+        console.log(
+            "📚 CATEGORY IDS:",
+            CATEGORY_IDS
+        );
+
+        console.log(
+            "🔎 SEARCH PAGES:",
+            SEARCH_PAGES
+        );
+
+        console.log(
+            "📖 NORMAL:",
+            NORMAL_LIMITS
+        );
+
+        console.log(
+            "⚖️ COMPARISON:",
+            COMPARISON_LIMITS
+        );
+
+        console.log(
+            "=============================================="
+        );
+    }
 );
