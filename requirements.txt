@@ -1,8 +1,5 @@
 Flask
 gunicorn
 requests
-supabase
 python-telegram-bot
-pytesseract
-pdf2image
 google-genai
