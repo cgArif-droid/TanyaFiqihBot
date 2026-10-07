@@ -4,9 +4,11 @@ import json
 import time
 import asyncio
 import threading
+import traceback
 
 import requests
 from flask import Flask, request, jsonify
+
 from google import genai
 from google.genai import types
 
@@ -20,9 +22,9 @@ from telegram.ext import (
 )
 
 
-# ============================================================
+# =========================================================
 # CONFIG
-# ============================================================
+# =========================================================
 
 GOOGLE_API_KEY = os.getenv(
     "GOOGLE_API_KEY",
@@ -80,18 +82,16 @@ TELEGRAM_MAX_CHARS = int(
 )
 
 
-# ============================================================
+# =========================================================
 # FLASK
-# ============================================================
+# =========================================================
 
 app = Flask(__name__)
 
-print("✅ Flask app created")
 
-
-# ============================================================
-# GEMINI CLIENT
-# ============================================================
+# =========================================================
+# GEMINI
+# =========================================================
 
 client = None
 
@@ -101,451 +101,191 @@ if GOOGLE_API_KEY:
             api_key=GOOGLE_API_KEY
         )
 
-        print("✅ Gemini client ready")
+        print("✅ GEMINI CLIENT READY")
 
-    except Exception as exc:
+    except Exception as e:
         print(
-            f"⚠️ Gemini client gagal dimulakan: {exc}"
+            "❌ GEMINI CLIENT ERROR:",
+            e
         )
 
 else:
     print(
-        "⚠️ GOOGLE_API_KEY belum ditetapkan."
+        "⚠️ GOOGLE_API_KEY tidak tersedia."
     )
 
 
-# ============================================================
-# CACHE
-# ============================================================
-
-ANSWER_CACHE = {}
-
-CACHE_LOCK = threading.Lock()
-
-CACHE_TTL = 60 * 30
-
-
-def normalize_question(text):
-    if not text:
-        return ""
-
-    text = str(text).strip()
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-    return text
-
-
-def cache_get(question):
-    key = normalize_question(
-        question
-    ).lower()
-
-    with CACHE_LOCK:
-
-        item = ANSWER_CACHE.get(
-            key
-        )
-
-        if not item:
-            return None
-
-        timestamp, value = item
-
-        if (
-            time.time() - timestamp
-            > CACHE_TTL
-        ):
-            del ANSWER_CACHE[key]
-
-            return None
-
-        return value
-
-
-def cache_set(
-    question,
-    value
-):
-    key = normalize_question(
-        question
-    ).lower()
-
-    with CACHE_LOCK:
-
-        ANSWER_CACHE[key] = (
-            time.time(),
-            value
-        )
-
-
-def cache_clear():
-
-    with CACHE_LOCK:
-
-        ANSWER_CACHE.clear()
-
-
-# ============================================================
+# =========================================================
 # QUERY MAP
-# ============================================================
+# =========================================================
 
 QUERY_MAP = {
+    "puasa": "الصيام",
+    "puasa ramadan": "صيام رمضان",
+    "zakat": "الزكاة",
+    "zakat fitrah": "زكاة الفطر",
 
-    "puasa":
-        "الصيام",
+    "solat": "الصلاة",
+    "sembahyang": "الصلاة",
 
-    "puasa ramadan":
-        "صيام رمضان",
+    "wuduk": "الوضوء",
+    "wudhu": "الوضوء",
 
-    "puasa ramadhan":
-        "صيام رمضان",
+    "taharah": "الطهارة",
+    "bersuci": "الطهارة",
+    "tayamum": "التيمم",
 
-    "zakat":
-        "الزكاة",
+    "mandi wajib": "الغسل",
+    "mandi junub": "غسل الجنابة",
+    "mandi selepas haid": "غسل الحيض",
+    "mandi haid": "غسل الحيض",
+    "mandi nifas": "غسل النفاس",
 
-    "zakat fitrah":
-        "زكاة الفطر",
+    "junub": "الجنابة",
+    "haid": "الحيض",
+    "nifas": "النفاس",
+    "istihadah": "الاستحاضة",
 
-    "solat":
-        "الصلاة",
+    "qunut": "القنوت",
+    "qunut subuh": "القنوت في صلاة الصبح",
 
-    "sembahyang":
-        "الصلاة",
+    "solat subuh": "صلاة الصبح",
+    "solat jumaat": "صلاة الجمعة",
+    "jumaat": "صلاة الجمعة",
 
-    "wuduk":
-        "الوضوء",
+    "azan": "الأذان",
+    "iqamah": "الإقامة",
 
-    "wudhu":
-        "الوضوء",
+    "nikah": "النكاح",
+    "perkahwinan": "النكاح",
 
-    "ambil wuduk":
-        "الوضوء",
+    "talak": "الطلاق",
+    "cerai": "الطلاق",
 
-    "taharah":
-        "الطهارة",
+    "faraid": "الفرائض",
+    "pusaka": "المواريث",
 
-    "bersuci":
-        "الطهارة",
+    "haji": "الحج",
+    "umrah": "العمرة",
 
-    "tayamum":
-        "التيمم",
+    "korban": "الأضحية",
+    "akikah": "العقيقة",
+    "sembelihan": "الذبائح",
 
-    "mandi wajib":
-        "الغسل",
+    "najis": "النجاسة",
+    "aurat": "العورة",
 
-    "mandi junub":
-        "غسل الجنابة",
+    "mahar": "المهر",
+    "mas kahwin": "المهر",
 
-    "mandi selepas haid":
-        "غسل الحيض",
+    "jual beli": "البيع",
+    "riba": "الربا",
 
-    "mandi selepas nifas":
-        "غسل النفاس",
+    "hutang": "الدين",
+    "pinjaman": "القرض",
 
-    "mandi haid":
-        "غسل الحيض",
+    "wakaf": "الوقف",
+    "nazar": "النذر",
+    "sumpah": "اليمين",
 
-    "mandi nifas":
-        "غسل النفاس",
-
-    "junub":
-        "الجنابة",
-
-    "haid":
-        "الحيض",
-
-    "nifas":
-        "النفاس",
-
-    "istihadah":
-        "الاستحاضة",
-
-    "qunut":
-        "القنوت",
-
-    "qunut subuh":
-        "القنوت في صلاة الصبح",
-
-    "solat subuh":
-        "صلاة الصبح",
-
-    "solat jumaat":
-        "صلاة الجمعة",
-
-    "jumaat":
-        "صلاة الجمعة",
-
-    "azan":
-        "الأذان",
-
-    "azaan":
-        "الأذان",
-
-    "iqamah":
-        "الإقامة",
-
-    "nikah":
-        "النكاح",
-
-    "perkahwinan":
-        "النكاح",
-
-    "talak":
-        "الطلاق",
-
-    "cerai":
-        "الطلاق",
-
-    "faraid":
-        "الفرائض",
-
-    "pusaka":
-        "المواريث",
-
-    "haji":
-        "الحج",
-
-    "umrah":
-        "العمرة",
-
-    "korban":
-        "الأضحية",
-
-    "akikah":
-        "العقيقة",
-
-    "sembelihan":
-        "الذبائح",
-
-    "najis":
-        "النجاسة",
-
-    "aurat":
-        "العورة",
-
-    "mahar":
-        "المهر",
-
-    "mas kahwin":
-        "المهر",
-
-    "jual beli":
-        "البيع",
-
-    "riba":
-        "الربا",
-
-    "hutang":
-        "الدين",
-
-    "pinjaman":
-        "القرض",
-
-    "wakaf":
-        "الوقف",
-
-    "nazar":
-        "النذر",
-
-    "sumpah":
-        "اليمين",
-
-    "kaffarah":
-        "الكفارة",
-
-    "kafarah":
-        "الكفارة",
+    "kaffarah": "الكفارة",
+    "kafarah": "الكفارة",
 }
 
 
-def apply_query_map(question):
+# =========================================================
+# QUERY MAP
+# =========================================================
 
-    q = normalize_question(
-        question
-    )
+def apply_query_map(query: str) -> str:
+    original = str(query or "").strip()
 
-    lower = q.lower()
+    if not original:
+        return ""
 
-    matches = []
+    lower = original.lower()
 
-    for malay, arabic in sorted(
-        QUERY_MAP.items(),
-        key=lambda x: len(x[0]),
-        reverse=True
+    if lower in QUERY_MAP:
+        return QUERY_MAP[lower]
+
+    for key in sorted(
+        QUERY_MAP.keys(),
+        key=len,
+        reverse=True,
     ):
+        if key in lower:
+            return (
+                f"{QUERY_MAP[key]} {original}"
+            ).strip()
 
-        if malay in lower:
-
-            matches.append(
-                arabic
-            )
-
-    unique = []
-
-    for item in matches:
-
-        if item not in unique:
-
-            unique.append(item)
-
-    return " ".join(
-        unique[:5]
-    )
+    return original
 
 
-# ============================================================
-# MAZHAB COMPARISON
-# ============================================================
+# =========================================================
+# MADHHAB COMPARISON
+# =========================================================
 
 def is_madhhab_comparison(
-    question
-):
+    query: str,
+) -> bool:
 
-    q = normalize_question(
-        question
-    ).lower()
+    q = str(query or "").lower()
 
-    explicit_phrases = [
-
-        "bandingkan",
-
+    comparison_phrases = [
         "banding mazhab",
-
-        "bandingkan mazhab",
-
-        "perbandingan",
-
-        "perbezaan antara",
-
+        "perbandingan mazhab",
+        "beza mazhab",
         "perbezaan mazhab",
-
-        "beza antara",
-
-        "bezanya antara",
-
-        "berbeza antara",
-
-        "keempat-empat mazhab",
-
-        "empat mazhab",
-
+        "mazhab mana",
         "semua mazhab",
-
         "4 mazhab",
-
-        "four madhhabs",
-
-        "compare madhhab",
-
-        "compare madhhabs",
-
-        "madhhab comparison",
-
-        "comparison",
-
-        "قارن",
-
-        "مقارنة",
-
-        "الفرق بين",
-
-        "المذاهب الأربعة",
+        "empat mazhab",
+        "hanafi dan syafie",
+        "hanafi dan maliki",
+        "hanafi dan hanbali",
+        "syafie dan maliki",
+        "syafie dan hanbali",
+        "maliki dan hanbali",
     ]
 
     if any(
         phrase in q
-        for phrase in explicit_phrases
+        for phrase in comparison_phrases
     ):
         return True
 
-    madhhab_patterns = [
-
-        r"\bsyafie\b",
-
-        r"\bsyafi['’]i\b",
-
-        r"\bhanafi\b",
-
-        r"\bmaliki\b",
-
-        r"\bhanbali\b",
-
-        r"الشافعية",
-
-        r"الحنفية",
-
-        r"المالكية",
-
-        r"الحنابلة",
+    madhhabs = [
+        "hanafi",
+        "maliki",
+        "syafie",
+        "syafi'i",
+        "syafii",
+        "hanbali",
     ]
 
-    count = sum(
-        bool(
-            re.search(
-                pattern,
-                q
-            )
-        )
-        for pattern in madhhab_patterns
-    )
-
-    return count >= 2
-
-
-# ============================================================
-# GEMINI
-# ============================================================
-
-def is_retryable_error(
-    exc
-):
-
-    text = str(
-        exc
-    ).lower()
-
-    retry_words = [
-
-        "503",
-
-        "429",
-
-        "resource exhausted",
-
-        "unavailable",
-
-        "overloaded",
-
-        "deadline",
-
-        "timeout",
-
-        "temporarily",
-
-        "internal error",
+    found = [
+        m
+        for m in madhhabs
+        if m in q
     ]
 
-    return any(
-        word in text
-        for word in retry_words
-    )
+    return len(found) >= 2
 
+
+# =========================================================
+# GEMINI GENERATE
+# =========================================================
 
 def gemini_generate(
-    prompt,
-    model=None,
-    temperature=0.2,
-):
+    prompt: str,
+    model: str | None = None,
+) -> str:
 
-    if not client:
+    global client
 
+    if client is None:
         raise RuntimeError(
-            "GOOGLE_API_KEY tidak tersedia."
+            "Gemini client tidak tersedia."
         )
 
     selected_model = (
@@ -555,107 +295,113 @@ def gemini_generate(
 
     last_error = None
 
-    for attempt in range(
-        GEMINI_RETRIES + 1
+    models = [selected_model]
+
+    if (
+        FALLBACK_LLM_MODEL
+        and FALLBACK_LLM_MODEL
+        != selected_model
     ):
+        models.append(
+            FALLBACK_LLM_MODEL
+        )
 
-        try:
+    for current_model in models:
 
-            response = (
-                client.models.generate_content(
-                    model=selected_model,
+        for attempt in range(
+            GEMINI_RETRIES + 1
+        ):
+
+            try:
+
+                response = client.models.generate_content(
+                    model=current_model,
                     contents=prompt,
                     config=types.GenerateContentConfig(
-                        temperature=temperature
+                        temperature=0.1,
+                    ),
+                )
+
+                text = (
+                    getattr(
+                        response,
+                        "text",
+                        None,
                     )
+                    or ""
+                ).strip()
+
+                if text:
+                    return text
+
+                raise RuntimeError(
+                    "Gemini menghasilkan response kosong."
                 )
-            )
 
-            text = getattr(
-                response,
-                "text",
-                None
-            )
+            except Exception as e:
 
-            if text:
+                last_error = e
 
-                return text.strip()
-
-            raise RuntimeError(
-                "Gemini tidak mengembalikan teks."
-            )
-
-        except Exception as exc:
-
-            last_error = exc
-
-            if (
-                attempt >= GEMINI_RETRIES
-                or not is_retryable_error(
-                    exc
+                print(
+                    f"⚠️ GEMINI ERROR "
+                    f"[{current_model}] "
+                    f"attempt={attempt + 1}: "
+                    f"{e}"
                 )
-            ):
 
-                break
+                if attempt < GEMINI_RETRIES:
+                    wait = (
+                        GEMINI_INITIAL_WAIT
+                        * (2 ** attempt)
+                    )
 
-            wait = (
-                GEMINI_INITIAL_WAIT
-                * (2 ** attempt)
-            )
+                    time.sleep(wait)
 
-            print(
-                f"⚠️ Gemini retry "
-                f"{attempt + 1} "
-                f"tunggu {wait}s"
-            )
-
-            time.sleep(
-                wait
-            )
-
-    raise last_error
+    raise RuntimeError(
+        f"Gemini gagal: {last_error}"
+    )
 
 
-# ============================================================
-# ARABIC QUERY
-# ============================================================
+# =========================================================
+# TRANSLATE TO ARABIC
+# =========================================================
 
 def translate_to_arabic(
-    question
-):
+    question: str,
+) -> str:
 
     mapped = apply_query_map(
         question
     )
 
     prompt = f"""
-Anda ialah pembantu penyelidikan kitab fiqh Arab.
+Anda ialah enjin carian fiqh untuk kitab Turath.
 
-Tukarkan soalan Bahasa Melayu kepada query carian
-Bahasa Arab yang sesuai untuk kitab turath.
+Soalan pengguna dalam Bahasa Melayu:
 
-Soalan:
 {question}
 
-Istilah fiqh:
-{mapped or "(tiada)"}
+Kata kunci Turath yang telah dipetakan:
 
-Peraturan:
-1. Hanya keluarkan query Bahasa Arab.
-2. Jangan jawab soalan.
-3. Jangan beri penerangan.
-4. Gunakan istilah fiqh klasik.
-5. Jika berkaitan mazhab tertentu, masukkan nama mazhab.
-6. Qunut Subuh:
-   القنوت في صلاة الصبح
-7. Mandi wajib:
-   الغسل
-8. Mandi junub:
-   غسل الجنابة
-9. Mandi selepas haid:
-   غسل الحيض
-10. Mandi selepas nifas:
-   غسل النفاس
+{mapped}
+
+Tugas:
+Tukarkan soalan kepada query Bahasa Arab yang
+ringkas dan sangat sesuai untuk carian kitab fiqh.
+
+Jangan jawab soalan.
+Jangan beri penerangan.
+Hanya keluarkan query Bahasa Arab.
+
+Contoh:
+"apa hukum qunut subuh"
+→ القنوت في صلاة الصبح
+
+"mandi wajib selepas haid"
+→ غسل الحيض
+
+"cara mandi wajib"
+→ صفة الغسل
 """
 
     try:
@@ -663,73 +409,50 @@ Peraturan:
         result = gemini_generate(
             prompt,
             model=ARABIC_QUERY_MODEL,
-            temperature=0.1,
         )
 
-        result = result.strip()
+        return result.strip()
 
-        result = re.sub(
-            r"^```(?:arabic)?",
-            "",
-            result,
-            flags=re.I
-        )
-
-        result = re.sub(
-            r"```$",
-            "",
-            result
-        )
-
-        result = result.strip()
-
-        if mapped:
-
-            return (
-                f"{result} {mapped}"
-            )
-
-        return result
-
-    except Exception as exc:
+    except Exception as e:
 
         print(
-            f"⚠️ Gagal translate Arab: {exc}"
+            "⚠️ Arabic translation gagal:",
+            e,
         )
 
-        return (
-            mapped
-            or question
-        )
+        return mapped
 
 
-# ============================================================
-# TURATH
-# ============================================================
+# =========================================================
+# TURATH SEARCH
+# =========================================================
 
 def turath_search(
-    query,
-    comparison=False
+    question: str,
+    comparison: bool = False,
 ):
 
-    url = (
-        f"{TURATH_SERVICE_URL}/search"
+    arabic_query = translate_to_arabic(
+        question
     )
 
-    payload = {
+    print(
+        f"🔎 TURATH QUERY: {arabic_query}"
+    )
 
-        "query":
-            query,
-
-        "comparison":
-            comparison,
+    params = {
+        "q": arabic_query,
+        "query": arabic_query,
     }
+
+    if comparison:
+        params["comparison"] = "true"
 
     try:
 
-        response = requests.post(
-            url,
-            json=payload,
+        response = requests.get(
+            f"{TURATH_SERVICE_URL}/search",
+            params=params,
             timeout=60,
         )
 
@@ -740,676 +463,648 @@ def turath_search(
 
         response.raise_for_status()
 
-        return response.json()
+        data = response.json()
 
-    except Exception as exc:
+    except Exception as e:
 
         print(
-            f"❌ TURATH ERROR: {exc}"
+            "❌ TURATH SEARCH ERROR:",
+            e,
         )
 
-        return {
-            "results": [],
-            "error": str(exc)
-        }
+        return []
 
 
-# ============================================================
-# SOURCE HELPERS
-# ============================================================
+    # -----------------------------------------------------
+    # DEBUG
+    # -----------------------------------------------------
 
-def clean_text(
-    value
-):
+    try:
+        print(
+            "🧪 TURATH RESPONSE KEYS:",
+            list(data.keys())
+            if isinstance(data, dict)
+            else type(data),
+        )
 
-    if value is None:
-
-        return ""
-
-    if isinstance(
-        value,
-        (dict, list)
-    ):
-
-        try:
-
-            return json.dumps(
-                value,
-                ensure_ascii=False
-            )
-
-        except Exception:
-
-            return str(value)
-
-    return str(
-        value
-    ).strip()
+    except Exception:
+        pass
 
 
-def recursive_find(
+    # -----------------------------------------------------
+    # SUPPORT SEMUA FORMAT
+    # -----------------------------------------------------
+
+    sources = []
+
+    if isinstance(data, list):
+
+        sources = data
+
+    elif isinstance(data, dict):
+
+        candidates = [
+            data.get("results"),
+            data.get("sources"),
+            data.get("data"),
+            data.get("items"),
+            data.get("hits"),
+        ]
+
+        for candidate in candidates:
+
+            if isinstance(
+                candidate,
+                list,
+            ):
+                sources = candidate
+                break
+
+            if (
+                isinstance(candidate, dict)
+                and isinstance(
+                    candidate.get("results"),
+                    list,
+                )
+            ):
+                sources = candidate[
+                    "results"
+                ]
+                break
+
+
+    print(
+        f"📚 TURATH SOURCES: "
+        f"{len(sources)}"
+    )
+
+
+    # -----------------------------------------------------
+    # NORMALIZE
+    # -----------------------------------------------------
+
+    normalized = normalize_sources(
+        sources
+    )
+
+    print(
+        f"📚 TURATH NORMALIZED: "
+        f"{len(normalized)}"
+    )
+
+    return normalized
+
+
+# =========================================================
+# SAFE VALUE
+# =========================================================
+
+def first_value(
     obj,
     keys,
-    depth=0,
-    max_depth=5
 ):
 
-    if depth > max_depth:
-
+    if not isinstance(
+        obj,
+        dict,
+    ):
         return None
 
-    if isinstance(
-        obj,
-        dict
-    ):
+    for key in keys:
 
-        for key in keys:
+        value = obj.get(key)
 
-            if key in obj:
-
-                value = obj[key]
-
-                if value not in (
-                    None,
-                    "",
-                    [],
-                    {}
-                ):
-
-                    return value
-
-        for value in obj.values():
-
-            found = recursive_find(
-                value,
-                keys,
-                depth + 1,
-                max_depth
-            )
-
-            if found not in (
-                None,
-                "",
-                [],
-                {}
-            ):
-
-                return found
-
-    elif isinstance(
-        obj,
-        list
-    ):
-
-        for value in obj:
-
-            found = recursive_find(
-                value,
-                keys,
-                depth + 1,
-                max_depth
-            )
-
-            if found not in (
-                None,
-                "",
-                [],
-                {}
-            ):
-
-                return found
+        if value not in (
+            None,
+            "",
+        ):
+            return value
 
     return None
 
 
-def extract_source(
-    raw
-):
-
-    text = recursive_find(
-        raw,
-        [
-            "text",
-            "content",
-            "snippet",
-            "passage",
-            "body",
-            "excerpt"
-        ]
-    )
-
-    book = recursive_find(
-        raw,
-        [
-            "book",
-            "book_name",
-            "bookName",
-            "title",
-            "book_title",
-            "bookTitle"
-        ]
-    )
-
-    author = recursive_find(
-        raw,
-        [
-            "author",
-            "author_name",
-            "authorName",
-            "writer"
-        ]
-    )
-
-    page = recursive_find(
-        raw,
-        [
-            "page",
-            "page_number",
-            "pageNumber",
-            "page_no",
-            "pageNo"
-        ]
-    )
-
-    url = recursive_find(
-        raw,
-        [
-            "url",
-            "link",
-            "href",
-            "book_url",
-            "bookUrl"
-        ]
-    )
-
-    source_id = recursive_find(
-        raw,
-        [
-            "id",
-            "source_id",
-            "sourceId",
-            "result_id"
-        ]
-    )
-
-    book_id = recursive_find(
-        raw,
-        [
-            "book_id",
-            "bookId",
-            "bookID"
-        ]
-    )
-
-    category = recursive_find(
-        raw,
-        [
-            "category",
-            "madhhab",
-            "mazhab"
-        ]
-    )
-
-    return {
-
-        "text":
-            clean_text(text),
-
-        "book":
-            clean_text(book),
-
-        "author":
-            clean_text(author),
-
-        "page":
-            clean_text(page),
-
-        "url":
-            clean_text(url),
-
-        "id":
-            clean_text(source_id),
-
-        "book_id":
-            clean_text(book_id),
-
-        "category":
-            clean_text(category),
-
-        "raw":
-            raw,
-    }
-
+# =========================================================
+# NORMALIZE SOURCES
+# =========================================================
 
 def normalize_sources(
-    data
+    sources,
 ):
 
-    if not isinstance(
-        data,
-        dict
-    ):
-
-        return []
-
-    raw_results = (
-        data.get("results")
-        or data.get("data")
-        or data.get("items")
-        or []
-    )
-
-    if isinstance(
-        raw_results,
-        dict
-    ):
-
-        raw_results = (
-            raw_results.get("results")
-            or raw_results.get("items")
-            or []
-        )
+    result = []
 
     if not isinstance(
-        raw_results,
-        list
+        sources,
+        list,
     ):
+        return result
 
-        raw_results = []
 
-    sources = []
+    for item in sources:
 
-    for raw in raw_results:
-
-        source = extract_source(
-            raw
-        )
-
-        if not source["text"]:
-
+        if not isinstance(
+            item,
+            dict,
+        ):
             continue
 
-        text = source["text"]
 
-        if len(text) > SOURCE_MAX_CHARS:
+        # -------------------------------------------------
+        # TEXT
+        # -------------------------------------------------
 
-            text = (
-                text[:SOURCE_MAX_CHARS]
-                + "..."
-            )
-
-        source["text"] = text
-
-        sources.append(
-            source
+        text = first_value(
+            item,
+            [
+                "text",
+                "content",
+                "body",
+                "snippet",
+                "passage",
+                "description",
+            ],
         )
 
-    return sources
+        if isinstance(
+            text,
+            dict,
+        ):
+            text = first_value(
+                text,
+                [
+                    "text",
+                    "content",
+                    "body",
+                ],
+            )
+
+        if isinstance(
+            text,
+            list,
+        ):
+            text = "\n".join(
+                str(x)
+                for x in text
+                if x
+            )
+
+        text = str(
+            text or ""
+        ).strip()
 
 
-# ============================================================
+        # -------------------------------------------------
+        # BOOK
+        # -------------------------------------------------
+
+        book = first_value(
+            item,
+            [
+                "book",
+                "book_title",
+                "bookTitle",
+                "book_name",
+                "bookName",
+                "title_book",
+            ],
+        )
+
+        if isinstance(
+            book,
+            dict,
+        ):
+            book = first_value(
+                book,
+                [
+                    "title",
+                    "name",
+                    "book_title",
+                ],
+            )
+
+        book = str(
+            book or ""
+        ).strip()
+
+
+        # -------------------------------------------------
+        # AUTHOR
+        # -------------------------------------------------
+
+        author = first_value(
+            item,
+            [
+                "author",
+                "author_name",
+                "authorName",
+                "writer",
+            ],
+        )
+
+        if isinstance(
+            author,
+            dict,
+        ):
+            author = first_value(
+                author,
+                [
+                    "name",
+                    "title",
+                    "author",
+                ],
+            )
+
+        author = str(
+            author or ""
+        ).strip()
+
+
+        # -------------------------------------------------
+        # PAGE
+        # -------------------------------------------------
+
+        page = first_value(
+            item,
+            [
+                "page",
+                "page_number",
+                "pageNumber",
+                "pageno",
+                "pageNo",
+            ],
+        )
+
+
+        # -------------------------------------------------
+        # BOOK ID
+        # -------------------------------------------------
+
+        book_id = first_value(
+            item,
+            [
+                "book_id",
+                "bookId",
+                "bookID",
+                "bookid",
+            ],
+        )
+
+
+        # -------------------------------------------------
+        # URL
+        # -------------------------------------------------
+
+        url = first_value(
+            item,
+            [
+                "url",
+                "link",
+                "href",
+                "source_url",
+                "sourceUrl",
+            ],
+        )
+
+        url = str(
+            url or ""
+        ).strip()
+
+
+        # -------------------------------------------------
+        # CATEGORY
+        # -------------------------------------------------
+
+        category = first_value(
+            item,
+            [
+                "category",
+                "madhhab",
+                "mazhab",
+            ],
+        )
+
+        category = str(
+            category or ""
+        ).strip()
+
+
+        # -------------------------------------------------
+        # IF NO TEXT, SKIP
+        # -------------------------------------------------
+
+        if not text:
+
+            # cuba nested result
+            nested = item.get(
+                "result"
+            )
+
+            if isinstance(
+                nested,
+                dict,
+            ):
+                text = str(
+                    first_value(
+                        nested,
+                        [
+                            "text",
+                            "content",
+                            "body",
+                            "snippet",
+                        ],
+                    )
+                    or ""
+                ).strip()
+
+        if not text:
+            continue
+
+
+        # -------------------------------------------------
+        # LIMIT SOURCE
+        # -------------------------------------------------
+
+        if len(text) > SOURCE_MAX_CHARS:
+            text = text[
+                :SOURCE_MAX_CHARS
+            ]
+
+
+        result.append(
+            {
+                "text": text,
+                "book": book
+                or "Kitab tidak diketahui",
+                "author": author
+                or "Pengarang tidak diketahui",
+                "page": page,
+                "book_id": book_id,
+                "url": url,
+                "category": category,
+            }
+        )
+
+
+    return result
+
+
+# =========================================================
 # RELEVANCE
-# ============================================================
+# =========================================================
 
 def relevance_score(
+    source,
     question,
-    source
 ):
 
-    q = normalize_question(
-        question
+    text = (
+        source.get("text")
+        or ""
     ).lower()
 
-    text = (
-        source.get(
-            "text",
-            ""
-        ).lower()
-    )
-
-    if not text:
-
-        return 0
+    q = str(
+        question or ""
+    ).lower()
 
     score = 0
 
     words = re.findall(
-        r"[\w\u0600-\u06ff]+",
-        q
+        r"[\w\u0600-\u06FF]+",
+        q,
     )
-
-    stopwords = {
-        "apa",
-        "yang",
-        "dan",
-        "atau",
-        "di",
-        "ke",
-        "dalam",
-        "itu",
-        "ini",
-        "adakah",
-        "bolehkah",
-        "bagaimana",
-        "menurut",
-        "hukum",
-        "saya",
-        "nak",
-        "mahu",
-        "untuk",
-        "dengan",
-    }
 
     for word in words:
 
-        if (
-            len(word) >= 3
-            and word not in stopwords
-        ):
-
-            if word in text:
-
-                score += 2
-
-    mapped = apply_query_map(
-        question
-    ).lower()
-
-    for term in mapped.split():
-
-        if (
-            len(term) >= 3
-            and term in text
-        ):
-
-            score += 3
+        if len(word) >= 3 and word in text:
+            score += 1
 
     return score
 
 
 def rank_sources(
-    question,
     sources,
-    limit=10
+    question,
 ):
 
-    scored = []
-
-    for index, source in enumerate(
-        sources
-    ):
-
-        score = relevance_score(
-            question,
-            source
-        )
-
-        scored.append(
-            (
-                score,
-                index,
-                source
-            )
-        )
-
-    scored.sort(
-        key=lambda x: (
-            x[0],
-            -x[1]
-        ),
-        reverse=True
+    return sorted(
+        sources,
+        key=lambda x:
+            relevance_score(
+                x,
+                question,
+            ),
+        reverse=True,
     )
 
-    return [
-        item[2]
-        for item in scored[:limit]
-    ]
 
-
-# ============================================================
-# CONTEXT
-# ============================================================
+# =========================================================
+# BUILD TURATH CONTEXT
+# =========================================================
 
 def build_source_context(
-    sources
+    sources,
 ):
 
-    chunks = []
+    blocks = []
 
     total = 0
 
-    for i, source in enumerate(
+    for index, source in enumerate(
         sources,
-        start=1
+        start=1,
     ):
 
+        text = (
+            source.get("text")
+            or ""
+        )
+
         block = f"""
-SUMBER TURATH #{i}
+SUMBER TURATH #{index}
 
-Kitab:
-{source.get("book") or "Tidak diketahui"}
+KITAB:
+{source.get("book", "")}
 
-Pengarang:
-{source.get("author") or "Tidak diketahui"}
+PENGARANG:
+{source.get("author", "")}
 
-Halaman:
-{source.get("page") or "Tidak diketahui"}
+HALAMAN:
+{source.get("page", "Tidak diketahui")}
 
-Mazhab/Kategori:
-{source.get("category") or "Tidak diketahui"}
+BOOK ID:
+{source.get("book_id", "")}
 
-Book ID:
-{source.get("book_id") or "Tidak diketahui"}
+KATEGORI:
+{source.get("category", "")}
 
 URL:
-{source.get("url") or "Tidak tersedia"}
+{source.get("url", "")}
 
-Petikan:
-{source.get("text") or ""}
+TEKS:
+{text}
+
+ID SUMBER:
+[S{index}]
 """.strip()
 
         if (
             total + len(block)
             > CONTEXT_MAX_CHARS
         ):
-
             break
 
-        chunks.append(
-            block
-        )
+        blocks.append(block)
 
         total += len(block)
 
-    return (
-        "\n\n"
-        + "\n\n".join(chunks)
+    return "\n\n".join(
+        blocks
     )
 
 
-# ============================================================
-# CITATION
-# ============================================================
-
-def source_label(
-    source
-):
-
-    book = (
-        source.get("book")
-        or "Kitab tidak diketahui"
-    )
-
-    page = (
-        source.get("page")
-        or "?"
-    )
-
-    return (
-        f"*{book}*, hlm. {page}"
-    )
-
+# =========================================================
+# SOURCE TAG REPLACEMENT
+# =========================================================
 
 def replace_source_tags(
-    answer,
-    sources
+    text,
+    sources,
 ):
 
-    def repl(match):
+    if not text:
+        return text
+
+    def replace(match):
 
         number = int(
             match.group(1)
         )
 
-        if (
-            number < 1
-            or number > len(sources)
-        ):
+        index = number - 1
 
+        if index < 0 or index >= len(
+            sources
+        ):
             return ""
 
-        return (
-            "("
-            + source_label(
-                sources[number - 1]
-            )
-            + ")"
+        source = sources[index]
+
+        book = source.get(
+            "book"
+        ) or "Kitab tidak diketahui"
+
+        page = source.get(
+            "page"
         )
+
+        if page:
+            return (
+                f"*{book}*, "
+                f"hlm. {page}"
+            )
+
+        return f"*{book}*"
 
     return re.sub(
         r"\[S(\d+)\]",
-        repl,
-        answer,
-        flags=re.I
+        replace,
+        text,
     )
 
 
-# ============================================================
+# =========================================================
 # CLEAN ANSWER
-# ============================================================
+# =========================================================
 
 def clean_answer(
-    text
+    text,
 ):
 
     if not text:
-
         return ""
 
     text = text.strip()
 
     text = re.sub(
-        r"^```(?:markdown|text)?",
+        r"```(?:text|markdown)?",
         "",
         text,
-        flags=re.I
+        flags=re.IGNORECASE,
     )
 
-    text = re.sub(
-        r"```$",
+    text = text.replace(
+        "```",
         "",
-        text
     )
 
-    text = text.strip()
-
-    text = re.split(
-        r"📚\s*\**RUJUKAN TURATH\**",
-        text,
-        flags=re.I
-    )[0].strip()
-
+    # Buang rujukan buatan Gemini.
+    # Rujukan sebenar dibina Python.
     text = re.sub(
-        r"\[([^\]]+)\]\((https?://[^)]+)\)",
-        r"\1",
-        text
+        r"📚\s*RUJUKAN TURATH.*",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
-    return text
+    return text.strip()
 
 
-# ============================================================
-# REFERENCES
-# ============================================================
+# =========================================================
+# BUILD REFERENCES
+# =========================================================
 
 def build_references(
     sources,
-    cited_sources
 ):
 
     if not sources:
-
-        return ""
+        return (
+            "📚 RUJUKAN TURATH\n\n"
+            "• Tiada rujukan ditemui."
+        )
 
     lines = [
-        "📚 **RUJUKAN TURATH**",
-        ""
+        "📚 RUJUKAN TURATH",
+        "",
     ]
 
-    for i, source in enumerate(
+    for index, source in enumerate(
         sources,
-        start=1
+        start=1,
     ):
 
-        book = (
-            source.get("book")
-            or "Kitab tidak diketahui"
+        book = source.get(
+            "book"
+        ) or "Kitab tidak diketahui"
+
+        author = source.get(
+            "author"
+        ) or "Pengarang tidak diketahui"
+
+        page = source.get(
+            "page"
         )
 
-        author = (
-            source.get("author")
-            or "Pengarang tidak diketahui"
-        )
-
-        page = (
-            source.get("page")
-            or "Tidak dinyatakan"
-        )
-
-        url = (
-            source.get("url")
-            or ""
+        url = source.get(
+            "url"
         )
 
         lines.append(
-            f"{i}. **{book}**"
+            f"{index}. {book}"
         )
 
         lines.append(
             f"   ✍️ {author}"
         )
 
-        lines.append(
-            f"   📄 Hlm. {page}"
-        )
+        if page:
+            lines.append(
+                f"   📄 Hlm. {page}"
+            )
 
         if url:
-
             lines.append(
                 f"   🔗 {url}"
-            )
-
-        else:
-
-            lines.append(
-                "   🔗 Link tidak tersedia"
-            )
-
-        lines.append("")
-
-        if i in cited_sources:
-
-            lines.append(
-                "   ➤ Dirujuk untuk: "
-                "pernyataan yang berkaitan "
-                "dalam jawapan."
-            )
-
-        else:
-
-            lines.append(
-                "   ➤ Sumber berkaitan "
-                "yang ditemukan."
             )
 
         lines.append("")
@@ -1419,517 +1114,360 @@ def build_references(
     ).strip()
 
 
-# ============================================================
-# GEMINI FIQH
-# ============================================================
+# =========================================================
+# GENERATE FIQH ANSWER
+# =========================================================
 
 def generate_fiqh_answer(
     question,
     sources,
-    comparison=False
+    comparison=False,
 ):
 
     if not sources:
 
         return (
-            "⚠️ Tiada kandungan sumber yang "
-            "mencukupi untuk menghasilkan huraian."
+            "⚠️ Tiada kandungan sumber "
+            "yang mencukupi untuk "
+            "menghasilkan huraian."
         )
+
 
     context = build_source_context(
         sources
     )
 
+    comparison_instruction = ""
+
     if comparison:
 
-        mode_instruction = """
-SOALAN MEMINTA PERBANDINGAN MAZHAB.
+        comparison_instruction = """
+SOALAN INI MEMINTA PERBANDINGAN MAZHAB.
 
-Bandingkan hanya berdasarkan sumber yang diberikan.
+Jika sumber benar-benar menunjukkan
+perbezaan pandangan, jelaskan perbezaan
+antara mazhab berdasarkan sumber.
 
-Jangan masukkan pandangan yang tidak terdapat dalam
+Jangan cipta perbezaan yang tiada dalam
 sumber.
-
-Jika sumber sesuatu mazhab tidak mencukupi, nyatakan
-bahawa maklumat tersebut tidak ditemukan.
 """
 
-    else:
-
-        mode_instruction = """
-SOALAN BUKAN PERBANDINGAN MAZHAB.
-
-Utamakan pandangan mazhab Syafie.
-
-Jangan masukkan pandangan mazhab lain kecuali
-benar-benar diperlukan dan disokong oleh sumber.
-"""
 
     prompt = f"""
-Anda ialah penyelidik fiqh Islam.
+Anda ialah pembantu fiqh Bahasa Melayu
+yang menggunakan kitab Turath sebagai
+satu-satunya sumber hukum.
 
-Jawapan WAJIB berdasarkan petikan kitab Turath
-yang diberikan sahaja.
+SOALAN PENGGUNA:
 
-SOALAN:
 {question}
 
-{mode_instruction}
 
 SUMBER TURATH:
+
 {context}
 
-==================================================
-PERATURAN
-==================================================
 
-1. Jangan gunakan sumber luar.
-2. Jangan reka nama kitab.
-3. Jangan reka pengarang.
-4. Jangan reka halaman.
-5. Jangan reka URL.
-6. Jangan reka hukum.
-7. Jangan masukkan fakta yang tidak disokong.
-8. Jika ada khilaf, hanya gunakan khilaf yang disokong.
-9. Jika tiada khilaf, jangan buat bahagian khilaf.
-10. Jangan tulis senarai rujukan sendiri.
-11. Jangan tulis URL sendiri.
+PERATURAN PALING PENTING:
 
-==================================================
-CITATION
-==================================================
+1. Hanya gunakan maklumat yang terdapat
+   dalam SUMBER TURATH.
 
-Setiap fakta penting mesti mempunyai citation:
+2. Jangan gunakan pengetahuan luar.
 
-[S1]
-[S2]
-[S3]
+3. Jangan reka nama kitab.
 
-Citation mesti berdasarkan sumber yang sebenar.
+4. Jangan reka nama pengarang.
 
-Contoh:
+5. Jangan reka nombor halaman.
 
-Menurut kitab tersebut, qunut Subuh merupakan
-sunat ab'ad dalam mazhab Syafie. [S1]
+6. Jangan reka URL.
 
-Jika dua sumber menyokong:
+7. Jika maklumat tidak mencukupi,
+   nyatakan bahawa sumber tidak mencukupi.
 
-Perkara tersebut turut disebut oleh ulama lain. [S1] [S3]
+8. Setiap dakwaan penting dalam HURAIAN
+   mesti disokong dengan [S1], [S2],
+   [S3] dan sebagainya.
 
-Jangan tulis nama kitab atau halaman selepas citation.
-Sistem akan memasukkannya sendiri.
+9. Jangan tulis [S99] atau ID sumber
+   yang tidak wujud.
 
-==================================================
-FORMAT
-==================================================
+10. Jangan buat bahagian RUJUKAN TURATH.
+    Bahagian itu akan dibuat oleh sistem.
 
-📖 **JAWAPAN**
+11. Jika sumber hanya daripada mazhab
+    Syafie, jangan mendakwa pandangan
+    mazhab lain kecuali sumber memang
+    menyebutnya.
 
-Berikan hukum paling penting dahulu.
+12. Bezakan antara hukum, syarat,
+    sunat, makruh, batal dan sebagainya
+    dengan tepat berdasarkan sumber.
 
-📚 **HURAIAN**
 
-Terangkan hukum dalam perenggan yang kemas.
+FORMAT JAWAPAN:
 
-Masukkan citation terus selepas kenyataan:
+📖 JAWAPAN
 
-... [S1]
+Berikan hukum paling penting
+secara terus dan ringkas.
 
-... [S2]
+📚 HURAIAN
 
-🔹 **PERINCIAN**
+Terangkan hukum berdasarkan sumber
+Turath.
 
-1. **Tajuk**
+Masukkan rujukan dalam bentuk:
+
+Menurut *[S1]*, ...
+
+atau:
+
+Perkara ini turut dihuraikan dalam
+*[S2]*.
+
+Jangan reka nama kitab kerana [S1]
+akan ditukar oleh sistem kepada nama
+kitab sebenar.
+
+
+🔹 PERINCIAN
+
+1. Poin pertama
    Huraian. [S1]
 
-2. **Tajuk**
+2. Poin kedua
    Huraian. [S2]
 
-⚖️ **PERBEZAAN PANDANGAN**
+3. Poin ketiga
+   Huraian. [S1][S3]
 
-Hanya keluarkan jika benar-benar terdapat khilaf
-yang disokong oleh sumber.
 
-Jika tiada khilaf, jangan keluarkan tajuk ini.
+⚖️ PERBEZAAN PANDANGAN
 
-==================================================
-GAYA
-==================================================
+Hanya tulis bahagian ini jika memang
+terdapat khilaf yang disokong oleh sumber.
 
-Bahasa Melayu Malaysia.
+{comparison_instruction}
 
-Kemas.
-
-Mudah difahami.
-
-Tidak terlalu panjang.
-
-Tidak mengulang.
-
-Jangan menyebut anda AI.
-
-Hanya keluarkan jawapan.
+Jangan masukkan bahagian kosong.
 """
 
-    try:
 
-        answer = gemini_generate(
-            prompt,
-            model=(
-                LLM_MODEL
-                or FALLBACK_LLM_MODEL
-            ),
-            temperature=0.15
-        )
-
-        return answer
-
-    except Exception as exc:
-
-        print(
-            f"❌ Gemini answer error: {exc}"
-        )
-
-        if FALLBACK_LLM_MODEL:
-
-            try:
-
-                return gemini_generate(
-                    prompt,
-                    model=FALLBACK_LLM_MODEL,
-                    temperature=0.15
-                )
-
-            except Exception:
-
-                pass
-
-        raise
-
-
-# ============================================================
-# MAIN ANSWER
-# ============================================================
-
-def answer_question(
-    question
-):
-
-    question = normalize_question(
-        question
-    )
-
-    if not question:
-
-        return (
-            "Sila masukkan soalan fiqh."
-        )
-
-    cached = cache_get(
-        question
-    )
-
-    if cached:
-
-        print(
-            "⚡ CACHE HIT"
-        )
-
-        return cached
-
-    print(
-        "\n=================================================="
-    )
-
-    print(
-        f"❓ SOALAN: {question}"
-    )
-
-    comparison = (
-        is_madhhab_comparison(
-            question
-        )
-    )
-
-    print(
-        f"⚖️ COMPARISON: {comparison}"
-    )
-
-    # --------------------------------------------------------
-    # ARABIC QUERY
-    # --------------------------------------------------------
-
-    arabic_query = translate_to_arabic(
-        question
-    )
-
-    print(
-        f"🔎 ARABIC QUERY: {arabic_query}"
-    )
-
-    # --------------------------------------------------------
-    # TURATH
-    # --------------------------------------------------------
-
-    data = turath_search(
-        arabic_query,
-        comparison=comparison
-    )
-
-    # --------------------------------------------------------
-    # SOURCES
-    # --------------------------------------------------------
-
-    sources = normalize_sources(
-        data
-    )
-
-    print(
-        f"📚 TURATH SOURCES: "
-        f"{len(sources)}"
-    )
-
-    if sources:
-
-        print(
-            "\n🧪 FIRST NORMALIZED SOURCE:"
-        )
-
-        print(
-            json.dumps(
-                {
-                    "book":
-                        sources[0].get("book"),
-
-                    "author":
-                        sources[0].get("author"),
-
-                    "page":
-                        sources[0].get("page"),
-
-                    "url":
-                        sources[0].get("url"),
-
-                    "book_id":
-                        sources[0].get("book_id"),
-
-                    "category":
-                        sources[0].get("category"),
-
-                    "text_preview":
-                        sources[0].get(
-                            "text",
-                            ""
-                        )[:500],
-                },
-                ensure_ascii=False,
-                indent=2
-            )
-        )
-
-    if not sources:
-
-        result = (
-            "⚠️ Tiada kandungan sumber yang "
-            "mencukupi untuk menghasilkan huraian.\n\n"
-            "📚 **Rujukan:**\n"
-            "• Tiada rujukan ditemui."
-        )
-
-        cache_set(
-            question,
-            result
-        )
-
-        return result
-
-    # --------------------------------------------------------
-    # RANK
-    # --------------------------------------------------------
-
-    sources = rank_sources(
-        question,
-        sources,
-        limit=10
-    )
-
-    # --------------------------------------------------------
-    # GEMINI ANSWER
-    # --------------------------------------------------------
-
-    raw_answer = generate_fiqh_answer(
-        question,
-        sources,
-        comparison=comparison
-    )
-
-    # --------------------------------------------------------
-    # SIMPAN SOURCE YANG DIRUJUK
-    # SEBELUM [S1] DITUKAR
-    # --------------------------------------------------------
-
-    cited_sources = set()
-
-    for match in re.finditer(
-        r"\[S(\d+)\]",
-        raw_answer,
-        flags=re.I
-    ):
-
-        number = int(
-            match.group(1)
-        )
-
-        if (
-            1 <= number <= len(sources)
-        ):
-
-            cited_sources.add(
-                number
-            )
-
-    # --------------------------------------------------------
-    # REPLACE CITATIONS
-    # --------------------------------------------------------
-
-    answer = replace_source_tags(
-        raw_answer,
-        sources
+    answer = gemini_generate(
+        prompt
     )
 
     answer = clean_answer(
         answer
     )
 
-    # --------------------------------------------------------
-    # REFERENCES
-    # --------------------------------------------------------
-
-    references = build_references(
+    answer = replace_source_tags(
+        answer,
         sources,
-        cited_sources
     )
 
-    if references:
+    return answer
 
-        final_answer = (
-            answer
-            + "\n\n"
-            + references
-        )
 
-    else:
+# =========================================================
+# ANSWER QUESTION
+# =========================================================
 
-        final_answer = answer
+def answer_question(
+    question,
+):
 
-    final_answer = re.sub(
-        r"\n{4,}",
-        "\n\n\n",
-        final_answer
+    question = str(
+        question or ""
     ).strip()
 
-    cache_set(
-        question,
-        final_answer
+    if not question:
+        return (
+            "Sila masukkan soalan fiqh."
+        )
+
+
+    comparison = is_madhhab_comparison(
+        question
     )
 
-    return final_answer
+    print("")
+    print(
+        "=============================================="
+    )
+    print(
+        f"❓ SOALAN: {question}"
+    )
+    print(
+        f"⚖️ COMPARISON: {comparison}"
+    )
 
 
-# ============================================================
-# TELEGRAM
-# ============================================================
+    sources = turath_search(
+        question,
+        comparison=comparison,
+    )
+
+
+    if not sources:
+
+        return (
+            "⚠️ Tiada kandungan sumber "
+            "yang mencukupi untuk "
+            "menghasilkan huraian.\n\n"
+            "📚 Rujukan:\n"
+            "• Tiada rujukan ditemui."
+        )
+
+
+    sources = rank_sources(
+        sources,
+        question,
+    )
+
+
+    # Maksimum 10 sumber
+    sources = sources[:10]
+
+
+    print(
+        f"📚 FINAL SOURCES: "
+        f"{len(sources)}"
+    )
+
+
+    answer = generate_fiqh_answer(
+        question,
+        sources,
+        comparison=comparison,
+    )
+
+
+    references = build_references(
+        sources
+    )
+
+
+    final_answer = (
+        f"{answer}\n\n"
+        f"{references}"
+    )
+
+
+    return final_answer.strip()
+
+
+# =========================================================
+# TELEGRAM SPLIT
+# =========================================================
 
 def split_telegram_message(
     text,
-    max_len=TELEGRAM_MAX_CHARS
+    max_length=None,
 ):
 
-    if len(text) <= max_len:
+    max_length = (
+        max_length
+        or TELEGRAM_MAX_CHARS
+    )
 
+    if len(text) <= max_length:
         return [text]
 
-    parts = []
+    chunks = []
 
-    remaining = text
+    current = ""
 
-    while len(remaining) > max_len:
+    paragraphs = text.split(
+        "\n\n"
+    )
 
-        cut = remaining.rfind(
-            "\n",
-            0,
-            max_len
+    for paragraph in paragraphs:
+
+        candidate = (
+            f"{current}\n\n{paragraph}"
+            if current
+            else paragraph
         )
 
-        if cut < int(
-            max_len * 0.5
-        ):
+        if len(candidate) <= max_length:
 
-            cut = remaining.rfind(
-                " ",
-                0,
-                max_len
-            )
+            current = candidate
 
-        if cut <= 0:
+        else:
 
-            cut = max_len
+            if current:
+                chunks.append(
+                    current
+                )
 
-        parts.append(
-            remaining[:cut].strip()
-        )
+            if len(paragraph) <= max_length:
 
-        remaining = (
-            remaining[cut:].strip()
-        )
+                current = paragraph
 
-    if remaining:
+            else:
 
-        parts.append(
-            remaining
-        )
+                start = 0
 
-    return parts
+                while start < len(
+                    paragraph
+                ):
 
+                    chunks.append(
+                        paragraph[
+                            start:start + max_length
+                        ]
+                    )
+
+                    start += max_length
+
+                current = ""
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+# =========================================================
+# TELEGRAM HANDLERS
+# =========================================================
 
 async def telegram_start(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     await update.message.reply_text(
-        "👋 Assalamualaikum.\n\n"
-        "Saya **TanyaFiqihBot**.\n\n"
-        "Tanya soalan berkaitan fiqh dan saya akan "
-        "mencari jawapan daripada sumber kitab Turath.\n\n"
-        "Contoh:\n"
-        "• Apa hukum qunut Subuh?\n"
-        "• Bagaimana cara mandi wajib?\n"
-        "• Apa hukum zakat fitrah?\n"
-        "• Bandingkan qunut antara 4 mazhab.",
-        parse_mode="Markdown"
+        "Assalamualaikum 👋\n\n"
+        "Saya TanyaFiqihBot.\n"
+        "Tanya soalan fiqh anda."
     )
 
 
 async def telegram_help(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     await update.message.reply_text(
-        "📚 **Cara menggunakan TanyaFiqihBot**\n\n"
-        "Hantar sahaja soalan fiqh anda.",
-        parse_mode="Markdown"
+        "📚 Contoh soalan:\n\n"
+        "• Apa hukum qunut Subuh?\n"
+        "• Bagaimana cara mandi wajib?\n"
+        "• Apa hukum membaca al-Fatihah di belakang imam?\n"
+        "• Apakah zakat fitrah wajib?\n\n"
+        "Saya menggunakan sumber kitab Turath."
     )
 
 
 async def telegram_message(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     if not update.message:
-
         return
 
     question = (
@@ -1938,75 +1476,67 @@ async def telegram_message(
     ).strip()
 
     if not question:
-
         return
 
-    await update.message.chat.send_action(
-        action="typing"
+    message = await update.message.reply_text(
+        "🔎 Sedang mencari dalam kitab Turath..."
     )
 
     try:
 
+        # Jalankan kerja sync dalam thread
+        # supaya event loop Telegram tidak tersekat.
         answer = await asyncio.to_thread(
             answer_question,
-            question
+            question,
         )
 
-        parts = split_telegram_message(
+        chunks = split_telegram_message(
             answer
         )
 
-        for part in parts:
+        if not chunks:
+            chunks = [
+                "⚠️ Tiada jawapan."
+            ]
 
-            try:
+        await message.edit_text(
+            chunks[0],
+            parse_mode="Markdown",
+        )
 
-                await update.message.reply_text(
-                    part,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True
-                )
+        for chunk in chunks[1:]:
 
-            except Exception as markdown_error:
+            await update.message.reply_text(
+                chunk,
+                parse_mode="Markdown",
+            )
 
-                print(
-                    "⚠️ Markdown error, "
-                    "hantar plain text:"
-                    f" {markdown_error}"
-                )
-
-                await update.message.reply_text(
-                    re.sub(
-                        r"[*_`]",
-                        "",
-                        part
-                    ),
-                    disable_web_page_preview=True
-                )
-
-    except Exception as exc:
+    except Exception as e:
 
         print(
-            f"❌ TELEGRAM ANSWER ERROR: {exc}"
+            "❌ TELEGRAM HANDLER ERROR:"
         )
 
-        await update.message.reply_text(
-            "⚠️ Maaf, berlaku masalah ketika "
-            "memproses soalan.\n\n"
-            f"Ralat: {str(exc)[:500]}"
-        )
+        traceback.print_exc()
+
+        try:
+
+            await message.edit_text(
+                "⚠️ Berlaku ralat ketika "
+                "memproses soalan."
+            )
+
+        except Exception:
+            pass
 
 
-# ============================================================
-# TELEGRAM STARTUP
-# ============================================================
-
-telegram_app = None
+# =========================================================
+# TELEGRAM WORKER
+# =========================================================
 
 telegram_thread = None
-
-telegram_started = False
-
-telegram_start_lock = threading.Lock()
+telegram_app = None
 
 
 def telegram_worker():
@@ -2016,7 +1546,7 @@ def telegram_worker():
     try:
 
         print(
-            "🤖 MEMULAKAN TELEGRAM BOT..."
+            "🚀 TELEGRAM WORKER STARTING..."
         )
 
         telegram_app = (
@@ -2028,14 +1558,14 @@ def telegram_worker():
         telegram_app.add_handler(
             CommandHandler(
                 "start",
-                telegram_start
+                telegram_start,
             )
         )
 
         telegram_app.add_handler(
             CommandHandler(
                 "help",
-                telegram_help
+                telegram_help,
             )
         )
 
@@ -2043,347 +1573,296 @@ def telegram_worker():
             MessageHandler(
                 filters.TEXT
                 & ~filters.COMMAND,
-                telegram_message
+                telegram_message,
             )
         )
 
         print(
-            "🧵 TELEGRAM THREAD STARTED"
-        )
-
-        print(
-            "✅ TELEGRAM BOT READY"
+            "✅ TELEGRAM APPLICATION READY"
         )
 
         telegram_app.run_polling(
             drop_pending_updates=True,
-            stop_signals=None
+            stop_signals=None,
         )
 
-    except Exception as exc:
+    except Exception:
 
         print(
-            f"❌ TELEGRAM START ERROR: {exc}"
+            "❌ TELEGRAM START ERROR:"
         )
+
+        traceback.print_exc()
 
 
 def start_telegram():
 
     global telegram_thread
-    global telegram_started
 
-    with telegram_start_lock:
+    if not TELEGRAM_TOKEN:
 
-        if telegram_started:
-
-            return
-
-        if not TELEGRAM_TOKEN:
-
-            print(
-                "⚠️ TELEGRAM_TOKEN tidak tersedia."
-            )
-
-            return
-
-        telegram_started = True
-
-        telegram_thread = threading.Thread(
-            target=telegram_worker,
-            daemon=True,
-            name="telegram-bot"
+        print(
+            "⚠️ TELEGRAM_TOKEN tidak tersedia."
         )
 
-        telegram_thread.start()
+        return
+
+    if (
+        telegram_thread
+        and telegram_thread.is_alive()
+    ):
+
+        print(
+            "ℹ️ Telegram thread sudah berjalan."
+        )
+
+        return
+
+    telegram_thread = threading.Thread(
+        target=telegram_worker,
+        daemon=True,
+        name="telegram-bot",
+    )
+
+    telegram_thread.start()
+
+    print(
+        "🚀 Telegram thread dilancarkan."
+    )
 
 
-# ============================================================
+# =========================================================
 # FLASK ROUTES
-# ============================================================
+# =========================================================
 
 @app.route(
     "/",
-    methods=["GET"]
+    methods=["GET"],
 )
-def home():
+def index():
 
-    return jsonify({
-        "name":
-            "TanyaFiqihBot",
-
-        "status":
-            "running",
-
-        "source":
-            "Turath",
-
-        "turath_service":
-            TURATH_SERVICE_URL
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "service": "TanyaFiqihBot",
+            "turath": TURATH_SERVICE_URL,
+        }
+    )
 
 
 @app.route(
     "/health",
-    methods=["GET"]
+    methods=["GET"],
 )
 def health():
 
-    turath_status = "unknown"
+    turath_ok = False
 
     try:
 
         response = requests.get(
             f"{TURATH_SERVICE_URL}/health",
-            timeout=10
+            timeout=5,
         )
 
-        turath_status = (
-            "ok"
-            if response.ok
-            else
-            f"http_{response.status_code}"
+        turath_ok = (
+            response.status_code == 200
         )
 
-    except Exception as exc:
+    except Exception:
+        turath_ok = False
 
-        turath_status = (
-            f"error: {str(exc)}"
-        )
 
-    return jsonify({
-
-        "status":
-            "ok",
-
-        "turath":
-            turath_status,
-
-        "telegram":
-            bool(TELEGRAM_TOKEN),
-
-        "gemini":
-            bool(GOOGLE_API_KEY),
-
-        "model":
-            LLM_MODEL
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "telegram": bool(
+                TELEGRAM_TOKEN
+            ),
+            "gemini": bool(
+                client
+            ),
+            "turath": turath_ok,
+        }
+    )
 
 
 @app.route(
     "/ask",
-    methods=["POST"]
+    methods=["GET", "POST"],
 )
 def ask():
 
-    data = (
-        request.get_json(
-            silent=True
-        )
-        or {}
-    )
-
-    question = (
-        data.get("question")
-        or data.get("q")
-        or ""
-    )
-
-    question = normalize_question(
-        question
-    )
-
-    if not question:
-
-        return jsonify({
-            "ok":
-                False,
-
-            "error":
-                "Soalan diperlukan."
-        }), 400
-
     try:
+
+        if request.method == "POST":
+
+            data = (
+                request.get_json(
+                    silent=True
+                )
+                or {}
+            )
+
+            question = (
+                data.get("question")
+                or data.get("q")
+                or ""
+            )
+
+        else:
+
+            question = (
+                request.args.get(
+                    "question"
+                )
+                or request.args.get(
+                    "q"
+                )
+                or ""
+            )
+
 
         answer = answer_question(
             question
         )
 
-        return jsonify({
-
-            "ok":
-                True,
-
-            "question":
-                question,
-
-            "answer":
-                answer
-        })
-
-    except Exception as exc:
-
-        print(
-            f"❌ /ask ERROR: {exc}"
+        return jsonify(
+            {
+                "ok": True,
+                "question": question,
+                "answer": answer,
+            }
         )
 
-        return jsonify({
+    except Exception as e:
 
-            "ok":
-                False,
+        traceback.print_exc()
 
-            "error":
-                str(exc)
-        }), 500
+        return jsonify(
+            {
+                "ok": False,
+                "error": str(e),
+            }
+        ), 500
 
 
 @app.route(
     "/search",
-    methods=["POST"]
+    methods=["GET"],
 )
 def search_route():
 
-    data = (
-        request.get_json(
-            silent=True
-        )
-        or {}
-    )
-
     query = (
-        data.get("query")
-        or data.get("q")
+        request.args.get("q")
+        or request.args.get("query")
         or ""
     )
 
-    query = normalize_question(
-        query
-    )
-
-    if not query:
-
-        return jsonify({
-            "ok":
-                False,
-
-            "error":
-                "Query diperlukan."
-        }), 400
-
-    comparison = bool(
-        data.get(
-            "comparison",
-            False
+    comparison = (
+        request.args.get(
+            "comparison"
         )
+        == "true"
     )
 
-    result = turath_search(
+    sources = turath_search(
         query,
-        comparison=comparison
+        comparison=comparison,
     )
 
     return jsonify(
-        result
+        {
+            "ok": True,
+            "query": query,
+            "count": len(sources),
+            "results": sources,
+        }
     )
 
 
 @app.route(
     "/clear-cache",
-    methods=[
-        "GET",
-        "POST"
-    ]
+    methods=["GET"],
 )
-def clear_cache_route():
+def clear_cache():
 
-    cache_clear()
-
-    return jsonify({
-
-        "ok":
-            True,
-
-        "message":
-            "Cache telah dikosongkan."
-    })
-
-
-# ============================================================
-# GUNICORN STARTUP
-# ============================================================
-
-def start_background_services():
-
-    print(
-        "=================================================="
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Tiada cache digunakan.",
+        }
     )
 
-    print(
-        "🚀 TANYAFIQIHBOT WORKER STARTING"
-    )
 
-    print(
-        f"📚 TURATH SERVICE: "
-        f"{TURATH_SERVICE_URL}"
-    )
+# =========================================================
+# START TELEGRAM
+# =========================================================
 
-    print(
-        f"🤖 GEMINI MODEL: "
-        f"{LLM_MODEL}"
-    )
+# PENTING:
+#
+# Gunicorn menggunakan:
+#
+# gunicorn app:app
+#
+# Oleh sebab itu __name__ bukan "__main__".
+#
+# Jadi Telegram mesti dimulakan ketika module
+# diimport oleh Gunicorn.
+#
+# Dockerfile kita menggunakan:
+#
+# --workers 1
+#
+# supaya hanya ada satu Telegram bot.
+#
 
-    print(
-        f"🔎 ARABIC MODEL: "
-        f"{ARABIC_QUERY_MODEL}"
-    )
+if TELEGRAM_TOKEN:
 
-    print(
-        f"📡 TELEGRAM: "
-        f"{'ON' if TELEGRAM_TOKEN else 'OFF'}"
-    )
-
-    print(
-        "=================================================="
-    )
-
-    # Telegram perlu dimulakan apabila Gunicorn
-    # mengimport app:app.
     start_telegram()
 
+else:
 
-# ============================================================
-# IMPORTANT:
-# GUNICORN IMPORTS app.py
-# ============================================================
-
-try:
-
-    start_background_services()
-
-except Exception as exc:
-
-    # Jangan biarkan masalah Telegram menyebabkan
-    # Flask/Gunicorn worker gagal boot.
     print(
-        f"⚠️ Background startup warning: {exc}"
+        "⚠️ TELEGRAM_TOKEN kosong. "
+        "Telegram bot tidak dimulakan."
     )
 
 
-# ============================================================
+# =========================================================
 # LOCAL DEVELOPMENT
-# ============================================================
+# =========================================================
 
 if __name__ == "__main__":
 
     port = int(
         os.getenv(
             "PORT",
-            "10000"
+            "10000",
         )
     )
+
+    print("")
+    print(
+        "=============================================="
+    )
+    print(
+        "🚀 TANYAFIQIHBOT STARTED"
+    )
+    print(
+        f"🌐 Flask: http://0.0.0.0:{port}"
+    )
+    print(
+        f"📚 Turath: {TURATH_SERVICE_URL}"
+    )
+    print(
+        "=============================================="
+    )
+    print("")
 
     app.run(
         host="0.0.0.0",
         port=port,
         debug=False,
-        use_reloader=False
+        use_reloader=False,
     )
