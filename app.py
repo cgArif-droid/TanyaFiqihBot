@@ -1,11 +1,9 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 import os
 import re
-import json
 import hashlib
 import threading
 import asyncio
-import time
 from pathlib import Path
 
 import requests
@@ -28,22 +26,60 @@ from google.genai import types
 
 
 # ============================================================
-# CONFIG
+# FLASK
 # ============================================================
 
 app = Flask(__name__)
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+# ============================================================
+# CONFIG
+# ============================================================
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "/var/data"))
-KITAB_DIR = Path("/app/kitab")
+GOOGLE_API_KEY = os.getenv(
+    "GOOGLE_API_KEY",
+    ""
+)
 
-OCR_WORKERS = int(os.getenv("OCR_WORKERS", "1"))
-OCR_DPI = int(os.getenv("OCR_DPI", "200"))
+TELEGRAM_TOKEN = os.getenv(
+    "TELEGRAM_TOKEN",
+    ""
+)
+
+SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    ""
+)
+
+SUPABASE_KEY = os.getenv(
+    "SUPABASE_KEY",
+    ""
+)
+
+DATA_DIR = Path(
+    os.getenv(
+        "DATA_DIR",
+        "/var/data"
+    )
+)
+
+KITAB_DIR = Path(
+    "/app/kitab"
+)
+
+OCR_WORKERS = int(
+    os.getenv(
+        "OCR_WORKERS",
+        "1"
+    )
+)
+
+OCR_DPI = int(
+    os.getenv(
+        "OCR_DPI",
+        "200"
+    )
+)
 
 LLM_MODEL = os.getenv(
     "LLM_MODEL",
@@ -63,59 +99,50 @@ TURATH_SERVICE_URL = os.getenv(
 )
 
 TURATH_SEARCH_K = int(
-    os.getenv("TURATH_SEARCH_K", "5")
+    os.getenv(
+        "TURATH_SEARCH_K",
+        "3"
+    )
 )
 
 OCR_CACHE_DIR = (
-    DATA_DIR /
-    "extracted_text" /
-    "pages"
+    DATA_DIR
+    / "extracted_text"
+    / "pages"
 )
-
-MANIFEST_FILE = DATA_DIR / "manifest.json"
 
 
 # ============================================================
-# CLIENTS
+# CACHE
+# ============================================================
+
+ANSWER_CACHE = {}
+
+MAX_CACHE_SIZE = 500
+
+
+# ============================================================
+# CLIENT
 # ============================================================
 
 gemini_client = None
+
 supabase: Client = None
 
+
 if GOOGLE_API_KEY:
+
     gemini_client = genai.Client(
         api_key=GOOGLE_API_KEY
     )
 
+
 if SUPABASE_URL and SUPABASE_KEY:
+
     supabase = create_client(
         SUPABASE_URL,
         SUPABASE_KEY
     )
-
-
-# ============================================================
-# BASIC
-# ============================================================
-
-@app.route("/")
-def home():
-    return jsonify({
-        "ok": True,
-        "service": "TanyaFiqihBot",
-        "status": "running"
-    })
-
-
-@app.route("/health")
-def health():
-    return jsonify({
-        "ok": True,
-        "service": "TanyaFiqihBot",
-        "gemini": bool(gemini_client),
-        "supabase": bool(supabase),
-        "turath": TURATH_SERVICE_URL
-    })
 
 
 # ============================================================
@@ -134,14 +161,21 @@ CATEGORIES = [
 
 
 def get_category_from_path(path: Path):
+
     try:
-        relative = path.relative_to(KITAB_DIR)
+
+        relative = path.relative_to(
+            KITAB_DIR
+        )
+
         parts = relative.parts
 
         if len(parts) >= 2:
+
             category = parts[0].upper()
 
             if category in CATEGORIES:
+
                 return category
 
     except Exception:
@@ -151,18 +185,55 @@ def get_category_from_path(path: Path):
 
 
 # ============================================================
-# HASH
+# HOME
+# ============================================================
+
+@app.route("/")
+def home():
+
+    return jsonify({
+        "ok": True,
+        "service": "TanyaFiqihBot",
+        "status": "running"
+    })
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.route("/health")
+def health():
+
+    return jsonify({
+        "ok": True,
+        "service": "TanyaFiqihBot",
+        "gemini": bool(gemini_client),
+        "supabase": bool(supabase),
+        "turath": TURATH_SERVICE_URL,
+        "llm_model": LLM_MODEL,
+        "embedding_model": EMBEDDING_MODEL
+    })
+
+
+# ============================================================
+# HASH FILE
 # ============================================================
 
 def file_hash(path: Path):
 
     h = hashlib.sha256()
 
-    with open(path, "rb") as f:
+    with open(
+        path,
+        "rb"
+    ) as f:
 
         while True:
 
-            chunk = f.read(1024 * 1024)
+            chunk = f.read(
+                1024 * 1024
+            )
 
             if not chunk:
                 break
@@ -173,7 +244,7 @@ def file_hash(path: Path):
 
 
 # ============================================================
-# TEXT CLEAN
+# CLEAN TEXT
 # ============================================================
 
 def clean_text(text):
@@ -181,7 +252,10 @@ def clean_text(text):
     if not text:
         return ""
 
-    text = text.replace("\x00", " ")
+    text = text.replace(
+        "\x00",
+        " "
+    )
 
     text = re.sub(
         r"\s+",
@@ -193,7 +267,70 @@ def clean_text(text):
 
 
 # ============================================================
-# OCR
+# QUESTION CACHE
+# ============================================================
+
+def normalize_question(question):
+
+    question = (
+        question
+        .lower()
+        .strip()
+    )
+
+    question = re.sub(
+        r"\s+",
+        " ",
+        question
+    )
+
+    question = question.rstrip(
+        "?!.,،؟"
+    )
+
+    return question
+
+
+def get_cached_answer(question):
+
+    key = normalize_question(
+        question
+    )
+
+    return ANSWER_CACHE.get(
+        key
+    )
+
+
+def save_cached_answer(
+    question,
+    answer
+):
+
+    key = normalize_question(
+        question
+    )
+
+    if not key:
+        return
+
+    if len(
+        ANSWER_CACHE
+    ) >= MAX_CACHE_SIZE:
+
+        oldest_key = next(
+            iter(ANSWER_CACHE)
+        )
+
+        del ANSWER_CACHE[
+            oldest_key
+        ]
+
+    ANSWER_CACHE[key] = answer
+
+
+# ============================================================
+# OCR PAGE
 # ============================================================
 
 def ocr_page(
@@ -203,8 +340,8 @@ def ocr_page(
 ):
 
     cache_dir = (
-        OCR_CACHE_DIR /
-        book_hash
+        OCR_CACHE_DIR
+        / book_hash
     )
 
     cache_dir.mkdir(
@@ -213,13 +350,14 @@ def ocr_page(
     )
 
     cache_file = (
-        cache_dir /
-        f"{page_number}.txt"
+        cache_dir
+        / f"{page_number}.txt"
     )
 
     if cache_file.exists():
 
         try:
+
             return cache_file.read_text(
                 encoding="utf-8"
             )
@@ -227,44 +365,58 @@ def ocr_page(
         except Exception:
             pass
 
-    images = convert_from_path(
-        str(pdf_path),
-        dpi=OCR_DPI,
-        first_page=page_number,
-        last_page=page_number
-    )
-
-    if not images:
-        return ""
-
-    image = images[0]
-
-    text = pytesseract.image_to_string(
-        image,
-        lang="ara+msa+eng"
-    )
-
-    text = clean_text(text)
-
     try:
 
-        cache_file.write_text(
-            text,
-            encoding="utf-8"
+        images = convert_from_path(
+            str(pdf_path),
+            dpi=OCR_DPI,
+            first_page=page_number,
+            last_page=page_number
         )
+
+        if not images:
+
+            return ""
+
+        image = images[0]
+
+        text = pytesseract.image_to_string(
+            image,
+            lang="ara+msa+eng"
+        )
+
+        text = clean_text(
+            text
+        )
+
+        try:
+
+            cache_file.write_text(
+                text,
+                encoding="utf-8"
+            )
+
+        except Exception as error:
+
+            print(
+                "⚠️ OCR CACHE ERROR:",
+                error
+            )
+
+        return text
 
     except Exception as error:
 
         print(
-            "⚠️ OCR CACHE ERROR:",
+            f"❌ OCR PAGE ERROR {page_number}:",
             error
         )
 
-    return text
+        return ""
 
 
 # ============================================================
-# READ PDF
+# EXTRACT PDF
 # ============================================================
 
 def extract_pdf_text(
@@ -274,7 +426,9 @@ def extract_pdf_text(
 
     try:
 
-        from pdf2image import pdfinfo_from_path
+        from pdf2image import (
+            pdfinfo_from_path
+        )
 
         info = pdfinfo_from_path(
             str(pdf_path)
@@ -305,7 +459,8 @@ def extract_pdf_text(
     ):
 
         print(
-            f"🔎 OCR PAGE {page_number}/{total_pages}"
+            f"🔎 OCR PAGE "
+            f"{page_number}/{total_pages}"
         )
 
         text = ocr_page(
@@ -325,10 +480,12 @@ def extract_pdf_text(
 
 
 # ============================================================
-# TXT / MD
+# EXTRACT TEXT FILE
 # ============================================================
 
-def extract_text_file(path: Path):
+def extract_text_file(
+    path: Path
+):
 
     try:
 
@@ -337,9 +494,12 @@ def extract_text_file(path: Path):
             errors="ignore"
         )
 
-        text = clean_text(text)
+        text = clean_text(
+            text
+        )
 
         if not text:
+
             return []
 
         return [{
@@ -397,9 +557,12 @@ def chunk_text(
     overlap=250
 ):
 
-    text = clean_text(text)
+    text = clean_text(
+        text
+    )
 
     if not text:
+
         return []
 
     chunks = []
@@ -414,12 +577,18 @@ def chunk_text(
             length
         )
 
-        chunk = text[start:end].strip()
+        chunk = text[
+            start:end
+        ].strip()
 
         if chunk:
-            chunks.append(chunk)
+
+            chunks.append(
+                chunk
+            )
 
         if end >= length:
+
             break
 
         start = max(
@@ -434,22 +603,30 @@ def chunk_text(
 # EMBEDDING
 # ============================================================
 
-def create_embedding(text):
+def create_embedding(
+    text
+):
 
     if not gemini_client:
+
         raise RuntimeError(
             "GOOGLE_API_KEY belum ditetapkan"
         )
 
-    result = gemini_client.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=text,
-        config=types.EmbedContentConfig(
-            output_dimensionality=EMBEDDING_DIM
+    result = (
+        gemini_client
+        .models
+        .embed_content(
+            model=EMBEDDING_MODEL,
+            contents=text,
+            config=types.EmbedContentConfig(
+                output_dimensionality=EMBEDDING_DIM
+            )
         )
     )
 
     if not result.embeddings:
+
         raise RuntimeError(
             "Embedding kosong"
         )
@@ -458,7 +635,7 @@ def create_embedding(text):
 
 
 # ============================================================
-# DELETE OLD SUPABASE DATA
+# DELETE SUPABASE BOOK
 # ============================================================
 
 def delete_book_from_supabase(
@@ -466,19 +643,25 @@ def delete_book_from_supabase(
 ):
 
     if not supabase:
+
         return
 
     try:
 
-        supabase.table(
-            "kitab_chunks"
-        ).delete().eq(
-            "book_hash",
-            book_hash
-        ).execute()
+        (
+            supabase
+            .table("kitab_chunks")
+            .delete()
+            .eq(
+                "book_hash",
+                book_hash
+            )
+            .execute()
+        )
 
         print(
-            f"🗑️ Supabase data deleted: {book_hash}"
+            "🗑️ Supabase data deleted:",
+            book_hash
         )
 
     except Exception as error:
@@ -500,20 +683,26 @@ def save_book_record(
 ):
 
     if not supabase:
+
         return
 
     try:
 
-        supabase.table(
-            "books"
-        ).upsert(
-            {
-                "book_hash": book_hash,
-                "kitab_name": kitab_name,
-                "category": category
-            },
-            on_conflict="book_hash"
-        ).execute()
+        data = {
+            "book_hash": book_hash,
+            "kitab_name": kitab_name,
+            "category": category
+        }
+
+        (
+            supabase
+            .table("books")
+            .upsert(
+                data,
+                on_conflict="book_hash"
+            )
+            .execute()
+        )
 
     except Exception as error:
 
@@ -538,6 +727,7 @@ def save_chunk(
 ):
 
     if not supabase:
+
         return False
 
     data = {
@@ -552,11 +742,12 @@ def save_chunk(
 
     try:
 
-        supabase.table(
-            "kitab_chunks"
-        ).insert(
-            data
-        ).execute()
+        (
+            supabase
+            .table("kitab_chunks")
+            .insert(data)
+            .execute()
+        )
 
         return True
 
@@ -574,21 +765,32 @@ def save_chunk(
 # PROCESS BOOK
 # ============================================================
 
-def process_book(path: Path):
+def process_book(
+    path: Path
+):
 
     kitab_name = path.stem
-    category = get_category_from_path(path)
+
+    category = (
+        get_category_from_path(
+            path
+        )
+    )
 
     print("")
     print("=" * 60)
+
     print(
         f"📚 PROCESS: {path.name}"
     )
+
     print(
         f"📂 CATEGORY: {category}"
     )
 
-    book_hash = file_hash(path)
+    book_hash = file_hash(
+        path
+    )
 
     print(
         f"🔑 HASH: {book_hash}"
@@ -607,8 +809,13 @@ def process_book(path: Path):
 
     for page_data in pages:
 
-        page = page_data["page"]
-        text = page_data["text"]
+        page = page_data[
+            "page"
+        ]
+
+        text = page_data[
+            "text"
+        ]
 
         page_chunks = chunk_text(
             text
@@ -622,7 +829,8 @@ def process_book(path: Path):
             })
 
     print(
-        f"📦 Jumlah chunks: {len(chunks)}"
+        f"📦 Jumlah chunks: "
+        f"{len(chunks)}"
     )
 
     save_book_record(
@@ -639,7 +847,8 @@ def process_book(path: Path):
     ):
 
         print(
-            f"🧠 EMBEDDING {index}-{total}/{total}"
+            f"🧠 EMBEDDING "
+            f"{index}-{total}/{total}"
         )
 
         try:
@@ -658,10 +867,11 @@ def process_book(path: Path):
             continue
 
         print(
-            f"💾 Supabase {index}-{total}"
+            f"💾 Supabase "
+            f"{index}-{total}"
         )
 
-        save_chunk(
+        success = save_chunk(
             book_hash=book_hash,
             kitab_name=kitab_name,
             category=category,
@@ -670,6 +880,13 @@ def process_book(path: Path):
             content=item["content"],
             embedding=embedding
         )
+
+        if not success:
+
+            print(
+                f"⚠️ Chunk {index} "
+                f"gagal disimpan"
+            )
 
     print(
         f"✅ READY: {kitab_name}"
@@ -683,11 +900,17 @@ def process_book(path: Path):
 def sync_books():
 
     print("")
-    print("🔄 SYNC KITAB")
-    print("=" * 60)
+    print(
+        "🔄 SYNC KITAB"
+    )
 
     print(
-        f"📂 Searching: {KITAB_DIR}"
+        "=" * 60
+    )
+
+    print(
+        f"📂 Searching: "
+        f"{KITAB_DIR}"
     )
 
     if not KITAB_DIR.exists():
@@ -703,6 +926,7 @@ def sync_books():
     for path in KITAB_DIR.rglob("*"):
 
         if not path.is_file():
+
             continue
 
         if path.suffix.lower() in [
@@ -711,10 +935,13 @@ def sync_books():
             ".md"
         ]:
 
-            files.append(path)
+            files.append(
+                path
+            )
 
     print(
-        f"📚 Jumlah kitab: {len(files)}"
+        f"📚 Jumlah kitab: "
+        f"{len(files)}"
     )
 
     for path in files:
@@ -722,15 +949,19 @@ def sync_books():
         try:
 
             print(
-                f"🆕 PROCESS: {path.name}"
+                f"🆕 PROCESS: "
+                f"{path.name}"
             )
 
-            process_book(path)
+            process_book(
+                path
+            )
 
         except Exception as error:
 
             print(
-                f"❌ PROCESS ERROR {path.name}:",
+                f"❌ PROCESS ERROR "
+                f"{path.name}:",
                 error
             )
 
@@ -740,15 +971,16 @@ def sync_books():
 
 
 # ============================================================
-# LOCAL SEARCH
+# LOCAL VECTOR SEARCH
 # ============================================================
 
 def search_local(
     query,
-    limit=5
+    limit=3
 ):
 
     if not supabase:
+
         return []
 
     try:
@@ -757,16 +989,23 @@ def search_local(
             query
         )
 
-        result = supabase.rpc(
-            "match_kitab_chunks",
-            {
-                "query_embedding": embedding,
-                "match_threshold": 0.25,
-                "match_count": limit
-            }
-        ).execute()
+        result = (
+            supabase
+            .rpc(
+                "match_kitab_chunks",
+                {
+                    "query_embedding": embedding,
+                    "match_threshold": 0.25,
+                    "match_count": limit
+                }
+            )
+            .execute()
+        )
 
-        return result.data or []
+        return (
+            result.data
+            or []
+        )
 
     except Exception as error:
 
@@ -784,7 +1023,7 @@ def search_local(
 
 def search_turath(
     query,
-    limit=5
+    limit=3
 ):
 
     try:
@@ -802,12 +1041,17 @@ def search_turath(
 
         data = response.json()
 
-        if not data.get("ok"):
+        if not data.get(
+            "ok"
+        ):
+
             return []
 
-        return data.get(
-            "passages",
-            []
+        return (
+            data.get(
+                "passages",
+                []
+            )
         )
 
     except Exception as error:
@@ -821,7 +1065,7 @@ def search_turath(
 
 
 # ============================================================
-# FORMAT LOCAL
+# FORMAT LOCAL SOURCES
 # ============================================================
 
 def format_local_sources(
@@ -833,13 +1077,19 @@ def format_local_sources(
     for row in rows:
 
         kitab = (
-            row.get("kitab_name")
-            or row.get("book_name")
+            row.get(
+                "kitab_name"
+            )
+            or row.get(
+                "book_name"
+            )
             or "Kitab Tempatan"
         )
 
         category = (
-            row.get("category")
+            row.get(
+                "category"
+            )
             or "FIQH"
         )
 
@@ -849,7 +1099,9 @@ def format_local_sources(
         )
 
         content = (
-            row.get("content")
+            row.get(
+                "content"
+            )
             or ""
         )
 
@@ -868,7 +1120,7 @@ Isi:
 
 
 # ============================================================
-# FORMAT TURATH
+# FORMAT TURATH SOURCES
 # ============================================================
 
 def format_turath_sources(
@@ -880,12 +1132,16 @@ def format_turath_sources(
     for item in passages:
 
         kitab = (
-            item.get("kitab_name")
+            item.get(
+                "kitab_name"
+            )
             or "Turath"
         )
 
         author = (
-            item.get("author")
+            item.get(
+                "author"
+            )
             or "Tidak diketahui"
         )
 
@@ -895,7 +1151,9 @@ def format_turath_sources(
         )
 
         content = (
-            item.get("content")
+            item.get(
+                "content"
+            )
             or ""
         )
 
@@ -914,7 +1172,7 @@ Isi:
 
 
 # ============================================================
-# GEMINI ANSWER
+# GENERATE GEMINI ANSWER
 # ============================================================
 
 def generate_answer(
@@ -923,35 +1181,73 @@ def generate_answer(
     turath_rows
 ):
 
+    # ========================================================
+    # CACHE
+    # ========================================================
+
+    cached_answer = get_cached_answer(
+        question
+    )
+
+    if cached_answer:
+
+        print(
+            "⚡ CACHE HIT — "
+            "Gemini tidak dipanggil"
+        )
+
+        return cached_answer
+
+    print(
+        "🆕 CACHE MISS — "
+        "perlu 1x Gemini"
+    )
+
+
+    # ========================================================
+    # GEMINI CHECK
+    # ========================================================
+
     if not gemini_client:
 
         return (
-            "Maaf, sistem Gemini belum dikonfigurasikan."
+            "Maaf, sistem Gemini belum "
+            "dikonfigurasikan."
         )
 
-    local_text = format_local_sources(
-        local_rows
+
+    # ========================================================
+    # FORMAT SOURCES
+    # ========================================================
+
+    local_text = (
+        format_local_sources(
+            local_rows
+        )
     )
 
-    turath_text = format_turath_sources(
-        turath_rows
+    turath_text = (
+        format_turath_sources(
+            turath_rows
+        )
     )
+
+
+    # ========================================================
+    # SOURCES LIST
+    # ========================================================
 
     sources = []
 
     for row in local_rows:
 
         sources.append(
-            f"• {row.get('kitab_name', 'Kitab Tempatan')} "
+            f"• "
+            f"{row.get('kitab_name', 'Kitab Tempatan')} "
             f"[{row.get('category', 'FIQH')}]"
         )
 
     for item in turath_rows:
-
-        kitab = item.get(
-            "kitab_name",
-            "Turath"
-        )
 
         author = item.get(
             "author",
@@ -963,84 +1259,139 @@ def generate_answer(
             "-"
         )
 
-        url = item.get(
-            "url",
-            ""
+        sources.append(
+            f"• Turath — "
+            f"{author}, halaman {page}"
         )
 
-        sources.append(
-            f"• Turath — {author}, halaman {page}"
+
+    # ========================================================
+    # CONTEXT
+    # ========================================================
+
+    context_parts = []
+
+    if local_text:
+
+        context_parts.append(
+            local_text
+        )
+
+    if turath_text:
+
+        context_parts.append(
+            turath_text
         )
 
     context = "\n\n".join(
-        [
-            x
-            for x in [
-                local_text,
-                turath_text
-            ]
-            if x
-        ]
+        context_parts
     )
 
+
+    # ========================================================
+    # LIMIT CONTEXT
+    # ========================================================
+
+    MAX_CONTEXT_CHARS = 18000
+
+    if len(context) > MAX_CONTEXT_CHARS:
+
+        print(
+            f"✂️ Context dipotong: "
+            f"{len(context)} → "
+            f"{MAX_CONTEXT_CHARS}"
+        )
+
+        context = context[
+            :MAX_CONTEXT_CHARS
+        ]
+
+
+    # ========================================================
+    # PROMPT
+    # ========================================================
+
     prompt = f"""
-Anda ialah TanyaFiqihBot, pembantu ilmu Islam
-berbahasa Melayu.
+Anda ialah TanyaFiqihBot,
+pembantu ilmu Islam berbahasa Melayu.
 
-Jawab soalan pengguna berdasarkan sumber yang
-diberikan sahaja.
+Jawab soalan pengguna berdasarkan sumber
+yang diberikan.
 
-SOALAN:
+SOALAN PENGGUNA:
 {question}
 
-SUMBER:
+SUMBER RUJUKAN:
 {context}
 
 ARAHAN:
 1. Jawab dalam Bahasa Melayu.
-2. Gunakan sumber yang diberikan.
-3. Jangan mereka-reka dalil atau fakta.
+2. Utamakan sumber yang diberikan.
+3. Jangan mereka-reka fakta atau dalil.
 4. Jika sumber tidak mencukupi, nyatakan dengan jujur.
-5. Jika terdapat perbezaan pendapat, nyatakan secara ringkas.
-6. Untuk isu fiqh, jelaskan hukum dan syarat jika ada.
-7. Jangan mendakwa sesuatu itu ijmak jika sumber tidak menyatakannya.
-8. Jangan gunakan pengetahuan luar sebagai sumber utama.
-9. Jawapan hendaklah jelas dan mudah difahami.
-10. Jika terdapat teks Arab dalam sumber, boleh sertakan teks Arab
-    yang relevan bersama maksud ringkas.
+5. Jika terdapat khilaf, nyatakan secara ringkas.
+6. Untuk persoalan fiqh, nyatakan hukum dan
+   syarat yang berkaitan jika terdapat dalam sumber.
+7. Jangan mendakwa ijmak tanpa sumber.
+8. Jawab dengan jelas dan mudah difahami.
+9. Jangan ulang soalan pengguna.
+10. Jangan terlalu panjang.
+11. Jika terdapat dalil atau teks Arab yang relevan
+    dalam sumber, boleh sertakan secara ringkas.
 
 Jawapan:
 """
 
+
+    # ========================================================
+    # GEMINI — SATU REQUEST SAHAJA
+    # ========================================================
+
     try:
 
-        response = gemini_client.models.generate_content(
-            model=LLM_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=1500,
-                candidate_count=1
+        print(
+            "🤖 GEMINI GENERATE: "
+            "1 REQUEST"
+        )
+
+        response = (
+            gemini_client
+            .models
+            .generate_content(
+                model=LLM_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=1000,
+                    candidate_count=1
+                )
             )
         )
 
+
         answer = (
             response.text
-            if response and response.text
+            if response
+            and response.text
             else ""
         )
+
 
         if not answer:
 
             return (
-                "Maaf, sistem tidak menghasilkan jawapan."
+                "Maaf, Gemini tidak "
+                "menghasilkan jawapan."
             )
 
-        source_text = ""
+
+        # ====================================================
+        # RUJUKAN
+        # ====================================================
 
         if sources:
 
-            source_text = (
+            answer += (
                 "\n\n📚 Rujukan:\n"
                 +
                 "\n".join(
@@ -1048,7 +1399,23 @@ Jawapan:
                 )
             )
 
-        return answer + source_text
+
+        # ====================================================
+        # SAVE CACHE
+        # ====================================================
+
+        save_cached_answer(
+            question,
+            answer
+        )
+
+        print(
+            "💾 Jawapan disimpan dalam cache"
+        )
+
+
+        return answer
+
 
     except Exception as error:
 
@@ -1057,19 +1424,32 @@ Jawapan:
             error
         )
 
+        error_text = str(
+            error
+        )
+
+        if (
+            "429" in error_text
+            or
+            "RESOURCE_EXHAUSTED"
+            in error_text
+        ):
+
+            return (
+                "⚠️ Kuota Gemini telah habis "
+                "buat sementara waktu.\n\n"
+                "Sila cuba semula selepas "
+                "kuota reset."
+            )
+
         return (
-            "❌ Berlaku masalah ketika menjana jawapan.\n\n"
-            "📚 Rujukan:\n"
-            +
-            "\n".join(sources)
-            if sources
-            else
-            "❌ Berlaku masalah ketika menjana jawapan."
+            "❌ Berlaku masalah ketika "
+            "menjana jawapan."
         )
 
 
 # ============================================================
-# HANDLE QUESTION
+# ANSWER QUESTION
 # ============================================================
 
 def answer_question(
@@ -1077,6 +1457,7 @@ def answer_question(
 ):
 
     print("")
+
     print(
         "============================================"
     )
@@ -1086,35 +1467,85 @@ def answer_question(
         question
     )
 
+
+    # ========================================================
+    # CHECK CACHE FIRST
+    # ========================================================
+
+    cached_answer = get_cached_answer(
+        question
+    )
+
+    if cached_answer:
+
+        print(
+            "⚡ CACHE HIT — "
+            "tiada Gemini / Supabase / Turath"
+        )
+
+        return cached_answer
+
+
+    # ========================================================
+    # LOCAL
+    # ========================================================
+
     local_rows = search_local(
         question,
-        limit=5
+        limit=3
     )
 
     print(
-        f"📚 LOCAL: {len(local_rows)}"
+        f"📚 LOCAL: "
+        f"{len(local_rows)}"
     )
+
+
+    # ========================================================
+    # TURATH
+    # ========================================================
 
     turath_rows = search_turath(
         question,
-        limit=TURATH_SEARCH_K
+        limit=3
     )
 
     print(
-        f"📖 TURATH: {len(turath_rows)}"
+        f"📖 TURATH: "
+        f"{len(turath_rows)}"
     )
+
+
+    # ========================================================
+    # TOTAL
+    # ========================================================
 
     print(
         f"📦 TOTAL: "
         f"{len(local_rows) + len(turath_rows)}"
     )
 
-    if not local_rows and not turath_rows:
+
+    # ========================================================
+    # NO SOURCES
+    # ========================================================
+
+    if (
+        not local_rows
+        and
+        not turath_rows
+    ):
 
         return (
-            "Maaf, saya tidak menemui sumber "
-            "yang berkaitan dengan soalan tersebut."
+            "Maaf, saya tidak menemui "
+            "sumber yang berkaitan "
+            "dengan soalan tersebut."
         )
+
+
+    # ========================================================
+    # GEMINI
+    # ========================================================
 
     return generate_answer(
         question,
@@ -1124,7 +1555,7 @@ def answer_question(
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM /START
 # ============================================================
 
 async def start_command(
@@ -1132,12 +1563,17 @@ async def start_command(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+
+        return
+
     await update.message.reply_text(
-        """🤖 *TanyaFiqihBot*
+        """🤖 TanyaFiqihBot
 
 Assalamualaikum.
 
 Tanya soalan berkaitan:
+
 • Fiqh
 • Tauhid
 • Hadis
@@ -1147,11 +1583,15 @@ Tanya soalan berkaitan:
 • Usul Fiqh
 
 Contoh:
-“Apakah rukun mandi wajib?”
-""",
-        parse_mode="Markdown"
+
+Apakah rukun mandi wajib?
+"""
     )
 
+
+# ============================================================
+# TELEGRAM MESSAGE
+# ============================================================
 
 async def handle_message(
     update: Update,
@@ -1159,27 +1599,41 @@ async def handle_message(
 ):
 
     if not update.message:
+
         return
 
     question = (
-        update.message.text or ""
+        update.message.text
+        or ""
     ).strip()
 
+
     if not question:
+
         return
 
-    await update.message.chat.send_action(
-        "typing"
-    )
+
+    try:
+
+        await update.message.chat.send_action(
+            "typing"
+        )
+
+    except Exception:
+
+        pass
+
 
     try:
 
         loop = asyncio.get_running_loop()
 
-        answer = await loop.run_in_executor(
-            None,
-            answer_question,
-            question
+        answer = (
+            await loop.run_in_executor(
+                None,
+                answer_question,
+                question
+            )
         )
 
         await update.message.reply_text(
@@ -1193,10 +1647,21 @@ async def handle_message(
             error
         )
 
-        await update.message.reply_text(
-            "❌ Maaf, berlaku masalah ketika memproses soalan."
-        )
+        try:
 
+            await update.message.reply_text(
+                "❌ Maaf, berlaku masalah "
+                "ketika memproses soalan."
+            )
+
+        except Exception:
+
+            pass
+
+
+# ============================================================
+# TELEGRAM MAIN
+# ============================================================
 
 async def telegram_main():
 
@@ -1208,12 +1673,16 @@ async def telegram_main():
 
         return
 
+
     application = (
         Application
         .builder()
-        .token(TELEGRAM_TOKEN)
+        .token(
+            TELEGRAM_TOKEN
+        )
         .build()
     )
+
 
     application.add_handler(
         CommandHandler(
@@ -1222,23 +1691,38 @@ async def telegram_main():
         )
     )
 
+
     application.add_handler(
         MessageHandler(
-            filters.TEXT &
+            filters.TEXT
+            &
             ~filters.COMMAND,
             handle_message
         )
     )
 
+
     await application.initialize()
 
     await application.start()
 
-    await application.updater.start_polling()
+
+    # ========================================================
+    # PENTING:
+    # TIADA stop_signals
+    # ========================================================
+
+    await (
+        application
+        .updater
+        .start_polling()
+    )
+
 
     print(
         "✅ Telegram polling started"
     )
+
 
     try:
 
@@ -1254,12 +1738,35 @@ async def telegram_main():
 
     finally:
 
-        await application.updater.stop()
+        try:
 
-        await application.stop()
+            await (
+                application
+                .updater
+                .stop()
+            )
 
-        await application.shutdown()
+        except Exception:
+            pass
 
+        try:
+
+            await application.stop()
+
+        except Exception:
+            pass
+
+        try:
+
+            await application.shutdown()
+
+        except Exception:
+            pass
+
+
+# ============================================================
+# TELEGRAM THREAD
+# ============================================================
 
 def run_telegram():
 
@@ -1293,12 +1800,19 @@ def startup():
     )
 
     print(
-        f"🔢 EMBEDDING: {EMBEDDING_MODEL}"
+        f"🔢 EMBEDDING: "
+        f"{EMBEDDING_MODEL}"
     )
 
     print(
-        f"📚 KITAB DIR: {KITAB_DIR}"
+        f"📚 KITAB DIR: "
+        f"{KITAB_DIR}"
     )
+
+
+    # ========================================================
+    # DATA DIRECTORY
+    # ========================================================
 
     try:
 
@@ -1319,7 +1833,11 @@ def startup():
             error
         )
 
-    # Sync kitab
+
+    # ========================================================
+    # SYNC KITAB
+    # ========================================================
+
     try:
 
         sync_books()
@@ -1331,7 +1849,11 @@ def startup():
             error
         )
 
-    # Telegram
+
+    # ========================================================
+    # TELEGRAM
+    # ========================================================
+
     telegram_thread = threading.Thread(
         target=run_telegram,
         daemon=True
