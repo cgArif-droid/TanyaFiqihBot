@@ -30,53 +30,70 @@ const CATEGORY_NAMES_AR = {
 ========================================================= */
 
 const QUERY_MAP = {
-  puasa: "الصيام",
-  puasa ramadan: "صيام رمضان",
-  zakat: "الزكاة",
-  zakat fitrah: "زكاة الفطر",
-  solat: "الصلاة",
-  sembahyang: "الصلاة",
-  wuduk: "الوضوء",
-  wudhu: "الوضوء",
-  taharah: "الطهارة",
-  bersuci: "الطهارة",
-  tayamum: "التيمم",
-  mandi wajib: "الغسل",
-  junub: "الجنابة",
-  haid: "الحيض",
-  nifas: "النفاس",
-  istihadah: "الاستحاضة",
-  qunut: "القنوت",
-  qunut subuh: "القنوت في صلاة الصبح",
-  solat subuh: "صلاة الصبح",
-  solat jumaat: "صلاة الجمعة",
-  jumaat: "صلاة الجمعة",
-  azan: "الأذان",
-  iqamah: "الإقامة",
-  nikah: "النكاح",
-  perkahwinan: "النكاح",
-  talak: "الطلاق",
-  cerai: "الطلاق",
-  faraid: "الفرائض",
-  pusaka: "المواريث",
-  haji: "الحج",
-  umrah: "العمرة",
-  korban: "الأضحية",
-  akikah: "العقيقة",
-  sembelihan: "الذبائح",
-  najis: "النجاسة",
-  aurat: "العورة",
-  mahar: "المهر",
-  mas kahwin: "المهر",
-  jual beli: "البيع",
-  riba: "الربا",
-  hutang: "الدين",
-  pinjaman: "القرض",
-  wakaf: "الوقف",
-  nazar: "النذر",
-  sumpah: "اليمين",
-  kaffarah: "الكفارة",
-  kafarah: "الكفارة",
+  "puasa ramadan": "صيام رمضان",
+  "puasa": "الصيام",
+
+  "zakat fitrah": "زكاة الفطر",
+  "zakat": "الزكاة",
+
+  "solat subuh": "صلاة الصبح",
+  "solat jumaat": "صلاة الجمعة",
+  "solat": "الصلاة",
+  "sembahyang": "الصلاة",
+
+  "qunut subuh": "القنوت في صلاة الصبح",
+  "qunut": "القنوت",
+
+  "wuduk": "الوضوء",
+  "wudhu": "الوضوء",
+
+  "mandi wajib": "الغسل",
+  "mandi junub": "غسل الجنابة",
+  "junub": "الجنابة",
+  "bersuci": "الطهارة",
+  "taharah": "الطهارة",
+  "tayamum": "التيمم",
+
+  "haid": "الحيض",
+  "nifas": "النفاس",
+  "istihadah": "الاستحاضة",
+
+  "azan": "الأذان",
+  "iqamah": "الإقامة",
+
+  "nikah": "النكاح",
+  "perkahwinan": "النكاح",
+  "talak": "الطلاق",
+  "cerai": "الطلاق",
+
+  "faraid": "الفرائض",
+  "pusaka": "المواريث",
+
+  "haji": "الحج",
+  "umrah": "العمرة",
+
+  "korban": "الأضحية",
+  "akikah": "العقيقة",
+  "sembelihan": "الذبائح",
+
+  "najis": "النجاسة",
+  "aurat": "العورة",
+
+  "mahar": "المهر",
+  "mas kahwin": "المهر",
+
+  "jual beli": "البيع",
+  "riba": "الربا",
+
+  "hutang": "الدين",
+  "pinjaman": "القرض",
+
+  "wakaf": "الوقف",
+  "nazar": "النذر",
+
+  "sumpah": "اليمين",
+  "kaffarah": "الكفارة",
+  "kafarah": "الكفارة",
 };
 
 /* =========================================================
@@ -89,21 +106,14 @@ const bookInfoCache = new Map();
    BASIC HELPERS
 ========================================================= */
 
-function firstValue(...values) {
-  for (const value of values) {
-    if (
-      value !== undefined &&
-      value !== null &&
-      String(value).trim() !== ""
-    ) {
-      return value;
-    }
-  }
-
-  return "";
+function isObject(value) {
+  return (
+    value !== null &&
+    typeof value === "object"
+  );
 }
 
-function stringValue(value) {
+function cleanText(value) {
   if (
     value === undefined ||
     value === null
@@ -112,30 +122,31 @@ function stringValue(value) {
   }
 
   if (
-    typeof value === "string" ||
-    typeof value === "number"
+    typeof value !== "string" &&
+    typeof value !== "number"
   ) {
-    return String(value).trim();
+    return "";
+  }
+
+  return String(value)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function firstValue(...values) {
+  for (const value of values) {
+    const cleaned = cleanText(value);
+
+    if (cleaned) {
+      return cleaned;
+    }
   }
 
   return "";
 }
 
-function cleanText(value) {
-  return stringValue(value)
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isObject(value) {
-  return (
-    value !== null &&
-    typeof value === "object"
-  );
-}
-
 /* =========================================================
-   RECURSIVE SEARCH
+   RECURSIVE VALUE FINDER
 ========================================================= */
 
 function findValueRecursive(
@@ -145,14 +156,14 @@ function findValueRecursive(
 ) {
   if (
     !isObject(obj) ||
-    depth > 8
+    depth > 10
   ) {
     return "";
   }
 
   const wanted = new Set(
-    keys.map((x) =>
-      String(x).toLowerCase()
+    keys.map((key) =>
+      String(key).toLowerCase()
     )
   );
 
@@ -165,7 +176,7 @@ function findValueRecursive(
           depth + 1
         );
 
-      if (found !== "") {
+      if (found) {
         return found;
       }
     }
@@ -173,21 +184,29 @@ function findValueRecursive(
     return "";
   }
 
+  /*
+   * PASS 1:
+   * Cari exact key.
+   */
   for (const [key, value] of Object.entries(obj)) {
     if (
       wanted.has(
         String(key).toLowerCase()
       )
     ) {
-      if (
-        typeof value === "string" ||
-        typeof value === "number"
-      ) {
-        return String(value).trim();
+      const cleaned =
+        cleanText(value);
+
+      if (cleaned) {
+        return cleaned;
       }
     }
   }
 
+  /*
+   * PASS 2:
+   * Cari dalam object bersarang.
+   */
   for (const value of Object.values(obj)) {
     if (isObject(value)) {
       const found =
@@ -197,7 +216,7 @@ function findValueRecursive(
           depth + 1
         );
 
-      if (found !== "") {
+      if (found) {
         return found;
       }
     }
@@ -207,87 +226,70 @@ function findValueRecursive(
 }
 
 /* =========================================================
-   TEXT EXTRACTION
-========================================================= */
-
-function extractText(item) {
-  return cleanText(
-    firstValue(
-      item?.text,
-      item?.content,
-      item?.snippet,
-      item?.snip,
-      item?.passage,
-      item?.body,
-      item?.description,
-
-      findValueRecursive(
-        item,
-        [
-          "text",
-          "content",
-          "snippet",
-          "snip",
-          "passage",
-          "body",
-        ]
-      )
-    )
-  );
-}
-
-/* =========================================================
-   BOOK ID
+   FIND ANY POSSIBLE BOOK ID
 ========================================================= */
 
 function extractBookId(item) {
-  return cleanText(
-    firstValue(
-      item?.book_id,
-      item?.bookId,
-      item?.bookID,
-      item?.book_hash,
-      item?.bookHash,
+  return firstValue(
+    item?.book_id,
+    item?.bookId,
+    item?.bookID,
+    item?.book_hash,
+    item?.bookHash,
+    item?.bookid,
 
-      findValueRecursive(
-        item,
-        [
-          "book_id",
-          "bookId",
-          "bookID",
-          "book_hash",
-          "bookHash",
-        ]
-      )
+    item?.book?.id,
+    item?.book?.book_id,
+    item?.book?.bookId,
+
+    item?.metadata?.book_id,
+    item?.metadata?.bookId,
+    item?.metadata?.book_hash,
+
+    item?.source?.book_id,
+    item?.source?.bookId,
+
+    findValueRecursive(
+      item,
+      [
+        "book_id",
+        "bookId",
+        "bookID",
+        "book_hash",
+        "bookHash",
+        "bookid",
+      ]
     )
   );
 }
 
 /* =========================================================
-   PAGE
+   TEXT
 ========================================================= */
 
-function extractPage(item) {
-  return cleanText(
-    firstValue(
-      item?.page,
-      item?.page_number,
-      item?.pageNumber,
-      item?.page_no,
-      item?.pageNo,
-      item?.halaman,
+function extractText(item) {
+  return firstValue(
+    item?.text,
+    item?.content,
+    item?.passage,
+    item?.snippet,
+    item?.snip,
+    item?.body,
+    item?.description,
 
-      findValueRecursive(
-        item,
-        [
-          "page",
-          "page_number",
-          "pageNumber",
-          "page_no",
-          "pageNo",
-          "halaman",
-        ]
-      )
+    item?.metadata?.text,
+    item?.metadata?.content,
+
+    findValueRecursive(
+      item,
+      [
+        "text",
+        "content",
+        "passage",
+        "snippet",
+        "snip",
+        "body",
+      ]
     )
   );
 }
@@ -297,26 +299,42 @@ function extractPage(item) {
 ========================================================= */
 
 function extractBookTitle(item) {
-  return cleanText(
-    firstValue(
-      item?.book,
-      item?.book_title,
-      item?.bookTitle,
-      item?.book_name,
-      item?.bookName,
-      item?.title,
+  return firstValue(
+    item?.book_title,
+    item?.bookTitle,
+    item?.book_name,
+    item?.bookName,
 
-      findValueRecursive(
-        item,
-        [
-          "book",
-          "book_title",
-          "bookTitle",
-          "book_name",
-          "bookName",
-          "title",
-        ]
-      )
+    typeof item?.book === "string"
+      ? item.book
+      : "",
+
+    item?.title,
+
+    item?.book?.title,
+    item?.book?.name,
+    item?.book?.book_title,
+    item?.book?.book_name,
+
+    item?.metadata?.book_title,
+    item?.metadata?.bookTitle,
+    item?.metadata?.book_name,
+    item?.metadata?.bookName,
+    item?.metadata?.book,
+
+    item?.source?.book_title,
+    item?.source?.book_name,
+    item?.source?.title,
+
+    findValueRecursive(
+      item,
+      [
+        "book_title",
+        "bookTitle",
+        "book_name",
+        "bookName",
+        "title",
+      ]
     )
   );
 }
@@ -326,22 +344,63 @@ function extractBookTitle(item) {
 ========================================================= */
 
 function extractAuthor(item) {
-  return cleanText(
-    firstValue(
-      item?.author,
-      item?.book_author,
-      item?.author_name,
-      item?.authorName,
+  return firstValue(
+    item?.author,
+    item?.author_name,
+    item?.authorName,
+    item?.book_author,
 
-      findValueRecursive(
-        item,
-        [
-          "author",
-          "book_author",
-          "author_name",
-          "authorName",
-        ]
-      )
+    item?.book?.author,
+    item?.book?.author_name,
+    item?.book?.authorName,
+
+    item?.metadata?.author,
+    item?.metadata?.author_name,
+    item?.metadata?.authorName,
+
+    item?.source?.author,
+
+    findValueRecursive(
+      item,
+      [
+        "author",
+        "author_name",
+        "authorName",
+        "book_author",
+      ]
+    )
+  );
+}
+
+/* =========================================================
+   PAGE
+========================================================= */
+
+function extractPage(item) {
+  return firstValue(
+    item?.page,
+    item?.page_number,
+    item?.pageNumber,
+    item?.page_no,
+    item?.pageNo,
+    item?.halaman,
+
+    item?.location?.page,
+    item?.metadata?.page,
+    item?.metadata?.page_number,
+
+    item?.source?.page,
+
+    findValueRecursive(
+      item,
+      [
+        "page",
+        "page_number",
+        "pageNumber",
+        "page_no",
+        "pageNo",
+        "halaman",
+      ]
     )
   );
 }
@@ -351,43 +410,48 @@ function extractAuthor(item) {
 ========================================================= */
 
 function extractUrl(item) {
-  return cleanText(
-    firstValue(
-      item?.url,
-      item?.link,
-      item?.href,
+  return firstValue(
+    item?.url,
+    item?.link,
+    item?.href,
 
-      findValueRecursive(
-        item,
-        [
-          "url",
-          "link",
-          "href",
-        ]
-      )
+    item?.book?.url,
+    item?.book?.link,
+
+    item?.metadata?.url,
+    item?.metadata?.link,
+
+    findValueRecursive(
+      item,
+      [
+        "url",
+        "link",
+        "href",
+      ]
     )
   );
 }
 
 /* =========================================================
-   ID
+   RESULT ID
 ========================================================= */
 
 function extractId(item) {
-  return cleanText(
-    firstValue(
-      item?.id,
-      item?.chunk_id,
-      item?.chunkId,
+  return firstValue(
+    item?.id,
+    item?.chunk_id,
+    item?.chunkId,
 
-      findValueRecursive(
-        item,
-        [
-          "id",
-          "chunk_id",
-          "chunkId",
-        ]
-      )
+    item?.metadata?.id,
+    item?.metadata?.chunk_id,
+
+    findValueRecursive(
+      item,
+      [
+        "id",
+        "chunk_id",
+        "chunkId",
+      ]
     )
   );
 }
@@ -397,22 +461,24 @@ function extractId(item) {
 ========================================================= */
 
 function extractCategory(item) {
-  return cleanText(
-    firstValue(
-      item?.category,
-      item?.category_name,
-      item?.categoryName,
-      item?.mazhab,
+  return firstValue(
+    item?.category,
+    item?.category_name,
+    item?.categoryName,
+    item?.mazhab,
 
-      findValueRecursive(
-        item,
-        [
-          "category",
-          "category_name",
-          "categoryName",
-          "mazhab",
-        ]
-      )
+    item?.metadata?.category,
+    item?.metadata?.category_name,
+    item?.metadata?.mazhab,
+
+    findValueRecursive(
+      item,
+      [
+        "category",
+        "category_name",
+        "categoryName",
+        "mazhab",
+      ]
     )
   );
 }
@@ -421,94 +487,41 @@ function extractCategory(item) {
    NORMALIZE BOOK INFO
 ========================================================= */
 
-function normalizeBookInfo(info, bookId = "") {
+function normalizeBookInfo(
+  info,
+  bookId = ""
+) {
   if (!info) {
     return null;
   }
 
-  const title = cleanText(
+  const title =
+    extractBookTitle(info);
+
+  const author =
+    extractAuthor(info);
+
+  const page =
+    extractPage(info);
+
+  const url =
+    extractUrl(info);
+
+  const extractedId =
     firstValue(
-      info?.book,
-      info?.book_title,
-      info?.bookTitle,
-      info?.book_name,
-      info?.bookName,
-      info?.title,
-
-      findValueRecursive(
-        info,
-        [
-          "book",
-          "book_title",
-          "bookTitle",
-          "book_name",
-          "bookName",
-          "title",
-        ]
-      )
-    )
-  );
-
-  const author = cleanText(
-    firstValue(
-      info?.author,
-      info?.book_author,
-      info?.author_name,
-      info?.authorName,
-
-      findValueRecursive(
-        info,
-        [
-          "author",
-          "book_author",
-          "author_name",
-          "authorName",
-        ]
-      )
-    )
-  );
-
-  const url = cleanText(
-    firstValue(
-      info?.url,
-      info?.link,
-      info?.href,
-
-      findValueRecursive(
-        info,
-        [
-          "url",
-          "link",
-          "href",
-        ]
-      )
-    )
-  );
-
-  const page = cleanText(
-    firstValue(
-      info?.page,
-      info?.page_number,
-      info?.pageNumber,
-
-      findValueRecursive(
-        info,
-        [
-          "page",
-          "page_number",
-          "pageNumber",
-        ]
-      )
-    )
-  );
+      bookId,
+      extractBookId(info)
+    );
 
   return {
     book: title,
     book_title: title,
+    source: title,
     author,
-    url,
     page,
-    book_id: bookId,
+    page_number: page,
+    url,
+    book_id: extractedId,
   };
 }
 
@@ -521,8 +534,14 @@ async function fetchBookInfo(bookId) {
     return null;
   }
 
-  if (bookInfoCache.has(bookId)) {
-    return bookInfoCache.get(bookId);
+  if (
+    bookInfoCache.has(
+      bookId
+    )
+  ) {
+    return bookInfoCache.get(
+      bookId
+    );
   }
 
   try {
@@ -531,7 +550,9 @@ async function fetchBookInfo(bookId) {
     );
 
     const info =
-      await getBookInfo(bookId);
+      await getBookInfo(
+        bookId
+      );
 
     console.log(
       "📖 BOOK INFO RAW:"
@@ -543,7 +564,10 @@ async function fetchBookInfo(bookId) {
           info,
           null,
           2
-        ).slice(0, 10000)
+        ).slice(
+          0,
+          15000
+        )
       );
     } catch {
       console.log(info);
@@ -555,16 +579,21 @@ async function fetchBookInfo(bookId) {
         bookId
       );
 
-    bookInfoCache.set(
-      bookId,
-      normalized
-    );
+    if (normalized) {
+      bookInfoCache.set(
+        bookId,
+        normalized
+      );
+    }
 
     return normalized;
+
   } catch (error) {
+
     console.error(
       `❌ getBookInfo(${bookId}) ERROR:`,
-      error?.message || error
+      error?.message ||
+        error
     );
 
     return null;
@@ -582,8 +611,9 @@ async function normalizeResult(
   const text =
     extractText(item);
 
-  const bookId =
-    extractBookId(item);
+  if (!text) {
+    return null;
+  }
 
   let book =
     extractBookTitle(item);
@@ -597,23 +627,40 @@ async function normalizeResult(
   let url =
     extractUrl(item);
 
+  let bookId =
+    extractBookId(item);
+
+  let resultId =
+    extractId(item);
+
   /*
-   * Jika search result tak ada nama kitab,
-   * cuba ambil melalui getBookInfo()
+   * =======================================================
+   * BOOK INFO
+   * =======================================================
+   *
+   * Kalau search result ada book ID:
+   * ambil maklumat kitab penuh.
    */
   let bookInfo = null;
 
   if (bookId) {
     bookInfo =
-      await fetchBookInfo(bookId);
+      await fetchBookInfo(
+        bookId
+      );
   }
 
+  /*
+   * Merge metadata.
+   */
   if (bookInfo) {
+
     book =
       firstValue(
         book,
         bookInfo.book,
-        bookInfo.book_title
+        bookInfo.book_title,
+        bookInfo.source
       );
 
     author =
@@ -622,30 +669,44 @@ async function normalizeResult(
         bookInfo.author
       );
 
+    page =
+      firstValue(
+        page,
+        bookInfo.page,
+        bookInfo.page_number
+      );
+
     url =
       firstValue(
         url,
         bookInfo.url
       );
 
-    if (!page) {
-      page =
-        firstValue(
-          bookInfo.page
-        );
-    }
+    bookId =
+      firstValue(
+        bookId,
+        bookInfo.book_id
+      );
   }
 
-  const id =
-    extractId(item);
+  /*
+   * Kalau masih tiada book ID,
+   * cuba ambil ID daripada metadata selepas
+   * proses book info.
+   */
+  if (!bookId) {
+    bookId =
+      extractBookId(
+        item
+      );
+  }
 
   const category =
     firstValue(
       extractCategory(item),
       CATEGORY_NAMES_AR[
         categoryKey
-      ],
-      categoryKey
+      ]
     );
 
   return {
@@ -681,7 +742,7 @@ async function normalizeResult(
       cleanText(bookId),
 
     id:
-      cleanText(id),
+      cleanText(resultId),
 
     url:
       cleanText(url),
@@ -695,12 +756,16 @@ async function normalizeResult(
     raw_metadata: {
       book_id:
         cleanText(bookId),
+
       book:
         cleanText(book),
+
       author:
         cleanText(author),
+
       page:
         cleanText(page),
+
       url:
         cleanText(url),
     },
@@ -717,12 +782,16 @@ async function searchOnePage(
   page
 ) {
   try {
+
     const response =
       await search(
         query,
         {
-          category: categoryId,
+          category:
+            categoryId,
+
           page,
+
           limit:
             RESULTS_PER_PAGE,
         }
@@ -730,73 +799,109 @@ async function searchOnePage(
 
     let results = [];
 
-    if (Array.isArray(response)) {
-      results = response;
+    if (
+      Array.isArray(
+        response
+      )
+    ) {
+
+      results =
+        response;
+
     } else if (
       response &&
       Array.isArray(
         response.data
       )
     ) {
+
       results =
         response.data;
+
     } else if (
       response &&
       Array.isArray(
         response.results
       )
     ) {
+
       results =
         response.results;
+
     } else if (
       response &&
       Array.isArray(
         response.hits
       )
     ) {
+
       results =
         response.hits;
     }
 
+    /*
+     * Debug raw result.
+     */
     if (
       page === 1 &&
       results.length > 0
     ) {
+
       console.log(
-        "\n🧪 FIRST RAW TURATH RESULT:"
+        "\n=============================================="
+      );
+
+      console.log(
+        "🧪 FIRST RAW TURATH RESULT"
+      );
+
+      console.log(
+        "=============================================="
       );
 
       try {
+
         console.log(
           JSON.stringify(
             results[0],
             null,
             2
-          ).slice(0, 20000)
+          ).slice(
+            0,
+            30000
+          )
         );
+
       } catch {
+
         console.log(
           results[0]
         );
       }
 
       console.log(
-        "\n======================================\n"
+        "==============================================\n"
       );
     }
 
     return results.map(
       (result) => ({
         ...result,
-        _query: query,
+
+        _query:
+          query,
+
         _categoryId:
           categoryId,
       })
     );
+
   } catch (error) {
+
     console.error(
       `❌ SEARCH ERROR page=${page} category=${categoryId}:`,
-      error?.message || error
+      error?.message ||
+        error
     );
 
     return [];
@@ -828,6 +933,7 @@ async function searchCategory(
     page <= MAX_PAGES;
     page++
   ) {
+
     const results =
       await searchOnePage(
         query,
@@ -859,12 +965,12 @@ async function searchCategory(
       maxResults
     );
 
-  const normalized =
-    [];
+  const normalized = [];
 
   for (
     const item of sliced
   ) {
+
     const result =
       await normalizeResult(
         item,
@@ -872,8 +978,10 @@ async function searchCategory(
       );
 
     if (
+      result &&
       result.text
     ) {
+
       normalized.push(
         result
       );
@@ -884,18 +992,19 @@ async function searchCategory(
 }
 
 /* =========================================================
-   SEARCH QUERY MAP
+   QUERY MAP
 ========================================================= */
 
-function mapQuery(query) {
+function mapQuery(
+  query
+) {
   const lower =
-    String(query || "")
+    String(
+      query || ""
+    )
       .toLowerCase()
       .trim();
 
-  /*
-   * Cari frasa paling panjang dahulu
-   */
   const keys =
     Object.keys(
       QUERY_MAP
@@ -905,10 +1014,16 @@ function mapQuery(query) {
         a.length
     );
 
-  for (const key of keys) {
+  for (
+    const key of keys
+  ) {
+
     if (
-      lower.includes(key)
+      lower.includes(
+        key
+      )
     ) {
+
       return QUERY_MAP[
         key
       ];
@@ -934,24 +1049,33 @@ function deduplicate(
   for (
     const item of items
   ) {
+
     const key =
       [
         item.book_id,
         item.id,
         item.page,
         item.text
-          ?.slice(0, 120),
+          ?.slice(
+            0,
+            150
+          ),
       ]
         .join("|")
         .toLowerCase();
 
     if (
-      seen.has(key)
+      seen.has(
+        key
+      )
     ) {
       continue;
     }
 
-    seen.add(key);
+    seen.add(
+      key
+    );
+
     output.push(
       item
     );
@@ -961,14 +1085,16 @@ function deduplicate(
 }
 
 /* =========================================================
-   SEARCH NORMAL
+   NORMAL SEARCH
 ========================================================= */
 
 async function normalSearch(
   query
 ) {
   const arabicQuery =
-    mapQuery(query);
+    mapQuery(
+      query
+    );
 
   console.log(
     `🔎 SHAFII QUERY: ${arabicQuery}`
@@ -994,7 +1120,9 @@ async function comparisonSearch(
   query
 ) {
   const arabicQuery =
-    mapQuery(query);
+    mapQuery(
+      query
+    );
 
   console.log(
     `⚖️ COMPARISON QUERY: ${arabicQuery}`
@@ -1048,6 +1176,7 @@ function readBody(
       resolve,
       reject
     ) => {
+
       let body = "";
 
       req.on(
@@ -1060,7 +1189,9 @@ function readBody(
       req.on(
         "end",
         () => {
-          resolve(body);
+          resolve(
+            body
+          );
         }
       );
 
@@ -1118,19 +1249,23 @@ const server =
       req,
       res
     ) => {
+
       try {
+
         /*
-         * CORS preflight
+         * CORS
          */
         if (
           req.method ===
           "OPTIONS"
         ) {
+
           sendJson(
             res,
             204,
             {}
           );
+
           return;
         }
 
@@ -1140,15 +1275,17 @@ const server =
             `http://${HOST}:${PORT}`
           );
 
-        /* ===============================================
+        /* =================================================
            HOME
-        =============================================== */
+        ================================================= */
 
         if (
           req.method ===
             "GET" &&
-          url.pathname === "/"
+          url.pathname ===
+            "/"
         ) {
+
           sendJson(
             res,
             200,
@@ -1173,9 +1310,9 @@ const server =
           return;
         }
 
-        /* ===============================================
+        /* =================================================
            HEALTH
-        =============================================== */
+        ================================================= */
 
         if (
           req.method ===
@@ -1183,6 +1320,7 @@ const server =
           url.pathname ===
             "/health"
         ) {
+
           sendJson(
             res,
             200,
@@ -1201,9 +1339,9 @@ const server =
           return;
         }
 
-        /* ===============================================
+        /* =================================================
            CATEGORIES
-        =============================================== */
+        ================================================= */
 
         if (
           req.method ===
@@ -1211,6 +1349,7 @@ const server =
           url.pathname ===
             "/categories"
         ) {
+
           sendJson(
             res,
             200,
@@ -1229,9 +1368,9 @@ const server =
           return;
         }
 
-        /* ===============================================
+        /* =================================================
            SEARCH
-        =============================================== */
+        ================================================= */
 
         if (
           req.method ===
@@ -1239,22 +1378,25 @@ const server =
           url.pathname ===
             "/search"
         ) {
+
           const body =
             await readBody(
               req
             );
 
-          let payload =
-            {};
+          let payload = {};
 
           try {
+
             payload =
               body
                 ? JSON.parse(
                     body
                   )
                 : {};
+
           } catch {
+
             sendJson(
               res,
               400,
@@ -1284,10 +1426,11 @@ const server =
           const requestedLimit =
             Number(
               payload.limit ||
-                10
+              10
             );
 
           if (!query) {
+
             sendJson(
               res,
               400,
@@ -1304,7 +1447,7 @@ const server =
           }
 
           console.log(
-            "\n======================================"
+            "\n=============================================="
           );
 
           console.log(
@@ -1316,7 +1459,7 @@ const server =
           );
 
           console.log(
-            "======================================\n"
+            "==============================================\n"
           );
 
           let passages;
@@ -1324,24 +1467,24 @@ const server =
           if (
             comparison
           ) {
+
             passages =
               await comparisonSearch(
                 query
               );
+
           } else {
+
             passages =
               await normalSearch(
                 query
               );
           }
 
-          /*
-           * Hadkan hasil terakhir
-           */
           if (
-            requestedLimit >
-            0
+            requestedLimit > 0
           ) {
+
             passages =
               passages.slice(
                 0,
@@ -1350,8 +1493,11 @@ const server =
           }
 
           /*
-           * Debug metadata
+           * =================================================
+           * DEBUG FINAL
+           * =================================================
            */
+
           console.log(
             `📚 TURATH RESULTS: ${passages.length}`
           );
@@ -1359,24 +1505,24 @@ const server =
           for (
             const item of passages.slice(
               0,
-              5
+              10
             )
           ) {
+
             console.log(
-              "📖 SOURCE:",
+              "📖 KITAB:",
               item.book ||
-                item.book_title ||
                 "TIADA"
             );
 
             console.log(
-              "✍️ AUTHOR:",
+              "✍️ PENGARANG:",
               item.author ||
                 "TIADA"
             );
 
             console.log(
-              "📄 PAGE:",
+              "📄 HALAMAN:",
               item.page ||
                 "TIADA"
             );
@@ -1388,7 +1534,19 @@ const server =
             );
 
             console.log(
-              "----------------------------------"
+              "🔗 URL:",
+              item.url ||
+                "TIADA"
+            );
+
+            console.log(
+              "⚖️ KATEGORI:",
+              item.category ||
+                "TIADA"
+            );
+
+            console.log(
+              "----------------------------------------------"
             );
           }
 
@@ -1420,9 +1578,9 @@ const server =
           return;
         }
 
-        /* ===============================================
+        /* =================================================
            BOOK INFO
-        =============================================== */
+        ================================================= */
 
         const bookMatch =
           url.pathname.match(
@@ -1434,6 +1592,7 @@ const server =
             "GET" &&
           bookMatch
         ) {
+
           const bookId =
             decodeURIComponent(
               bookMatch[1]
@@ -1445,6 +1604,7 @@ const server =
             );
 
           if (!info) {
+
             sendJson(
               res,
               404,
@@ -1477,9 +1637,9 @@ const server =
           return;
         }
 
-        /* ===============================================
+        /* =================================================
            PAGE
-        =============================================== */
+        ================================================= */
 
         const pageMatch =
           url.pathname.match(
@@ -1491,6 +1651,7 @@ const server =
             "GET" &&
           pageMatch
         ) {
+
           const bookId =
             decodeURIComponent(
               pageMatch[1]
@@ -1502,6 +1663,7 @@ const server =
             );
 
           try {
+
             const result =
               await getPage(
                 bookId,
@@ -1524,9 +1686,11 @@ const server =
                   result,
               }
             );
+
           } catch (
             error
           ) {
+
             sendJson(
               res,
               500,
@@ -1546,9 +1710,9 @@ const server =
           return;
         }
 
-        /* ===============================================
+        /* =================================================
            404
-        =============================================== */
+        ================================================= */
 
         sendJson(
           res,
@@ -1561,9 +1725,11 @@ const server =
               "Endpoint tidak ditemui",
           }
         );
+
       } catch (
         error
       ) {
+
         console.error(
           "❌ SERVER ERROR:",
           error
@@ -1595,6 +1761,7 @@ server.listen(
   PORT,
   HOST,
   () => {
+
     console.log(
       "=============================================="
     );
@@ -1625,6 +1792,7 @@ server.listen(
 process.on(
   "unhandledRejection",
   (error) => {
+
     console.error(
       "❌ UNHANDLED REJECTION:",
       error
@@ -1635,6 +1803,7 @@ process.on(
 process.on(
   "uncaughtException",
   (error) => {
+
     console.error(
       "❌ UNCAUGHT EXCEPTION:",
       error
