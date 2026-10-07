@@ -1,80 +1,75 @@
-FROM python:3.11-slim
+FROM node:22-bookworm
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# ============================================================
-# SYSTEM DEPENDENCIES
-# ============================================================
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    poppler-utils \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    tesseract-ocr-msa \
-    tesseract-ocr-ara \
-    && rm -rf /var/lib/apt/lists/*
-
-# ============================================================
-# NODE.JS
-# ============================================================
-
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && \
-    node --version && \
-    npm --version
-
-# ============================================================
-# WORKDIR
-# ============================================================
+# =========================================================
+# SYSTEM
+# =========================================================
 
 WORKDIR /app
 
-# ============================================================
-# PYTHON DEPENDENCIES
-# ============================================================
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       python3 \
+       python3-pip \
+       python3-venv \
+       ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
 
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# =========================================================
+# NODE / TURATH
+# =========================================================
 
-# ============================================================
-# NODE DEPENDENCIES
-# ============================================================
+COPY package.json ./
 
-COPY package.json .
+RUN npm install --omit=dev
 
-RUN npm install
 
-# ============================================================
+# =========================================================
+# PYTHON
+# =========================================================
+
+COPY requirements.txt ./
+
+RUN python3 -m venv /opt/venv
+
+RUN /opt/venv/bin/pip install --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+
+# =========================================================
 # APPLICATION
-# ============================================================
+# =========================================================
 
-COPY . .
+COPY app.py .
+COPY turath_service.mjs .
 
-# ============================================================
-# DATA DIRECTORY
-# ============================================================
 
-RUN mkdir -p /var/data
+# =========================================================
+# ENVIRONMENT
+# =========================================================
 
-# ============================================================
-# RENDER PORT
-# ============================================================
+ENV PATH="/opt/venv/bin:$PATH"
+
+ENV PYTHONUNBUFFERED=1
+
+ENV NODE_ENV=production
+
+ENV TURATH_HOST=127.0.0.1
+
+ENV TURATH_PORT=8765
+
+ENV TURATH_SERVICE_URL=http://127.0.0.1:8765
+
+
+# =========================================================
+# PORT
+# =========================================================
 
 EXPOSE 10000
 
-# ============================================================
-# START
-#
-# Node Turath:
-#   127.0.0.1:8765
-#
-# Gunicorn:
-#   0.0.0.0:$PORT
-# ============================================================
 
-CMD ["sh", "-c", "node turath_service.mjs & exec gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:${PORT} app:app"]
+# =========================================================
+# START BOTH SERVICES
+# =========================================================
+
+CMD ["sh", "-c", "node turath_service.mjs & exec gunicorn --bind 0.0.0.0:${PORT:-10000} --workers 1 --threads 4 --timeout 120 app:app"]
