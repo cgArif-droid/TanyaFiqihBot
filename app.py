@@ -65,7 +65,7 @@ EMBEDDING_BATCH_SIZE = int(
 
 LLM_MODEL = os.getenv(
     "LLM_MODEL",
-    "gemini-2.5-flash"
+    "gemini-3.8-flash"
 )
 
 EMBEDDING_MODEL = os.getenv(
