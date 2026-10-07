@@ -7,10 +7,7 @@ import time
 import hashlib
 import threading
 
-from concurrent.futures import (
-    ThreadPoolExecutor,
-    as_completed
-)
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask, jsonify
 
@@ -23,7 +20,6 @@ from telegram.ext import (
     filters,
 )
 
-from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
 
 from langchain_google_genai import (
@@ -31,16 +27,14 @@ from langchain_google_genai import (
     ChatGoogleGenerativeAI,
 )
 
-from langchain_community.vectorstores import Chroma
-
-from langchain_text_splitters import (
-    RecursiveCharacterTextSplitter
-)
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from pypdf import PdfReader
 
 from pdf2image import convert_from_path
 import pytesseract
+
+from supabase import create_client
 
 
 # ============================================================
@@ -57,13 +51,21 @@ TELEGRAM_TOKEN = os.environ.get(
     ""
 )
 
+SUPABASE_URL = os.environ.get(
+    "SUPABASE_URL",
+    ""
+)
+
+SUPABASE_KEY = os.environ.get(
+    "SUPABASE_KEY",
+    ""
+)
+
 DATA_DIR = os.environ.get(
     "DATA_DIR",
     "/var/data"
 )
 
-# RAM sekitar 515 MB
-# Gunakan 1 worker untuk kestabilan
 OCR_WORKERS = int(
     os.environ.get(
         "OCR_WORKERS",
@@ -71,21 +73,26 @@ OCR_WORKERS = int(
     )
 )
 
-OCR_DPI = 200
+OCR_DPI = int(
+    os.environ.get(
+        "OCR_DPI",
+        "200"
+    )
+)
 
 MIN_TEXT_CHARS = 40
 
 LLM_MODEL = "gemini-2.5-flash"
 
-EMBEDDING_MODEL = (
-    "models/gemini-embedding-001"
-)
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 
-# Jumlah dokumen yang diambil
+EMBEDDING_DIMENSION = 3072
+
 SEARCH_K = 6
 
-# Saiz batch embedding
 EMBEDDING_BATCH_SIZE = 16
+
+MAX_CONTEXT_CHARS = 24000
 
 
 # ============================================================
@@ -99,11 +106,6 @@ BASE_DIR = os.path.dirname(
 KITAB_DIR = os.path.join(
     BASE_DIR,
     "kitab"
-)
-
-CHROMA_DIR = os.path.join(
-    DATA_DIR,
-    "chroma"
 )
 
 EXTRACTED_DIR = os.path.join(
@@ -128,11 +130,6 @@ os.makedirs(
 )
 
 os.makedirs(
-    CHROMA_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
     EXTRACTED_DIR,
     exist_ok=True
 )
@@ -141,6 +138,41 @@ os.makedirs(
     PAGE_CACHE_DIR,
     exist_ok=True
 )
+
+
+# ============================================================
+# SUPABASE
+# ============================================================
+
+supabase = None
+
+
+def create_supabase():
+
+    global supabase
+
+    if supabase is not None:
+
+        return supabase
+
+    if not SUPABASE_URL:
+
+        raise RuntimeError(
+            "SUPABASE_URL belum ditetapkan."
+        )
+
+    if not SUPABASE_KEY:
+
+        raise RuntimeError(
+            "SUPABASE_KEY belum ditetapkan."
+        )
+
+    supabase = create_client(
+        SUPABASE_URL,
+        SUPABASE_KEY
+    )
+
+    return supabase
 
 
 # ============================================================
@@ -219,7 +251,7 @@ def health():
 
 
 # ============================================================
-# STATUS UPDATE
+# STATUS
 # ============================================================
 
 def update_status(
@@ -291,9 +323,7 @@ def normalize_text(text):
 # FILE HASH
 # ============================================================
 
-def calculate_file_hash(
-    path
-):
+def calculate_file_hash(path):
 
     sha = hashlib.sha256()
 
@@ -353,9 +383,7 @@ def load_manifest():
         return {}
 
 
-def save_manifest(
-    manifest
-):
+def save_manifest(manifest):
 
     temp = (
         MANIFEST_FILE
@@ -455,9 +483,7 @@ def find_books():
 # CATEGORY
 # ============================================================
 
-def get_category(
-    path
-):
+def get_category(path):
 
     try:
 
@@ -634,7 +660,6 @@ def save_page_cache(
         text
     )
 
-    # Jangan simpan cache kosong
     if not text:
 
         return False
@@ -672,20 +697,6 @@ def save_page_cache(
             e
         )
 
-        try:
-
-            if os.path.exists(
-                temp
-            ):
-
-                os.remove(
-                    temp
-                )
-
-        except Exception:
-
-            pass
-
         return False
 
 
@@ -693,9 +704,7 @@ def save_page_cache(
 # WHOLE TEXT CACHE
 # ============================================================
 
-def get_whole_text_path(
-    book_hash
-):
+def get_whole_text_path(book_hash):
 
     return os.path.join(
         EXTRACTED_DIR,
@@ -703,9 +712,7 @@ def get_whole_text_path(
     )
 
 
-def load_whole_text(
-    book_hash
-):
+def load_whole_text(book_hash):
 
     path = get_whole_text_path(
         book_hash
@@ -803,10 +810,6 @@ def ocr_single_page(
     book_hash
 ):
 
-    # --------------------------------------------------------
-    # Semak cache
-    # --------------------------------------------------------
-
     cached = load_page_cache(
         book_hash,
         page_number
@@ -858,7 +861,6 @@ def ocr_single_page(
             text
         )
 
-        # Simpan hanya jika berjaya
         if text:
 
             save_page_cache(
@@ -881,8 +883,8 @@ def ocr_single_page(
     except Exception as e:
 
         print(
-            f"OCR page {page_number} "
-            f"gagal: {e}"
+            f"OCR page {page_number} gagal:",
+            e
         )
 
         gc.collect()
@@ -895,29 +897,13 @@ def ocr_single_page(
 
 
 # ============================================================
-# PDF EXTRACTION
+# EXTRACT PDF BY PAGE
 # ============================================================
 
-def extract_pdf(
+def extract_pdf_pages(
     pdf_path,
     book_hash
 ):
-
-    # --------------------------------------------------------
-    # Semak whole text cache
-    # --------------------------------------------------------
-
-    cached = load_whole_text(
-        book_hash
-    )
-
-    if cached:
-
-        print(
-            "Whole text cache digunakan."
-        )
-
-        return cached
 
     print(
         "Buka PDF:",
@@ -957,7 +943,7 @@ def extract_pdf(
     ocr_pages = []
 
     # --------------------------------------------------------
-    # Text layer
+    # TEXT LAYER
     # --------------------------------------------------------
 
     for index in range(
@@ -981,8 +967,7 @@ def extract_pdf(
         except Exception as e:
 
             print(
-                f"Text page "
-                f"{page_number} error:",
+                f"Text page {page_number} error:",
                 e
             )
 
@@ -996,7 +981,6 @@ def extract_pdf(
 
         else:
 
-            # Cuba page cache dahulu
             cached_page = load_page_cache(
                 book_hash,
                 page_number
@@ -1023,30 +1007,25 @@ def extract_pdf(
                 page=page_number,
                 total_pages=total_pages,
                 message=(
-                    "Semak text "
+                    f"Semak text "
                     f"{page_number}/"
                     f"{total_pages}"
                 )
             )
 
-    print(
-        f"Page perlu OCR: "
-        f"{len(ocr_pages)}"
-    )
-
     # --------------------------------------------------------
     # OCR
     # --------------------------------------------------------
+
+    print(
+        f"Page perlu OCR: {len(ocr_pages)}"
+    )
 
     if ocr_pages:
 
         workers = max(
             1,
             OCR_WORKERS
-        )
-
-        print(
-            f"OCR workers: {workers}"
         )
 
         update_status(
@@ -1114,7 +1093,7 @@ def extract_pdf(
                         ocr_pages
                     ),
                     message=(
-                        "OCR "
+                        f"OCR "
                         f"{completed}/"
                         f"{len(ocr_pages)}"
                     )
@@ -1123,49 +1102,6 @@ def extract_pdf(
                 if completed % 10 == 0:
 
                     gc.collect()
-
-    # --------------------------------------------------------
-    # Gabungkan teks
-    # --------------------------------------------------------
-
-    sections = []
-
-    for index, text in enumerate(
-        page_texts
-    ):
-
-        if not text:
-
-            continue
-
-        page_number = index + 1
-
-        sections.append(
-            f"[HALAMAN {page_number}]\n"
-            f"{text}"
-        )
-
-    full_text = "\n\n".join(
-        sections
-    )
-
-    full_text = normalize_text(
-        full_text
-    )
-
-    print(
-        "Jumlah karakter:",
-        len(full_text)
-    )
-
-    # Whole cache hanya selepas
-    # keseluruhan PDF selesai
-    if full_text:
-
-        save_whole_text(
-            book_hash,
-            full_text
-        )
 
     try:
 
@@ -1176,21 +1112,17 @@ def extract_pdf(
         pass
 
     del reader
-    del page_texts
-    del ocr_pages
 
     gc.collect()
 
-    return full_text
+    return page_texts
 
 
 # ============================================================
-# TXT EXTRACTION
+# TXT
 # ============================================================
 
-def extract_txt(
-    path
-):
+def extract_txt(path):
 
     try:
 
@@ -1229,7 +1161,7 @@ def extract_txt(
 
 
 # ============================================================
-# EMBEDDINGS
+# EMBEDDING
 # ============================================================
 
 def create_embeddings():
@@ -1237,31 +1169,15 @@ def create_embeddings():
     return GoogleGenerativeAIEmbeddings(
         model=EMBEDDING_MODEL,
         google_api_key=GOOGLE_API_KEY,
+        output_dimensionality=EMBEDDING_DIMENSION,
     )
 
 
 # ============================================================
-# VECTORSTORE
+# DELETE SOURCE FROM SUPABASE
 # ============================================================
 
-def get_vectorstore():
-
-    embeddings = create_embeddings()
-
-    return Chroma(
-        collection_name="tanyafiqhbot",
-        embedding_function=embeddings,
-        persist_directory=CHROMA_DIR,
-    )
-
-
-# ============================================================
-# DELETE SOURCE
-# ============================================================
-
-def delete_source(
-    book_hash
-):
+def delete_source(book_hash):
 
     if not book_hash:
 
@@ -1269,36 +1185,21 @@ def delete_source(
 
     try:
 
-        vectorstore = get_vectorstore()
+        client = create_supabase()
 
-        collection = (
-            vectorstore._collection
-        )
-
-        result = collection.get(
-            where={
-                "book_hash": book_hash
+        result = client.rpc(
+            "delete_book_chunks",
+            {
+                "target_file_hash": book_hash
             }
+        ).execute()
+
+        print(
+            "Data lama dipadam:",
+            book_hash
         )
 
-        ids = result.get(
-            "ids",
-            []
-        )
-
-        if ids:
-
-            collection.delete(
-                ids=ids
-            )
-
-            print(
-                f"Padam {len(ids)} chunks."
-            )
-
-        del vectorstore
-
-        gc.collect()
+        return result
 
     except Exception as e:
 
@@ -1306,6 +1207,503 @@ def delete_source(
             "Delete source error:",
             e
         )
+
+
+# ============================================================
+# GET BOOK
+# ============================================================
+
+def get_book_by_hash(book_hash):
+
+    client = create_supabase()
+
+    result = (
+        client
+        .table("books")
+        .select("*")
+        .eq(
+            "file_hash",
+            book_hash
+        )
+        .limit(1)
+        .execute()
+    )
+
+    if result.data:
+
+        return result.data[0]
+
+    return None
+
+
+# ============================================================
+# CREATE / UPDATE BOOK
+# ============================================================
+
+def create_book_record(
+    path,
+    book_hash,
+    category,
+    total_pages
+):
+
+    client = create_supabase()
+
+    filename = os.path.basename(
+        path
+    )
+
+    existing = get_book_by_hash(
+        book_hash
+    )
+
+    data = {
+        "kitab_name": filename,
+        "category": category,
+        "file_name": filename,
+        "file_path": path,
+        "file_hash": book_hash,
+        "total_pages": total_pages,
+        "processed_pages": 0,
+        "total_chunks": 0,
+        "status": "PROCESSING",
+        "current_page": 0,
+    }
+
+    if existing:
+
+        result = (
+            client
+            .table("books")
+            .update(data)
+            .eq(
+                "id",
+                existing["id"]
+            )
+            .execute()
+        )
+
+        if result.data:
+
+            return result.data[0]
+
+        return existing
+
+    result = (
+        client
+        .table("books")
+        .insert(data)
+        .execute()
+    )
+
+    if not result.data:
+
+        raise RuntimeError(
+            "Gagal create rekod books."
+        )
+
+    return result.data[0]
+
+
+# ============================================================
+# UPDATE BOOK
+# ============================================================
+
+def update_book(
+    book_id,
+    **data
+):
+
+    client = create_supabase()
+
+    (
+        client
+        .table("books")
+        .update(data)
+        .eq(
+            "id",
+            book_id
+        )
+        .execute()
+    )
+
+
+# ============================================================
+# PROCESS PDF
+# ============================================================
+
+def process_pdf_book(
+    path,
+    book_hash,
+    category
+):
+
+    filename = os.path.basename(
+        path
+    )
+
+    # --------------------------------------------------------
+    # PDF
+    # --------------------------------------------------------
+
+    print(
+        "Membaca halaman PDF..."
+    )
+
+    page_texts = extract_pdf_pages(
+        path,
+        book_hash
+    )
+
+    total_pages = len(
+        page_texts
+    )
+
+    # --------------------------------------------------------
+    # Book record
+    # --------------------------------------------------------
+
+    book = create_book_record(
+        path,
+        book_hash,
+        category,
+        total_pages
+    )
+
+    book_id = book["id"]
+
+    # --------------------------------------------------------
+    # Splitter
+    # --------------------------------------------------------
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=150,
+        separators=[
+            "\n\n",
+            "\n",
+            ". ",
+            " ",
+            "",
+        ],
+    )
+
+    embeddings = create_embeddings()
+
+    total_chunks = 0
+
+    # --------------------------------------------------------
+    # Process setiap halaman
+    # --------------------------------------------------------
+
+    for page_index, page_text in enumerate(
+        page_texts
+    ):
+
+        page_number = page_index + 1
+
+        page_text = normalize_text(
+            page_text
+        )
+
+        if not page_text:
+
+            continue
+
+        chunks = splitter.split_text(
+            page_text
+        )
+
+        if not chunks:
+
+            continue
+
+        print(
+            f"Halaman {page_number}: "
+            f"{len(chunks)} chunks"
+        )
+
+        # ----------------------------------------------------
+        # Embedding secara batch
+        # ----------------------------------------------------
+
+        for start in range(
+            0,
+            len(chunks),
+            EMBEDDING_BATCH_SIZE
+        ):
+
+            batch = chunks[
+                start:
+                start + EMBEDDING_BATCH_SIZE
+            ]
+
+            batch = [
+                normalize_text(x)
+                for x in batch
+                if normalize_text(x)
+            ]
+
+            if not batch:
+
+                continue
+
+            print(
+                f"Embedding halaman "
+                f"{page_number}, "
+                f"{start + 1}-"
+                f"{start + len(batch)}"
+            )
+
+            vectors = embeddings.embed_documents(
+                batch
+            )
+
+            rows = []
+
+            for local_index, (
+                chunk_text,
+                vector
+            ) in enumerate(
+                zip(
+                    batch,
+                    vectors
+                )
+            ):
+
+                chunk_number = (
+                    start
+                    + local_index
+                    + 1
+                )
+
+                rows.append(
+                    {
+                        "book_id": book_id,
+                        "content": chunk_text,
+                        "embedding": vector,
+                        "kitab_name": filename,
+                        "category": category,
+                        "page_number": page_number,
+                        "chunk_number": chunk_number,
+                        "file_hash": book_hash,
+                    }
+                )
+
+            if rows:
+
+                client = create_supabase()
+
+                client.table(
+                    "kitab_chunks"
+                ).upsert(
+                    rows,
+                    on_conflict=(
+                        "file_hash,"
+                        "page_number,"
+                        "chunk_number"
+                    )
+                ).execute()
+
+                total_chunks += len(
+                    rows
+                )
+
+            update_book(
+                book_id,
+                processed_pages=page_number,
+                total_chunks=total_chunks,
+                status="EMBEDDING",
+                current_page=page_number,
+            )
+
+            update_status(
+                book=filename,
+                page=page_number,
+                total_pages=total_pages,
+                message=(
+                    f"Embedding halaman "
+                    f"{page_number}/"
+                    f"{total_pages}"
+                )
+            )
+
+            del vectors
+            del rows
+
+            gc.collect()
+
+        del chunks
+
+        gc.collect()
+
+    # --------------------------------------------------------
+    # READY
+    # --------------------------------------------------------
+
+    update_book(
+        book_id,
+        processed_pages=total_pages,
+        total_chunks=total_chunks,
+        status="READY",
+        current_page=total_pages,
+    )
+
+    print()
+    print(
+        "KITAB SIAP:",
+        filename
+    )
+
+    print(
+        "Jumlah chunks:",
+        total_chunks
+    )
+
+
+# ============================================================
+# PROCESS TXT
+# ============================================================
+
+def process_txt_book(
+    path,
+    book_hash,
+    category
+):
+
+    filename = os.path.basename(
+        path
+    )
+
+    full_text = extract_txt(
+        path
+    )
+
+    if not full_text:
+
+        raise RuntimeError(
+            "Tiada teks berjaya diperoleh."
+        )
+
+    book = create_book_record(
+        path,
+        book_hash,
+        category,
+        1
+    )
+
+    book_id = book["id"]
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=150,
+        separators=[
+            "\n\n",
+            "\n",
+            ". ",
+            " ",
+            "",
+        ],
+    )
+
+    chunks = splitter.split_text(
+        full_text
+    )
+
+    embeddings = create_embeddings()
+
+    total_chunks = 0
+
+    for start in range(
+        0,
+        len(chunks),
+        EMBEDDING_BATCH_SIZE
+    ):
+
+        batch = chunks[
+            start:
+            start + EMBEDDING_BATCH_SIZE
+        ]
+
+        vectors = embeddings.embed_documents(
+            batch
+        )
+
+        rows = []
+
+        for local_index, (
+            chunk_text,
+            vector
+        ) in enumerate(
+            zip(
+                batch,
+                vectors
+            )
+        ):
+
+            chunk_number = (
+                start
+                + local_index
+                + 1
+            )
+
+            rows.append(
+                {
+                    "book_id": book_id,
+                    "content": chunk_text,
+                    "embedding": vector,
+                    "kitab_name": filename,
+                    "category": category,
+                    "page_number": 1,
+                    "chunk_number": chunk_number,
+                    "file_hash": book_hash,
+                }
+            )
+
+        if rows:
+
+            client = create_supabase()
+
+            client.table(
+                "kitab_chunks"
+            ).upsert(
+                rows,
+                on_conflict=(
+                    "file_hash,"
+                    "page_number,"
+                    "chunk_number"
+                )
+            ).execute()
+
+            total_chunks += len(
+                rows
+            )
+
+        update_book(
+            book_id,
+            processed_pages=1,
+            total_chunks=total_chunks,
+            status="EMBEDDING",
+            current_page=1,
+        )
+
+        del vectors
+        del rows
+
+        gc.collect()
+
+    update_book(
+        book_id,
+        processed_pages=1,
+        total_chunks=total_chunks,
+        status="READY",
+        current_page=1,
+    )
+
+    print(
+        "TXT SIAP:",
+        filename
+    )
 
 
 # ============================================================
@@ -1346,202 +1744,26 @@ def process_book(
 
     update_status(
         book=filename,
-        message="Mengekstrak teks"
+        message="Mengekstrak dan embedding"
     )
-
-    # --------------------------------------------------------
-    # Extract
-    # --------------------------------------------------------
 
     if path.lower().endswith(
         ".txt"
     ):
 
-        full_text = extract_txt(
-            path
+        process_txt_book(
+            path,
+            book_hash,
+            category
         )
 
     else:
 
-        full_text = extract_pdf(
+        process_pdf_book(
             path,
-            book_hash
+            book_hash,
+            category
         )
-
-    if not full_text:
-
-        raise RuntimeError(
-            "Tiada teks berjaya diperoleh."
-        )
-
-    # --------------------------------------------------------
-    # Split
-    # --------------------------------------------------------
-
-    update_status(
-        message="Memecahkan teks kepada chunks"
-    )
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=150,
-        separators=[
-            "\n\n",
-            "\n",
-            ". ",
-            " ",
-            "",
-        ],
-    )
-
-    chunks = splitter.split_text(
-        full_text
-    )
-
-    print(
-        "Jumlah chunks:",
-        len(chunks)
-    )
-
-    if not chunks:
-
-        raise RuntimeError(
-            "Tiada chunks."
-        )
-
-    # --------------------------------------------------------
-    # Vectorstore
-    # --------------------------------------------------------
-
-    update_status(
-        message="Menyimpan embedding"
-    )
-
-    vectorstore = get_vectorstore()
-
-    total = len(
-        chunks
-    )
-
-    batch_size = EMBEDDING_BATCH_SIZE
-
-    try:
-
-        for start in range(
-            0,
-            total,
-            batch_size
-        ):
-
-            end = min(
-                start + batch_size,
-                total
-            )
-
-            batch_documents = []
-
-            batch_ids = []
-
-            for index in range(
-                start,
-                end
-            ):
-
-                chunk = normalize_text(
-                    chunks[index]
-                )
-
-                if not chunk:
-
-                    continue
-
-                doc = Document(
-                    page_content=chunk,
-                    metadata={
-                        "source": filename,
-                        "path": path,
-                        "category": category,
-                        "book_hash": book_hash,
-                        "chunk": index,
-                    },
-                )
-
-                batch_documents.append(
-                    doc
-                )
-
-                batch_ids.append(
-                    f"{book_hash}_{index}"
-                )
-
-            if not batch_documents:
-
-                continue
-
-            actual_end = min(
-                end,
-                total
-            )
-
-            print(
-                f"Embedding "
-                f"{start + 1}-"
-                f"{actual_end}/"
-                f"{total}"
-            )
-
-            vectorstore.add_documents(
-                documents=batch_documents,
-                ids=batch_ids
-            )
-
-            update_status(
-                page=actual_end,
-                total_pages=total,
-                message=(
-                    f"Embedding "
-                    f"{actual_end}/"
-                    f"{total}"
-                )
-            )
-
-            del batch_documents
-            del batch_ids
-
-            gc.collect()
-
-        try:
-
-            vectorstore.persist()
-
-        except Exception:
-
-            pass
-
-    except Exception as e:
-
-        print(
-            "Embedding gagal:",
-            e
-        )
-
-        # Padam embedding separa
-        delete_source(
-            book_hash
-        )
-
-        raise
-
-    del vectorstore
-    del chunks
-    del full_text
-
-    gc.collect()
-
-    print(
-        "KITAB SELESAI:",
-        filename
-    )
 
 
 # ============================================================
@@ -1575,7 +1797,7 @@ def sync_books():
     current_files = {}
 
     # --------------------------------------------------------
-    # Hash
+    # HASH
     # --------------------------------------------------------
 
     for path in files:
@@ -1597,7 +1819,7 @@ def sync_books():
             )
 
     # --------------------------------------------------------
-    # Delete removed books
+    # DELETE REMOVED
     # --------------------------------------------------------
 
     for old_path in list(
@@ -1634,7 +1856,7 @@ def sync_books():
     )
 
     # --------------------------------------------------------
-    # Process
+    # PROCESS
     # --------------------------------------------------------
 
     for path, book_hash in (
@@ -1650,7 +1872,7 @@ def sync_books():
         )
 
         # ----------------------------------------------------
-        # Tidak berubah
+        # READY
         # ----------------------------------------------------
 
         if (
@@ -1669,7 +1891,7 @@ def sync_books():
             continue
 
         # ----------------------------------------------------
-        # Changed / failed
+        # CHANGED
         # ----------------------------------------------------
 
         if old:
@@ -1693,7 +1915,7 @@ def sync_books():
                 )
 
         # ----------------------------------------------------
-        # Process
+        # PROCESS
         # ----------------------------------------------------
 
         try:
@@ -1763,10 +1985,6 @@ def sync_books():
 
             gc.collect()
 
-    # --------------------------------------------------------
-    # Siap
-    # --------------------------------------------------------
-
     INDEX_READY = True
 
     update_status(
@@ -1789,7 +2007,7 @@ def sync_books():
 
 
 # ============================================================
-# SEARCH
+# SEARCH SUPABASE
 # ============================================================
 
 def search_books(
@@ -1797,58 +2015,24 @@ def search_books(
     category=None
 ):
 
-    vectorstore = get_vectorstore()
+    embeddings = create_embeddings()
 
-    try:
+    query_vector = embeddings.embed_query(
+        question
+    )
 
-        if category:
+    client = create_supabase()
 
-            try:
+    result = client.rpc(
+        "match_kitab_chunks",
+        {
+            "query_embedding": query_vector,
+            "match_count": SEARCH_K,
+            "filter_category": category,
+        }
+    ).execute()
 
-                docs = (
-                    vectorstore
-                    .similarity_search(
-                        question,
-                        k=SEARCH_K,
-                        filter={
-                            "category":
-                                category
-                        }
-                    )
-                )
-
-            except Exception as e:
-
-                print(
-                    "Filter search gagal:",
-                    e
-                )
-
-                docs = (
-                    vectorstore
-                    .similarity_search(
-                        question,
-                        k=SEARCH_K
-                    )
-                )
-
-        else:
-
-            docs = (
-                vectorstore
-                .similarity_search(
-                    question,
-                    k=SEARCH_K
-                )
-            )
-
-        return docs
-
-    finally:
-
-        del vectorstore
-
-        gc.collect()
+    return result.data or []
 
 
 # ============================================================
@@ -1883,12 +2067,12 @@ def generate_answer(
 
     try:
 
-        docs = search_books(
+        results = search_books(
             question,
             category
         )
 
-        if not docs:
+        if not results:
 
             return (
                 "Maaf, saya tidak menemui "
@@ -1898,46 +2082,61 @@ def generate_answer(
 
         context_parts = []
 
-        for doc in docs:
-
-            metadata = (
-                doc.metadata
-                or {}
-            )
-
-            source = metadata.get(
-                "source",
-                "Tidak diketahui"
-            )
-
-            category_name = metadata.get(
-                "category",
-                "-"
-            )
-
-            chunk = metadata.get(
-                "chunk",
-                "-"
-            )
-
-            text = (
-                doc.page_content
-            )
+        for item in results:
 
             context_parts.append(
                 "SUMBER: "
-                + source
+                + str(
+                    item.get(
+                        "kitab_name",
+                        "Tidak diketahui"
+                    )
+                )
                 + "\n"
                 + "KATEGORI: "
                 + str(
-                    category_name
+                    item.get(
+                        "category",
+                        "-"
+                    )
+                )
+                + "\n"
+                + "HALAMAN: "
+                + str(
+                    item.get(
+                        "page_number",
+                        "-"
+                    )
                 )
                 + "\n"
                 + "CHUNK: "
-                + str(chunk)
+                + str(
+                    item.get(
+                        "chunk_number",
+                        "-"
+                    )
+                )
+                + "\n"
+                + "SIMILARITY: "
+                + str(
+                    round(
+                        float(
+                            item.get(
+                                "similarity",
+                                0
+                            )
+                        ),
+                        4
+                    )
+                )
                 + "\n"
                 + "TEKS:\n"
-                + text
+                + str(
+                    item.get(
+                        "content",
+                        ""
+                    )
+                )
             )
 
         context = (
@@ -1947,9 +2146,8 @@ def generate_answer(
             )
         )
 
-        # Hadkan context
         context = context[
-            :24000
+            :MAX_CONTEXT_CHARS
         ]
 
         prompt = f"""
@@ -1982,13 +2180,12 @@ PERATURAN PENTING:
 
 7. Gunakan format yang mudah dibaca.
 
-8. Jika nama kitab tersedia,
-   nyatakan nama kitab pada akhir
-   jawapan.
+8. Nyatakan nama kitab jika tersedia.
 
-9. Jika terdapat nombor halaman
-   dalam konteks, nyatakan halaman
-   tersebut.
+9. Nyatakan nombor halaman jika tersedia.
+
+10. Jangan masukkan maklumat luar
+    daripada konteks kitab.
 
 SOALAN PENGGUNA:
 {question}
@@ -2021,7 +2218,7 @@ KONTEKS KITAB:
         answer = answer.strip()
 
         del llm
-        del docs
+        del results
         del context
 
         gc.collect()
@@ -2045,7 +2242,7 @@ KONTEKS KITAB:
 
 
 # ============================================================
-# TELEGRAM /START
+# START
 # ============================================================
 
 async def start_command(
@@ -2091,7 +2288,7 @@ soalan tanpa command.
 
 
 # ============================================================
-# TELEGRAM STATUS
+# STATUS TELEGRAM
 # ============================================================
 
 async def status_command(
@@ -2322,7 +2519,7 @@ async def category_question(
 
 
 # ============================================================
-# FIQH
+# COMMANDS
 # ============================================================
 
 async def fiqh_command(
@@ -2336,10 +2533,6 @@ async def fiqh_command(
     )
 
 
-# ============================================================
-# TAUHID
-# ============================================================
-
 async def tauhid_command(
     update,
     context
@@ -2350,10 +2543,6 @@ async def tauhid_command(
         "TAUHID"
     )
 
-
-# ============================================================
-# SEMUA KITAB
-# ============================================================
 
 async def semua_command(
     update,
@@ -2461,7 +2650,7 @@ async def normal_message(
 
 
 # ============================================================
-# TELEGRAM BOT
+# TELEGRAM
 # ============================================================
 
 def run_telegram():
@@ -2487,10 +2676,6 @@ def run_telegram():
             )
             .build()
         )
-
-        # ----------------------------------------------------
-        # Commands
-        # ----------------------------------------------------
 
         telegram_app.add_handler(
             CommandHandler(
@@ -2527,10 +2712,6 @@ def run_telegram():
             )
         )
 
-        # ----------------------------------------------------
-        # Normal text
-        # ----------------------------------------------------
-
         telegram_app.add_handler(
             MessageHandler(
                 filters.TEXT
@@ -2542,18 +2723,6 @@ def run_telegram():
         print(
             "Telegram polling dimulakan."
         )
-
-        # ----------------------------------------------------
-        # PENTING
-        #
-        # run_telegram() berjalan dalam
-        # background thread.
-        #
-        # stop_signals=None diperlukan
-        # supaya python-telegram-bot tidak
-        # cuba menggunakan signal handler
-        # daripada thread.
-        # ----------------------------------------------------
 
         telegram_app.run_polling(
             allowed_updates=Update.ALL_TYPES,
@@ -2572,7 +2741,7 @@ def run_telegram():
 
 
 # ============================================================
-# BACKGROUND INDEXING
+# BACKGROUND
 # ============================================================
 
 def start_background():
@@ -2601,10 +2770,6 @@ def start_background():
 
             gc.collect()
 
-    # --------------------------------------------------------
-    # Indexing thread
-    # --------------------------------------------------------
-
     indexing_thread = threading.Thread(
         target=indexing,
         daemon=True,
@@ -2613,13 +2778,7 @@ def start_background():
 
     indexing_thread.start()
 
-    # Beri sedikit masa Flask/indexing
-    # untuk mula sebelum Telegram.
     time.sleep(2)
-
-    # --------------------------------------------------------
-    # Telegram thread
-    # --------------------------------------------------------
 
     telegram_thread = threading.Thread(
         target=run_telegram,
@@ -2631,7 +2790,7 @@ def start_background():
 
 
 # ============================================================
-# STARTUP INFORMATION
+# STARTUP
 # ============================================================
 
 print(
@@ -2640,6 +2799,10 @@ print(
 
 print(
     "TanyaFiqhBot"
+)
+
+print(
+    "Database: Supabase pgvector"
 )
 
 print(
@@ -2658,6 +2821,11 @@ print(
 )
 
 print(
+    "Embedding Dimension:",
+    EMBEDDING_DIMENSION
+)
+
+print(
     "LLM:",
     LLM_MODEL
 )
@@ -2673,24 +2841,15 @@ print(
 )
 
 print(
-    "Chroma:",
-    CHROMA_DIR
-)
-
-print(
     "=" * 60
 )
 
-
-# ============================================================
-# START BACKGROUND
-# ============================================================
 
 start_background()
 
 
 # ============================================================
-# LOCAL DEVELOPMENT
+# LOCAL
 # ============================================================
 
 if __name__ == "__main__":
