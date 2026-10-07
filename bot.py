@@ -1,7 +1,12 @@
 import os
 import glob
-import logging
+import json
+import hashlib
 import threading
+import asyncio
+import re
+import time
+from pathlib import Path
 
 from flask import Flask
 
@@ -10,499 +15,1697 @@ from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
+    CommandHandler,
     filters,
 )
 
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    TextLoader,
-)
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import (
     GoogleGenerativeAIEmbeddings,
     ChatGoogleGenerativeAI,
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 
 # ============================================================
-# 1. LOGGING
+# KONFIGURASI
 # ============================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+KITAB_DIR = os.environ.get("KITAB_DIR", "kitab")
+
+DATA_DIR = os.environ.get("DATA_DIR", "/var/data")
+
+# Versi baru supaya tidak bercampur dengan database lama
+CHROMA_DIR = os.path.join(
+    DATA_DIR,
+    "chroma_tanyafiqh_v2"
 )
 
-logger = logging.getLogger(__name__)
+MANIFEST_FILE = os.path.join(
+    DATA_DIR,
+    "manifest_tanyafiqh_v2.json"
+)
 
+EXTRACTED_DIR = os.path.join(
+    DATA_DIR,
+    "extracted_text"
+)
 
-# ============================================================
-# 2. ENVIRONMENT VARIABLES
-# ============================================================
+COLLECTION_NAME = "tanyafiqh_gemini001_v2"
 
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-
-if not GOOGLE_API_KEY:
-    raise RuntimeError(
-        "GOOGLE_API_KEY tidak dijumpai. "
-        "Sila masukkan GOOGLE_API_KEY dalam Render Environment Variables."
-    )
-
-if not TELEGRAM_TOKEN:
-    raise RuntimeError(
-        "TELEGRAM_TOKEN tidak dijumpai. "
-        "Sila masukkan TELEGRAM_TOKEN dalam Render Environment Variables."
-    )
-
-
-# Pastikan library Google menggunakan API key ini
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-
-
-# ============================================================
-# 3. CONFIGURATION
-# ============================================================
-
-FOLDER_PATH = "kitab"
-
-EMBEDDING_MODEL = "gemini-embedding-001"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 LLM_MODEL = "gemini-2.5-flash"
+
+OCR_DPI = 200
+
+# Jika teks yang diekstrak terlalu pendek,
+# sistem akan anggap page tersebut mungkin scan
+MIN_TEXT_CHARS = 40
 
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 200
 
-RETRIEVER_K = 4
+RETRIEVER_K = 6
 
 
 # ============================================================
-# 4. LOAD KITAB
+# FOLDER
 # ============================================================
 
-def load_kitab():
-    logger.info("========================================")
-    logger.info("MEMULAKAN PROSES MEMUAT NAIK KITAB")
-    logger.info("========================================")
-
-    docs = []
-
-    if not os.path.exists(FOLDER_PATH):
-        logger.warning(
-            "Folder '%s' tidak dijumpai. Folder akan dicipta.",
-            FOLDER_PATH
-        )
-
-        os.makedirs(FOLDER_PATH, exist_ok=True)
-
-    # --------------------------------------------------------
-    # LOAD PDF
-    # --------------------------------------------------------
-
-    pdf_files = glob.glob(
-        os.path.join(FOLDER_PATH, "*.pdf")
-    )
-
-    logger.info(
-        "Jumlah fail PDF dijumpai: %s",
-        len(pdf_files)
-    )
-
-    for pdf_file in pdf_files:
-
-        try:
-            logger.info(
-                "Membaca PDF: %s",
-                os.path.basename(pdf_file)
-            )
-
-            loader = PyPDFLoader(pdf_file)
-
-            pdf_docs = loader.load()
-
-            # Simpan nama kitab dalam metadata
-            for doc in pdf_docs:
-                doc.metadata["source_file"] = os.path.basename(
-                    pdf_file
-                )
-
-            docs.extend(pdf_docs)
-
-            logger.info(
-                "Berjaya membaca %s halaman daripada %s",
-                len(pdf_docs),
-                os.path.basename(pdf_file)
-            )
-
-        except Exception as e:
-
-            logger.exception(
-                "Gagal membaca PDF %s: %s",
-                pdf_file,
-                e
-            )
-
-
-    # --------------------------------------------------------
-    # LOAD TXT
-    # --------------------------------------------------------
-
-    txt_files = glob.glob(
-        os.path.join(FOLDER_PATH, "*.txt")
-    )
-
-    logger.info(
-        "Jumlah fail TXT dijumpai: %s",
-        len(txt_files)
-    )
-
-    for txt_file in txt_files:
-
-        try:
-            logger.info(
-                "Membaca TXT: %s",
-                os.path.basename(txt_file)
-            )
-
-            loader = TextLoader(
-                txt_file,
-                encoding="utf-8"
-            )
-
-            txt_docs = loader.load()
-
-            for doc in txt_docs:
-                doc.metadata["source_file"] = os.path.basename(
-                    txt_file
-                )
-
-            docs.extend(txt_docs)
-
-        except Exception as e:
-
-            logger.exception(
-                "Gagal membaca TXT %s: %s",
-                txt_file,
-                e
-            )
-
-
-    logger.info(
-        "Jumlah dokumen asal: %s",
-        len(docs)
-    )
-
-    return docs
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(CHROMA_DIR, exist_ok=True)
+os.makedirs(EXTRACTED_DIR, exist_ok=True)
+os.makedirs(KITAB_DIR, exist_ok=True)
 
 
 # ============================================================
-# 5. SPLIT DOCUMENT
+# CHECK API KEY
 # ============================================================
 
-def split_documents(docs):
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=[
-            "\n\n",
-            "\n",
-            ". ",
-            "۔ ",
-            " ",
-            ""
-        ]
-    )
+if not GOOGLE_API_KEY:
+    print("AMARAN: GOOGLE_API_KEY tidak dijumpai.")
 
-    splits = text_splitter.split_documents(docs)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-    # Buang chunk kosong
-    splits = [
-        doc
-        for doc in splits
-        if doc.page_content and doc.page_content.strip()
-    ]
-
-    logger.info(
-        "Jumlah pecahan teks: %s",
-        len(splits)
-    )
-
-    return splits
+if not TELEGRAM_TOKEN:
+    print("AMARAN: TELEGRAM_TOKEN tidak dijumpai.")
 
 
 # ============================================================
-# 6. FALLBACK TEXT
+# EMBEDDING
 # ============================================================
 
-def create_fallback_document():
-
-    dummy_text = """
-    Sistem TanyaFiqhBot berjaya dihidupkan.
-
-    Tiada kandungan kitab yang boleh dibaca ditemui.
-
-    Sila masukkan kitab dalam format PDF berasaskan teks
-    atau fail TXT ke dalam folder kitab.
-
-    Jika PDF merupakan dokumen scan/gambar, teks mungkin
-    tidak dapat dibaca secara automatik.
-    """
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP
-    )
-
-    return text_splitter.create_documents(
-        [dummy_text]
-    )
-
-
-# ============================================================
-# 7. BUILD VECTOR DATABASE
-# ============================================================
-
-def build_vectorstore():
-
-    docs = load_kitab()
-
-    if not docs:
-
-        logger.warning(
-            "Tiada dokumen kitab dijumpai."
-        )
-
-        splits = create_fallback_document()
-
-    else:
-
-        splits = split_documents(docs)
-
-        if not splits:
-
-            logger.warning(
-                "Dokumen dijumpai tetapi tiada teks boleh dibaca."
-            )
-
-            splits = create_fallback_document()
-
-
-    logger.info(
-        "Jumlah chunk untuk embedding: %s",
-        len(splits)
-    )
-
-
-    # --------------------------------------------------------
-    # GEMINI EMBEDDING
-    # --------------------------------------------------------
-
-    logger.info(
-        "Menggunakan embedding model: %s",
-        EMBEDDING_MODEL
-    )
-
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=EMBEDDING_MODEL,
-        task_type="retrieval_document",
-        google_api_key=GOOGLE_API_KEY,
-    )
-
-
-    # --------------------------------------------------------
-    # CHROMA
-    # --------------------------------------------------------
-
-    logger.info(
-        "Membina Chroma vector database..."
-    )
-
-    vectorstore = Chroma.from_documents(
-        documents=splits,
-        embedding=embeddings,
-    )
-
-
-    logger.info(
-        "Chroma vector database berjaya dibina."
-    )
-
-
-    retriever = vectorstore.as_retriever(
-        search_kwargs={
-            "k": RETRIEVER_K
-        }
-    )
-
-    return retriever
-
-
-# ============================================================
-# 8. BUILD RAG
-# ============================================================
-
-retriever = build_vectorstore()
-
-
-# ============================================================
-# 9. GEMINI LLM
-# ============================================================
-
-logger.info(
-    "Menggunakan LLM model: %s",
-    LLM_MODEL
-)
-
-llm = ChatGoogleGenerativeAI(
-    model=LLM_MODEL,
-    temperature=0.3,
+embeddings = GoogleGenerativeAIEmbeddings(
+    model=EMBEDDING_MODEL,
+    task_type="retrieval_document",
     google_api_key=GOOGLE_API_KEY,
 )
 
 
 # ============================================================
-# 10. SYSTEM PROMPT
+# CHROMA
 # ============================================================
 
-system_prompt = """
-Anda adalah TanyaFiqhBot, pembantu rujukan ilmu fiqh
-berasaskan Ahli Sunnah Wal Jamaah.
+vectorstore = Chroma(
+    collection_name=COLLECTION_NAME,
+    persist_directory=CHROMA_DIR,
+    embedding_function=embeddings,
+)
 
-ARAHAN PENTING:
 
-1. Jawab berdasarkan konteks kitab yang diberikan.
+# ============================================================
+# TEXT SPLITTER
+# ============================================================
 
-2. Jangan mereka-reka fakta, hukum, dalil atau rujukan
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP,
+    separators=[
+        "\n\n",
+        "\n",
+        ". ",
+        "؟ ",
+        "، ",
+        " ",
+        "",
+    ],
+)
+
+
+# ============================================================
+# LLM
+# ============================================================
+
+llm = ChatGoogleGenerativeAI(
+    model=LLM_MODEL,
+    temperature=0.2,
+    google_api_key=GOOGLE_API_KEY,
+)
+
+
+# ============================================================
+# LOCK
+# ============================================================
+
+index_lock = threading.Lock()
+
+INDEX_READY = threading.Event()
+
+INDEX_STATUS = {
+    "status": "starting",
+    "total_files": 0,
+    "processed": 0,
+    "current_file": "",
+    "message": "Sistem sedang bermula..."
+}
+
+
+# ============================================================
+# MANIFEST
+# ============================================================
+
+def load_manifest():
+
+    if not os.path.exists(MANIFEST_FILE):
+        return {}
+
+    try:
+
+        with open(
+            MANIFEST_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            return json.load(f)
+
+    except Exception as e:
+
+        print("Gagal membaca manifest:", e)
+
+        return {}
+
+
+def save_manifest(manifest):
+
+    temp_file = MANIFEST_FILE + ".tmp"
+
+    with open(
+        temp_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            manifest,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(
+        temp_file,
+        MANIFEST_FILE
+    )
+
+
+# ============================================================
+# HASH FILE
+# ============================================================
+
+def get_file_hash(filepath):
+
+    sha256 = hashlib.sha256()
+
+    with open(filepath, "rb") as f:
+
+        while True:
+
+            chunk = f.read(1024 * 1024)
+
+            if not chunk:
+                break
+
+            sha256.update(chunk)
+
+    return sha256.hexdigest()
+
+
+# ============================================================
+# NAMA KITAB
+# ============================================================
+
+def get_book_info(filepath):
+
+    path = Path(filepath)
+
+    relative = path.relative_to(
+        Path(KITAB_DIR)
+    )
+
+    parts = relative.parts
+
+    filename = path.stem
+
+    if len(parts) >= 2:
+
+        category = parts[0]
+
+    else:
+
+        category = "LAIN-LAIN"
+
+    category = category.upper()
+
+    return {
+        "book_name": filename,
+        "category": category,
+        "file_name": path.name,
+        "relative_path": str(relative),
+    }
+
+
+# ============================================================
+# CLEAN TEXT
+# ============================================================
+
+def clean_text(text):
+
+    if not text:
+        return ""
+
+    text = text.replace("\x00", " ")
+
+    text = text.replace("\r\n", "\n")
+    text = text.replace("\r", "\n")
+
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# OCR LANGUAGE
+# ============================================================
+
+def get_ocr_language():
+
+    try:
+
+        import pytesseract
+
+        available = set(
+            pytesseract.get_languages(
+                config=""
+            )
+        )
+
+        languages = []
+
+        # Bahasa Melayu
+        if "msa" in available:
+            languages.append("msa")
+
+        # Arabic / Jawi
+        if "ara" in available:
+            languages.append("ara")
+
+        # English
+        if "eng" in available:
+            languages.append("eng")
+
+        if languages:
+            return "+".join(languages)
+
+        return "eng"
+
+    except Exception as e:
+
+        print(
+            "Gagal mendapatkan bahasa OCR:",
+            e
+        )
+
+        return "eng"
+
+
+# ============================================================
+# OCR SATU PAGE
+# ============================================================
+
+def ocr_page(filepath, page_number):
+
+    from pdf2image import convert_from_path
+    import pytesseract
+
+    language = get_ocr_language()
+
+    print(
+        f"OCR page {page_number} "
+        f"menggunakan {language}"
+    )
+
+    images = convert_from_path(
+        filepath,
+        dpi=OCR_DPI,
+        first_page=page_number,
+        last_page=page_number,
+        fmt="jpeg",
+        grayscale=True,
+        use_pdftocairo=True,
+    )
+
+    if not images:
+        return ""
+
+    image = images[0]
+
+    text = pytesseract.image_to_string(
+        image,
+        lang=language,
+        config="--psm 6",
+    )
+
+    return clean_text(text)
+
+
+# ============================================================
+# EXTRACT PDF
+# ============================================================
+
+def extract_pdf(filepath):
+
+    from pypdf import PdfReader
+
+    reader = PdfReader(filepath)
+
+    pages = []
+
+    total_pages = len(reader.pages)
+
+    print(
+        f"PDF: {filepath}"
+    )
+
+    print(
+        f"Jumlah halaman: {total_pages}"
+    )
+
+    for index, page in enumerate(
+        reader.pages,
+        start=1
+    ):
+
+        try:
+
+            text = page.extract_text() or ""
+
+        except Exception as e:
+
+            print(
+                f"Gagal extract page {index}:",
+                e
+            )
+
+            text = ""
+
+        text = clean_text(text)
+
+        # ----------------------------------------------------
+        # Jika teks terlalu sedikit,
+        # gunakan OCR
+        # ----------------------------------------------------
+
+        if len(text) < MIN_TEXT_CHARS:
+
+            print(
+                f"Page {index}: "
+                f"teks sedikit ({len(text)} chars) "
+                f"-> OCR"
+            )
+
+            try:
+
+                ocr_text = ocr_page(
+                    filepath,
+                    index
+                )
+
+                if len(ocr_text) > len(text):
+                    text = ocr_text
+
+            except Exception as e:
+
+                print(
+                    f"OCR page {index} gagal:",
+                    e
+                )
+
+        if text:
+
+            pages.append({
+                "page_number": index,
+                "text": text
+            })
+
+    return pages
+
+
+# ============================================================
+# EXTRACT TXT
+# ============================================================
+
+def extract_txt(filepath):
+
+    try:
+
+        with open(
+            filepath,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            text = f.read()
+
+    except UnicodeDecodeError:
+
+        with open(
+            filepath,
+            "r",
+            encoding="utf-8-sig"
+        ) as f:
+
+            text = f.read()
+
+    text = clean_text(text)
+
+    if not text:
+        return []
+
+    return [
+        {
+            "page_number": None,
+            "text": text
+        }
+    ]
+
+
+# ============================================================
+# CACHE EXTRACTION
+# ============================================================
+
+def get_extraction_cache(hash_value):
+
+    return os.path.join(
+        EXTRACTED_DIR,
+        f"{hash_value}.json"
+    )
+
+
+def save_extraction_cache(
+    hash_value,
+    pages
+):
+
+    cache_file = get_extraction_cache(
+        hash_value
+    )
+
+    temp_file = cache_file + ".tmp"
+
+    with open(
+        temp_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            pages,
+            f,
+            ensure_ascii=False
+        )
+
+    os.replace(
+        temp_file,
+        cache_file
+    )
+
+
+def load_extraction_cache(
+    hash_value
+):
+
+    cache_file = get_extraction_cache(
+        hash_value
+    )
+
+    if not os.path.exists(cache_file):
+        return None
+
+    try:
+
+        with open(
+            cache_file,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            return json.load(f)
+
+    except Exception as e:
+
+        print(
+            "Cache extraction rosak:",
+            e
+        )
+
+        return None
+
+
+# ============================================================
+# DAPATKAN SEMUA KITAB
+# ============================================================
+
+def get_all_books():
+
+    files = []
+
+    patterns = [
+        "**/*.pdf",
+        "**/*.PDF",
+        "**/*.txt",
+        "**/*.TXT",
+    ]
+
+    for pattern in patterns:
+
+        files.extend(
+            glob.glob(
+                os.path.join(
+                    KITAB_DIR,
+                    pattern
+                ),
+                recursive=True
+            )
+        )
+
+    return sorted(
+        set(files)
+    )
+
+
+# ============================================================
+# BUAT DOCUMENT
+# ============================================================
+
+def create_documents_for_book(
+    filepath,
+    file_hash
+):
+
+    info = get_book_info(filepath)
+
+    extension = (
+        Path(filepath)
+        .suffix
+        .lower()
+    )
+
+    # --------------------------------------------------------
+    # CACHE
+    # --------------------------------------------------------
+
+    cached = load_extraction_cache(
+        file_hash
+    )
+
+    if cached is not None:
+
+        print(
+            f"Gunakan cache extraction: "
+            f"{info['book_name']}"
+        )
+
+        pages = cached
+
+    else:
+
+        if extension == ".pdf":
+
+            pages = extract_pdf(
+                filepath
+            )
+
+        elif extension == ".txt":
+
+            pages = extract_txt(
+                filepath
+            )
+
+        else:
+
+            return []
+
+        save_extraction_cache(
+            file_hash,
+            pages
+        )
+
+    # --------------------------------------------------------
+    # LangChain documents
+    # --------------------------------------------------------
+
+    documents = []
+
+    for page in pages:
+
+        text = page["text"]
+
+        if not text.strip():
+            continue
+
+        metadata = {
+
+            "source_file": info["file_name"],
+
+            "source_path": info["relative_path"],
+
+            "book_name": info["book_name"],
+
+            "category": info["category"],
+
+            "file_type": extension.replace(
+                ".",
+                ""
+            ),
+
+            "file_hash": file_hash,
+
+            "source_id": file_hash,
+
+            "page_number": (
+                page["page_number"]
+            ),
+        }
+
+        from langchain_core.documents import Document
+
+        documents.append(
+            Document(
+                page_content=text,
+                metadata=metadata
+            )
+        )
+
+    # --------------------------------------------------------
+    # Split
+    # --------------------------------------------------------
+
+    splits = text_splitter.split_documents(
+        documents
+    )
+
+    # Tambah chunk index
+    for index, doc in enumerate(splits):
+
+        doc.metadata["chunk_index"] = index
+
+    return splits
+
+
+# ============================================================
+# ID CHUNK
+# ============================================================
+
+def create_chunk_id(
+    file_hash,
+    doc
+):
+
+    page = doc.metadata.get(
+        "page_number",
+        "none"
+    )
+
+    chunk_index = doc.metadata.get(
+        "chunk_index",
+        0
+    )
+
+    raw = (
+        f"{file_hash}|"
+        f"{page}|"
+        f"{chunk_index}|"
+        f"{doc.page_content}"
+    )
+
+    return hashlib.sha256(
+        raw.encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+# ============================================================
+# DELETE SOURCE
+# ============================================================
+
+def delete_source(
+    source_id
+):
+
+    try:
+
+        vectorstore.delete(
+            where={
+                "source_id": source_id
+            }
+        )
+
+        print(
+            f"Vector lama dipadam: "
+            f"{source_id}"
+        )
+
+    except Exception as e:
+
+        print(
+            "Gagal delete source:",
+            e
+        )
+
+
+# ============================================================
+# INDEX SATU KITAB
+# ============================================================
+
+def index_book(
+    filepath,
+    old_record=None
+):
+
+    info = get_book_info(filepath)
+
+    print(
+        "\n================================"
+    )
+
+    print(
+        f"INDEX KITAB: "
+        f"{info['book_name']}"
+    )
+
+    print(
+        f"KATEGORI: "
+        f"{info['category']}"
+    )
+
+    print(
+        "================================"
+    )
+
+    file_hash = get_file_hash(
+        filepath
+    )
+
+    # --------------------------------------------------------
+    # Jika source hash sama,
+    # tidak perlu index lagi
+    # --------------------------------------------------------
+
+    if (
+        old_record
+        and old_record.get("hash")
+        == file_hash
+    ):
+
+        print(
+            "Kitab tidak berubah. "
+            "Langkau."
+        )
+
+        return {
+            "hash": file_hash,
+            "book_name": info["book_name"],
+            "category": info["category"],
+            "file_name": info["file_name"],
+            "relative_path": info[
+                "relative_path"
+            ],
+            "indexed_at": time.time(),
+            "skipped": True,
+        }
+
+    # --------------------------------------------------------
+    # Bersihkan partial indexing lama
+    # dengan hash yang sama
+    # --------------------------------------------------------
+
+    delete_source(
+        file_hash
+    )
+
+    # --------------------------------------------------------
+    # Extract + OCR + split
+    # --------------------------------------------------------
+
+    splits = create_documents_for_book(
+        filepath,
+        file_hash
+    )
+
+    if not splits:
+
+        print(
+            "TIADA TEKS DIJUMPAI:"
+            f" {filepath}"
+        )
+
+        raise RuntimeError(
+            "Kitab tidak mempunyai teks "
+            "yang boleh diproses."
+        )
+
+    print(
+        f"Jumlah chunk: {len(splits)}"
+    )
+
+    # --------------------------------------------------------
+    # Chunk IDs
+    # --------------------------------------------------------
+
+    ids = []
+
+    for doc in splits:
+
+        ids.append(
+            create_chunk_id(
+                file_hash,
+                doc
+            )
+        )
+
+    # --------------------------------------------------------
+    # Add secara batch
+    # --------------------------------------------------------
+
+    batch_size = 32
+
+    try:
+
+        for start in range(
+            0,
+            len(splits),
+            batch_size
+        ):
+
+            end = start + batch_size
+
+            batch_docs = splits[
+                start:end
+            ]
+
+            batch_ids = ids[
+                start:end
+            ]
+
+            print(
+                f"Embedding "
+                f"{start + 1}-"
+                f"{min(end, len(splits))}"
+                f"/{len(splits)}"
+            )
+
+            vectorstore.add_documents(
+                documents=batch_docs,
+                ids=batch_ids
+            )
+
+    except Exception as e:
+
+        print(
+            "Embedding gagal. "
+            "Membersihkan vector separa..."
+        )
+
+        delete_source(
+            file_hash
+        )
+
+        raise e
+
+    # --------------------------------------------------------
+    # Index berjaya
+    # --------------------------------------------------------
+
+    # Kalau hash lama berbeza,
+    # baru padam vector lama
+    if old_record:
+
+        old_hash = old_record.get(
+            "hash"
+        )
+
+        if (
+            old_hash
+            and old_hash != file_hash
+        ):
+
+            delete_source(
+                old_hash
+            )
+
+    print(
+        f"BERJAYA INDEX: "
+        f"{info['book_name']}"
+    )
+
+    return {
+
+        "hash": file_hash,
+
+        "book_name": info[
+            "book_name"
+        ],
+
+        "category": info[
+            "category"
+        ],
+
+        "file_name": info[
+            "file_name"
+        ],
+
+        "relative_path": info[
+            "relative_path"
+        ],
+
+        "chunks": len(splits),
+
+        "indexed_at": time.time(),
+
+        "skipped": False,
+    }
+
+
+# ============================================================
+# SYNC SEMUA KITAB
+# ============================================================
+
+def sync_books():
+
+    with index_lock:
+
+        INDEX_STATUS[
+            "status"
+        ] = "indexing"
+
+        INDEX_STATUS[
+            "message"
+        ] = "Sedang memproses kitab..."
+
+        try:
+
+            manifest = load_manifest()
+
+            files = get_all_books()
+
+            INDEX_STATUS[
+                "total_files"
+            ] = len(files)
+
+            INDEX_STATUS[
+                "processed"
+            ] = 0
+
+            print(
+                "\n================================"
+            )
+
+            print(
+                f"JUMLAH KITAB/FAIL: "
+                f"{len(files)}"
+            )
+
+            print(
+                "================================\n"
+            )
+
+            current_paths = set(
+                os.path.abspath(f)
+                for f in files
+            )
+
+            # ------------------------------------------------
+            # Index new / changed
+            # ------------------------------------------------
+
+            for filepath in files:
+
+                abs_path = os.path.abspath(
+                    filepath
+                )
+
+                INDEX_STATUS[
+                    "current_file"
+                ] = os.path.basename(
+                    filepath
+                )
+
+                relative_path = str(
+                    Path(filepath).relative_to(
+                        Path(KITAB_DIR)
+                    )
+                )
+
+                old_record = manifest.get(
+                    relative_path
+                )
+
+                try:
+
+                    result = index_book(
+                        filepath,
+                        old_record
+                    )
+
+                    manifest[
+                        relative_path
+                    ] = result
+
+                    save_manifest(
+                        manifest
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"GAGAL index "
+                        f"{filepath}: {e}"
+                    )
+
+                INDEX_STATUS[
+                    "processed"
+                ] += 1
+
+            # ------------------------------------------------
+            # Buang kitab yang sudah tiada
+            # ------------------------------------------------
+
+            old_paths = list(
+                manifest.keys()
+            )
+
+            for old_relative in old_paths:
+
+                old_abs = os.path.abspath(
+                    os.path.join(
+                        KITAB_DIR,
+                        old_relative
+                    )
+                )
+
+                if old_abs not in current_paths:
+
+                    print(
+                        "Kitab sudah dipadam:"
+                        f" {old_relative}"
+                    )
+
+                    old_record = manifest[
+                        old_relative
+                    ]
+
+                    old_hash = old_record.get(
+                        "hash"
+                    )
+
+                    if old_hash:
+
+                        delete_source(
+                            old_hash
+                        )
+
+                    del manifest[
+                        old_relative
+                    ]
+
+                    save_manifest(
+                        manifest
+                    )
+
+            INDEX_STATUS[
+                "status"
+            ] = "ready"
+
+            INDEX_STATUS[
+                "message"
+            ] = (
+                "Semua kitab selesai "
+                "diproses."
+            )
+
+            INDEX_READY.set()
+
+            print(
+                "\n================================"
+            )
+
+            print(
+                "INDEXING SELESAI"
+            )
+
+            print(
+                "================================\n"
+            )
+
+        except Exception as e:
+
+            INDEX_STATUS[
+                "status"
+            ] = "error"
+
+            INDEX_STATUS[
+                "message"
+            ] = str(e)
+
+            print(
+                "RALAT SYNC BESAR:",
+                e
+            )
+
+            # Tetap set supaya bot hidup
+            INDEX_READY.set()
+
+
+# ============================================================
+# FORMAT RUJUKAN
+# ============================================================
+
+def format_sources(
+    documents
+):
+
+    if not documents:
+        return ""
+
+    seen = set()
+
+    sources = []
+
+    for doc in documents:
+
+        metadata = doc.metadata
+
+        book = metadata.get(
+            "book_name",
+            "Tidak diketahui"
+        )
+
+        category = metadata.get(
+            "category",
+            "LAIN-LAIN"
+        )
+
+        page = metadata.get(
+            "page_number"
+        )
+
+        key = (
+            book,
+            page,
+            category
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        if page:
+
+            sources.append(
+                f"📖 {book} "
+                f"— {category} "
+                f"— halaman {page}"
+            )
+
+        else:
+
+            sources.append(
+                f"📖 {book} "
+                f"— {category}"
+            )
+
+    if not sources:
+        return ""
+
+    return (
+        "\n\n"
+        "📚 RUJUKAN:\n"
+        + "\n".join(sources)
+    )
+
+
+# ============================================================
+# FORMAT CONTEXT
+# ============================================================
+
+def format_context(
+    documents
+):
+
+    output = []
+
+    for doc in documents:
+
+        metadata = doc.metadata
+
+        book = metadata.get(
+            "book_name",
+            "Tidak diketahui"
+        )
+
+        category = metadata.get(
+            "category",
+            "LAIN-LAIN"
+        )
+
+        page = metadata.get(
+            "page_number"
+        )
+
+        if page:
+
+            source = (
+                f"[Kitab: {book} | "
+                f"Kategori: {category} | "
+                f"Halaman: {page}]"
+            )
+
+        else:
+
+            source = (
+                f"[Kitab: {book} | "
+                f"Kategori: {category}]"
+            )
+
+        output.append(
+            source
+            + "\n"
+            + doc.page_content
+        )
+
+    return "\n\n---\n\n".join(
+        output
+    )
+
+
+# ============================================================
+# CARI KITAB
+# ============================================================
+
+def search_documents(
+    question,
+    category=None
+):
+
+    search_kwargs = {
+        "k": RETRIEVER_K
+    }
+
+    if category:
+
+        search_kwargs[
+            "filter"
+        ] = {
+            "category": category.upper()
+        }
+
+    retriever = vectorstore.as_retriever(
+        search_kwargs=search_kwargs
+    )
+
+    return retriever.invoke(
+        question
+    )
+
+
+# ============================================================
+# JAWAB SOALAN
+# ============================================================
+
+def answer_question(
+    question,
+    category=None
+):
+
+    documents = search_documents(
+        question,
+        category
+    )
+
+    if not documents:
+
+        return (
+            "Maaf, saya tidak menemui "
+            "rujukan yang sesuai dalam "
+            "kitab yang telah dimasukkan."
+        )
+
+    context = format_context(
+        documents
+    )
+
+    category_instruction = ""
+
+    if category:
+
+        category_instruction = (
+            f"\nSoalan ini diminta dicari "
+            f"khusus dalam kategori "
+            f"{category.upper()}."
+        )
+
+    prompt = f"""
+Anda ialah TanyaFiqhBot, pembantu
+rujukan ilmu Islam berasaskan kitab.
+
+PENTING:
+
+1. Jawab berdasarkan KONTEXT KITAB
+   yang diberikan sahaja.
+
+2. Jangan reka fakta atau rujukan
    yang tidak terdapat dalam konteks.
 
-3. Jika jawapan tidak terdapat dalam konteks kitab,
-   nyatakan dengan jelas:
+3. Jika konteks tidak mencukupi,
+   nyatakan bahawa maklumat tersebut
+   tidak ditemui dalam kitab yang
+   sedang dirujuk.
 
-   "Maaf, maklumat tersebut tidak ditemui dalam
-   kitab yang tersedia dalam sistem."
+4. Jika terdapat perbezaan pandangan
+   antara kitab, nyatakan perbezaan
+   tersebut dengan jelas.
 
-4. Jika konteks menyebut nama kitab, gunakan nama kitab
-   tersebut sebagai rujukan.
+5. Jangan mendakwa jawapan anda
+   sebagai fatwa rasmi.
 
-5. Gunakan bahasa Melayu yang sopan dan mudah difahami.
+6. Gunakan Bahasa Melayu yang mudah
+   dan sopan.
 
-6. Jika terdapat perbezaan pendapat dalam konteks kitab,
-   nyatakan perbezaan tersebut dengan jelas.
+7. Jika sesuai, nyatakan nama kitab
+   dan halaman berdasarkan konteks.
 
-7. Jangan mendakwa sesuatu sebagai fatwa rasmi.
+8. Jangan mencipta nombor halaman.
 
-8. Untuk persoalan yang memerlukan keputusan hukum khusus
-   atau melibatkan keadaan peribadi yang kompleks, nasihatkan
-   pengguna merujuk ustaz/ustazah atau pihak berautoriti.
+9. Untuk soalan hukum, terangkan
+   jawapan berdasarkan teks kitab
+   yang diberikan.
+
+{category_instruction}
 
 KONTEKS KITAB:
+----------------
+
 {context}
+
+----------------
 
 SOALAN PENGGUNA:
 {question}
 
-JAWAPAN:
+Berikan jawapan yang jelas dan
+ringkas tetapi mencukupi.
 """
 
+    try:
 
-prompt = ChatPromptTemplate.from_template(
-    system_prompt
-)
-
-
-# ============================================================
-# 11. FORMAT DOCUMENT
-# ============================================================
-
-def format_docs(docs_list):
-
-    formatted = []
-
-    for doc in docs_list:
-
-        source = doc.metadata.get(
-            "source_file",
-            "Kitab tidak diketahui"
+        response = llm.invoke(
+            prompt
         )
 
-        page = doc.metadata.get(
-            "page",
-            None
+        answer = response.content
+
+        if isinstance(
+            answer,
+            list
+        ):
+
+            answer = "".join(
+                str(x)
+                for x in answer
+            )
+
+        answer = str(answer).strip()
+
+    except Exception as e:
+
+        print(
+            "LLM ERROR:",
+            e
         )
 
-        if page is not None:
-            page_text = f" | Halaman: {page + 1}"
-        else:
-            page_text = ""
-
-        formatted.append(
-            f"[Sumber: {source}{page_text}]\n"
-            f"{doc.page_content}"
+        return (
+            "Maaf, berlaku ralat "
+            "semasa menghasilkan jawapan."
         )
 
-    return "\n\n---\n\n".join(formatted)
+    source_text = format_sources(
+        documents
+    )
+
+    return answer + source_text
 
 
 # ============================================================
-# 12. RAG CHAIN
+# TELEGRAM
 # ============================================================
 
-rag_chain = (
-    {
-        "context": retriever | format_docs,
-        "question": RunnablePassthrough()
-    }
-    | prompt
-    | llm
-    | StrOutputParser()
-)
+async def start_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
+    message = """
+🤖 *TanyaFiqhBot*
 
-logger.info(
-    "========================================"
-)
+Assalamualaikum.
 
-logger.info(
-    "TanyaFiqhBot RAG berjaya disediakan."
-)
+Saya boleh membantu mencari jawapan
+berdasarkan kitab yang telah dimasukkan.
 
-logger.info(
-    "========================================"
-)
+📚 Kategori:
 
+/fiqh
+→ Cari dalam kitab FIQH
 
-# ============================================================
-# 13. FLASK WEB SERVER
-# ============================================================
+/tauhid
+→ Cari dalam kitab TAUHID
 
-app = Flask(__name__)
+/semua
+→ Cari dalam semua kitab
 
+Contoh:
 
-@app.route("/")
-def home():
+/fiqh Apakah hukum wuduk?
 
-    return (
-        "TanyaFiqhBot sedang aktif. "
-        "Telegram bot berjalan."
+/tauhid Apakah maksud tauhid rububiyyah?
+
+/semua Apakah hukum membaca al-Quran?
+"""
+
+    await update.message.reply_text(
+        message,
+        parse_mode="Markdown"
     )
 
 
-@app.route("/health")
-def health():
+# ============================================================
+# TELEGRAM FIQH
+# ============================================================
 
-    return {
-        "status": "ok",
-        "bot": "TanyaFiqhBot"
-    }
+async def fiqh_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    question = " ".join(
+        context.args
+    ).strip()
+
+    if not question:
+
+        await update.message.reply_text(
+            "Contoh:\n\n"
+            "/fiqh Apakah hukum wuduk?"
+        )
+
+        return
+
+    await process_question(
+        update,
+        question,
+        "FIQH"
+    )
 
 
 # ============================================================
-# 14. TELEGRAM MESSAGE HANDLER
+# TELEGRAM TAUHID
+# ============================================================
+
+async def tauhid_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    question = " ".join(
+        context.args
+    ).strip()
+
+    if not question:
+
+        await update.message.reply_text(
+            "Contoh:\n\n"
+            "/tauhid Apakah maksud "
+            "tauhid rububiyyah?"
+        )
+
+        return
+
+    await process_question(
+        update,
+        question,
+        "TAUHID"
+    )
+
+
+# ============================================================
+# TELEGRAM SEMUA
+# ============================================================
+
+async def semua_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    question = " ".join(
+        context.args
+    ).strip()
+
+    if not question:
+
+        await update.message.reply_text(
+            "Contoh:\n\n"
+            "/semua Apakah hukum membaca "
+            "al-Quran?"
+        )
+
+        return
+
+    await process_question(
+        update,
+        question,
+        None
+    )
+
+
+# ============================================================
+# PROCESS SOALAN
+# ============================================================
+
+async def process_question(
+    update,
+    question,
+    category
+):
+
+    if not INDEX_READY.is_set():
+
+        await update.message.reply_text(
+            "📚 Sistem masih menyediakan "
+            "kitab. Sila cuba semula "
+            "sebentar lagi."
+        )
+
+        return
+
+    loading = await update.message.reply_text(
+        "🔎 Sedang mencari jawapan "
+        "dalam kitab..."
+    )
+
+    try:
+
+        answer = await asyncio.to_thread(
+            answer_question,
+            question,
+            category
+        )
+
+    except Exception as e:
+
+        print(
+            "QUESTION ERROR:",
+            e
+        )
+
+        answer = (
+            "Maaf, berlaku ralat "
+            "semasa mencari jawapan."
+        )
+
+    try:
+
+        await loading.delete()
+
+    except Exception:
+        pass
+
+    # Telegram limit kira-kira 4096
+    max_length = 3900
+
+    if len(answer) <= max_length:
+
+        await update.message.reply_text(
+            answer
+        )
+
+        return
+
+    # Pecahkan jawapan panjang
+    chunks = []
+
+    current = ""
+
+    for paragraph in answer.split(
+        "\n\n"
+    ):
+
+        if len(current) + len(
+            paragraph
+        ) + 2 > max_length:
+
+            if current:
+
+                chunks.append(
+                    current
+                )
+
+            current = paragraph
+
+        else:
+
+            if current:
+                current += "\n\n"
+
+            current += paragraph
+
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+
+        await update.message.reply_text(
+            chunk
+        )
+
+
+# ============================================================
+# TELEGRAM MESSAGE BIASA
 # ============================================================
 
 async def handle_message(
@@ -513,226 +1716,218 @@ async def handle_message(
     if not update.message:
         return
 
-    if not update.message.text:
+    question = (
+        update.message.text
+        or ""
+    ).strip()
+
+    if not question:
         return
 
-    user_query = update.message.text.strip()
+    print(
+        f"Soalan diterima: "
+        f"{question}"
+    )
 
-    if not user_query:
-        return
-
-    logger.info(
-        "Soalan Telegram diterima: %s",
-        user_query
+    await process_question(
+        update,
+        question,
+        None
     )
 
 
-    # --------------------------------------------------------
-    # Hantar mesej loading
-    # --------------------------------------------------------
+# ============================================================
+# TELEGRAM BOT THREAD
+# ============================================================
+
+def run_telegram():
+
+    if not TELEGRAM_TOKEN:
+
+        print(
+            "Telegram tidak dijalankan "
+            "kerana TELEGRAM_TOKEN tiada."
+        )
+
+        return
 
     try:
 
-        processing_message = await update.message.reply_text(
-            "🔎 Sedang mencari rujukan dalam kitab..."
+        async def telegram_main():
+
+            application = (
+                ApplicationBuilder()
+                .token(
+                    TELEGRAM_TOKEN
+                )
+                .build()
+            )
+
+            application.add_handler(
+                CommandHandler(
+                    "start",
+                    start_command
+                )
+            )
+
+            application.add_handler(
+                CommandHandler(
+                    "fiqh",
+                    fiqh_command
+                )
+            )
+
+            application.add_handler(
+                CommandHandler(
+                    "tauhid",
+                    tauhid_command
+                )
+            )
+
+            application.add_handler(
+                CommandHandler(
+                    "semua",
+                    semua_command
+                )
+            )
+
+            application.add_handler(
+                MessageHandler(
+                    filters.TEXT
+                    & (~filters.COMMAND),
+                    handle_message
+                )
+            )
+
+            print(
+                "Telegram bot sedang "
+                "berjalan..."
+            )
+
+            await application.initialize()
+
+            await application.start()
+
+            await application.updater.start_polling()
+
+            # Kekalkan thread hidup
+            while True:
+
+                await asyncio.sleep(
+                    3600
+                )
+
+        asyncio.run(
+            telegram_main()
         )
 
     except Exception as e:
 
-        logger.error(
-            "Gagal menghantar mesej loading: %s",
+        print(
+            "Telegram ERROR:",
             e
         )
 
-        processing_message = None
+
+# ============================================================
+# FLASK
+# ============================================================
+
+app = Flask(__name__)
 
 
-    # --------------------------------------------------------
-    # RAG
-    # --------------------------------------------------------
+@app.route("/")
+def home():
 
-    try:
-
-        answer = await rag_chain.ainvoke(
-            user_query
-        )
-
-        if not answer:
-            answer = (
-                "Maaf, tiada jawapan dapat dihasilkan."
-            )
-
-    except Exception as e:
-
-        logger.exception(
-            "Ralat semasa memproses soalan: %s",
-            e
-        )
-
-        answer = (
-            "Maaf, berlaku masalah semasa mencari "
-            "rujukan kitab. Sila cuba semula sebentar lagi."
-        )
+    return (
+        "TanyaFiqhBot sedang aktif. "
+        "Kategori: FIQH, TAUHID."
+    )
 
 
-    # --------------------------------------------------------
-    # Padam mesej loading
-    # --------------------------------------------------------
+@app.route("/health")
+def health():
 
-    if processing_message:
+    return {
+        "status": INDEX_STATUS[
+            "status"
+        ],
 
-        try:
+        "message": INDEX_STATUS[
+            "message"
+        ],
 
-            await processing_message.delete()
+        "total_files": INDEX_STATUS[
+            "total_files"
+        ],
 
-        except Exception:
-            pass
+        "processed": INDEX_STATUS[
+            "processed"
+        ],
+
+        "current_file": INDEX_STATUS[
+            "current_file"
+        ],
+    }
 
 
-    # --------------------------------------------------------
-    # Telegram mempunyai had mesej
-    # --------------------------------------------------------
+@app.route("/status")
+def status():
 
-    MAX_MESSAGE_LENGTH = 4000
+    return {
+        "bot": "TanyaFiqhBot",
 
-    if len(answer) <= MAX_MESSAGE_LENGTH:
+        "index": INDEX_STATUS,
 
-        try:
+        "ready": INDEX_READY.is_set(),
 
-            await update.message.reply_text(
-                answer
-            )
-
-        except Exception as e:
-
-            logger.error(
-                "Gagal menghantar jawapan Telegram: %s",
-                e
-            )
-
-    else:
-
-        # Pecahkan jawapan panjang
-        chunks = [
-            answer[i:i + MAX_MESSAGE_LENGTH]
-            for i in range(
-                0,
-                len(answer),
-                MAX_MESSAGE_LENGTH
-            )
+        "categories": [
+            "FIQH",
+            "TAUHID"
         ]
-
-        for chunk in chunks:
-
-            try:
-
-                await update.message.reply_text(
-                    chunk
-                )
-
-            except Exception as e:
-
-                logger.error(
-                    "Gagal menghantar chunk Telegram: %s",
-                    e
-                )
+    }
 
 
 # ============================================================
-# 15. TELEGRAM ERROR HANDLER
+# START BACKGROUND
 # ============================================================
 
-async def telegram_error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE
-):
+def start_background_tasks():
 
-    logger.error(
-        "Telegram error: %s",
-        context.error
+    # Index kitab
+    indexing_thread = threading.Thread(
+        target=sync_books,
+        daemon=True
     )
 
+    indexing_thread.start()
 
-# ============================================================
-# 16. START TELEGRAM BOT
-# ============================================================
-
-def run_telegram_bot():
-
-    logger.info(
-        "Memulakan Telegram Bot..."
+    # Telegram
+    telegram_thread = threading.Thread(
+        target=run_telegram,
+        daemon=True
     )
 
-    try:
-
-        application = (
-            ApplicationBuilder()
-            .token(TELEGRAM_TOKEN)
-            .build()
-        )
-
-        application.add_handler(
-            MessageHandler(
-                filters.TEXT & (~filters.COMMAND),
-                handle_message
-            )
-        )
-
-        application.add_error_handler(
-            telegram_error_handler
-        )
-
-        logger.info(
-            "Telegram Bot sedang polling..."
-        )
-
-        # PENTING:
-        # Jangan gunakan asyncio.run() di sini.
-        application.run_polling(
-            drop_pending_updates=True
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "Telegram bot berhenti kerana error: %s",
-            e
-        )
+    telegram_thread.start()
 
 
 # ============================================================
-# 17. START BOT THREAD
+# START
 # ============================================================
 
-bot_thread = threading.Thread(
-    target=run_telegram_bot,
-    name="telegram-bot",
-    daemon=True
-)
+start_background_tasks()
 
-bot_thread.start()
-
-
-# ============================================================
-# 18. LOCAL RUN
-# ============================================================
 
 if __name__ == "__main__":
 
     port = int(
         os.environ.get(
             "PORT",
-            10000
+            8080
         )
-    )
-
-    logger.info(
-        "Flask server berjalan pada port %s",
-        port
     )
 
     app.run(
         host="0.0.0.0",
-        port=port,
-        debug=False
+        port=port
     )
