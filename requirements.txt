@@ -1,21 +1,19 @@
 Flask
 gunicorn
-
 python-telegram-bot
 
 langchain
 langchain-core
 langchain-community
 langchain-text-splitters
-
 langchain-google-genai
 
-chromadb
-
 google-generativeai
+supabase
 
 pypdf
-
 pdf2image
 pytesseract
 Pillow
+
+python-dotenv
