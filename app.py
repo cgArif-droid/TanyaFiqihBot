@@ -7,6 +7,7 @@ import asyncio
 import re
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask
 
@@ -35,7 +36,6 @@ KITAB_DIR = os.environ.get("KITAB_DIR", "kitab")
 
 DATA_DIR = os.environ.get("DATA_DIR", "/var/data")
 
-# Versi baru supaya tidak bercampur dengan database lama
 CHROMA_DIR = os.path.join(
     DATA_DIR,
     "chroma_tanyafiqh_v2"
@@ -57,13 +57,33 @@ EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 LLM_MODEL = "gemini-2.5-flash"
 
+# ============================================================
+# OCR
+# ============================================================
+
 OCR_DPI = 200
 
-# Jika teks yang diekstrak terlalu pendek,
-# sistem akan anggap page tersebut mungkin scan
+# Cuba 10 worker serentak
+OCR_WORKERS = int(
+    os.environ.get("OCR_WORKERS", "10")
+)
+
+# Jika teks kurang daripada jumlah ini,
+# page akan dianggap mungkin scanned PDF
 MIN_TEXT_CHARS = 40
 
+# Cache OCR setiap page
+OCR_PAGE_CACHE_DIR = os.path.join(
+    EXTRACTED_DIR,
+    "pages"
+)
+
+# ============================================================
+# TEXT / RAG
+# ============================================================
+
 CHUNK_SIZE = 1200
+
 CHUNK_OVERLAP = 200
 
 RETRIEVER_K = 6
@@ -73,25 +93,58 @@ RETRIEVER_K = 6
 # FOLDER
 # ============================================================
 
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(CHROMA_DIR, exist_ok=True)
-os.makedirs(EXTRACTED_DIR, exist_ok=True)
-os.makedirs(KITAB_DIR, exist_ok=True)
+os.makedirs(
+    DATA_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    CHROMA_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    EXTRACTED_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    OCR_PAGE_CACHE_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    KITAB_DIR,
+    exist_ok=True
+)
 
 
 # ============================================================
 # CHECK API KEY
 # ============================================================
 
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+GOOGLE_API_KEY = os.environ.get(
+    "GOOGLE_API_KEY"
+)
 
 if not GOOGLE_API_KEY:
-    print("AMARAN: GOOGLE_API_KEY tidak dijumpai.")
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+    print(
+        "AMARAN: GOOGLE_API_KEY "
+        "tidak dijumpai."
+    )
+
+
+TELEGRAM_TOKEN = os.environ.get(
+    "TELEGRAM_TOKEN"
+)
 
 if not TELEGRAM_TOKEN:
-    print("AMARAN: TELEGRAM_TOKEN tidak dijumpai.")
+
+    print(
+        "AMARAN: TELEGRAM_TOKEN "
+        "tidak dijumpai."
+    )
 
 
 # ============================================================
@@ -169,7 +222,10 @@ INDEX_STATUS = {
 
 def load_manifest():
 
-    if not os.path.exists(MANIFEST_FILE):
+    if not os.path.exists(
+        MANIFEST_FILE
+    ):
+
         return {}
 
     try:
@@ -184,14 +240,20 @@ def load_manifest():
 
     except Exception as e:
 
-        print("Gagal membaca manifest:", e)
+        print(
+            "Gagal membaca manifest:",
+            e
+        )
 
         return {}
 
 
 def save_manifest(manifest):
 
-    temp_file = MANIFEST_FILE + ".tmp"
+    temp_file = (
+        MANIFEST_FILE
+        + ".tmp"
+    )
 
     with open(
         temp_file,
@@ -220,16 +282,23 @@ def get_file_hash(filepath):
 
     sha256 = hashlib.sha256()
 
-    with open(filepath, "rb") as f:
+    with open(
+        filepath,
+        "rb"
+    ) as f:
 
         while True:
 
-            chunk = f.read(1024 * 1024)
+            chunk = f.read(
+                1024 * 1024
+            )
 
             if not chunk:
                 break
 
-            sha256.update(chunk)
+            sha256.update(
+                chunk
+            )
 
     return sha256.hexdigest()
 
@@ -275,12 +344,23 @@ def get_book_info(filepath):
 def clean_text(text):
 
     if not text:
+
         return ""
 
-    text = text.replace("\x00", " ")
+    text = text.replace(
+        "\x00",
+        " "
+    )
 
-    text = text.replace("\r\n", "\n")
-    text = text.replace("\r", "\n")
+    text = text.replace(
+        "\r\n",
+        "\n"
+    )
+
+    text = text.replace(
+        "\r",
+        "\n"
+    )
 
     text = re.sub(
         r"[ \t]+",
@@ -315,27 +395,37 @@ def get_ocr_language():
 
         languages = []
 
-        # Bahasa Melayu
         if "msa" in available:
-            languages.append("msa")
 
-        # Arabic / Jawi
+            languages.append(
+                "msa"
+            )
+
         if "ara" in available:
-            languages.append("ara")
 
-        # English
+            languages.append(
+                "ara"
+            )
+
         if "eng" in available:
-            languages.append("eng")
+
+            languages.append(
+                "eng"
+            )
 
         if languages:
-            return "+".join(languages)
+
+            return "+".join(
+                languages
+            )
 
         return "eng"
 
     except Exception as e:
 
         print(
-            "Gagal mendapatkan bahasa OCR:",
+            "Gagal mendapatkan "
+            "bahasa OCR:",
             e
         )
 
@@ -346,9 +436,15 @@ def get_ocr_language():
 # OCR SATU PAGE
 # ============================================================
 
-def ocr_page(filepath, page_number):
+def ocr_page(
+    filepath,
+    page_number
+):
 
-    from pdf2image import convert_from_path
+    from pdf2image import (
+        convert_from_path
+    )
+
     import pytesseract
 
     language = get_ocr_language()
@@ -366,43 +462,208 @@ def ocr_page(filepath, page_number):
         fmt="jpeg",
         grayscale=True,
         use_pdftocairo=True,
+        thread_count=1,
     )
 
     if not images:
+
         return ""
 
     image = images[0]
 
-    text = pytesseract.image_to_string(
-        image,
-        lang=language,
-        config="--psm 6",
+    try:
+
+        text = (
+            pytesseract.image_to_string(
+                image,
+                lang=language,
+                config="--psm 6",
+            )
+        )
+
+        return clean_text(
+            text
+        )
+
+    finally:
+
+        try:
+
+            image.close()
+
+        except Exception:
+
+            pass
+
+
+# ============================================================
+# PAGE CACHE
+# ============================================================
+
+def get_page_cache_dir(
+    file_hash
+):
+
+    directory = os.path.join(
+        OCR_PAGE_CACHE_DIR,
+        file_hash
     )
 
-    return clean_text(text)
+    os.makedirs(
+        directory,
+        exist_ok=True
+    )
+
+    return directory
+
+
+def get_page_cache_file(
+    file_hash,
+    page_number
+):
+
+    return os.path.join(
+        get_page_cache_dir(
+            file_hash
+        ),
+        f"page_{page_number:05d}.json"
+    )
+
+
+def save_page_cache(
+    file_hash,
+    page_number,
+    text
+):
+
+    cache_file = get_page_cache_file(
+        file_hash,
+        page_number
+    )
+
+    temp_file = (
+        cache_file
+        + ".tmp"
+    )
+
+    data = {
+        "page_number": page_number,
+        "text": text,
+    }
+
+    with open(
+        temp_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False
+        )
+
+    os.replace(
+        temp_file,
+        cache_file
+    )
+
+
+def load_page_cache(
+    file_hash,
+    page_number
+):
+
+    cache_file = get_page_cache_file(
+        file_hash,
+        page_number
+    )
+
+    if not os.path.exists(
+        cache_file
+    ):
+
+        return None
+
+    try:
+
+        with open(
+            cache_file,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            data = json.load(f)
+
+        return data.get(
+            "text",
+            ""
+        )
+
+    except Exception as e:
+
+        print(
+            f"Cache page "
+            f"{page_number} rosak:",
+            e
+        )
+
+        return None
 
 
 # ============================================================
 # EXTRACT PDF
 # ============================================================
 
-def extract_pdf(filepath):
+def extract_pdf(
+    filepath,
+    file_hash
+):
 
     from pypdf import PdfReader
 
-    reader = PdfReader(filepath)
+    reader = PdfReader(
+        filepath
+    )
 
-    pages = []
+    total_pages = len(
+        reader.pages
+    )
 
-    total_pages = len(reader.pages)
+    print(
+        "\n================================"
+    )
 
     print(
         f"PDF: {filepath}"
     )
 
     print(
-        f"Jumlah halaman: {total_pages}"
+        f"Jumlah halaman: "
+        f"{total_pages}"
     )
+
+    print(
+        f"OCR workers: "
+        f"{OCR_WORKERS}"
+    )
+
+    print(
+        "================================\n"
+    )
+
+    # --------------------------------------------------------
+    # Simpan hasil semua page
+    # --------------------------------------------------------
+
+    pages = {}
+
+    # Page yang perlu OCR
+    pages_needing_ocr = []
+
+    # --------------------------------------------------------
+    # Extract text dahulu
+    # --------------------------------------------------------
 
     for index, page in enumerate(
         reader.pages,
@@ -411,64 +672,269 @@ def extract_pdf(filepath):
 
         try:
 
-            text = page.extract_text() or ""
+            text = (
+                page.extract_text()
+                or ""
+            )
 
         except Exception as e:
 
             print(
-                f"Gagal extract page {index}:",
+                f"Gagal extract "
+                f"page {index}:",
                 e
             )
 
             text = ""
 
-        text = clean_text(text)
+        text = clean_text(
+            text
+        )
 
         # ----------------------------------------------------
-        # Jika teks terlalu sedikit,
-        # gunakan OCR
+        # Jika teks cukup panjang,
+        # tidak perlu OCR
         # ----------------------------------------------------
 
-        if len(text) < MIN_TEXT_CHARS:
+        if len(text) >= MIN_TEXT_CHARS:
+
+            pages[index] = text
+
+            continue
+
+        # ----------------------------------------------------
+        # Semak page cache
+        # ----------------------------------------------------
+
+        cached_text = load_page_cache(
+            file_hash,
+            index
+        )
+
+        if cached_text is not None:
 
             print(
                 f"Page {index}: "
-                f"teks sedikit ({len(text)} chars) "
-                f"-> OCR"
+                f"GUNA CACHE OCR "
+                f"({len(cached_text)} chars)"
             )
 
-            try:
+            # Jika cache lebih baik
+            if len(cached_text) > len(text):
 
-                ocr_text = ocr_page(
+                text = cached_text
+
+            pages[index] = text
+
+            continue
+
+        # ----------------------------------------------------
+        # Belum ada cache
+        # ----------------------------------------------------
+
+        print(
+            f"Page {index}: "
+            f"teks sedikit "
+            f"({len(text)} chars) "
+            f"-> QUEUE OCR"
+        )
+
+        pages_needing_ocr.append(
+            (
+                index,
+                text
+            )
+        )
+
+    # --------------------------------------------------------
+    # PARALLEL OCR
+    # --------------------------------------------------------
+
+    total_ocr = len(
+        pages_needing_ocr
+    )
+
+    print(
+        "\n================================"
+    )
+
+    print(
+        f"Jumlah page perlu OCR: "
+        f"{total_ocr}"
+    )
+
+    print(
+        f"OCR workers: "
+        f"{OCR_WORKERS}"
+    )
+
+    print(
+        "================================\n"
+    )
+
+    completed_ocr = 0
+
+    if pages_needing_ocr:
+
+        with ThreadPoolExecutor(
+            max_workers=OCR_WORKERS
+        ) as executor:
+
+            future_map = {}
+
+            for (
+                page_number,
+                original_text
+            ) in pages_needing_ocr:
+
+                future = executor.submit(
+                    ocr_page,
                     filepath,
-                    index
+                    page_number
                 )
 
-                if len(ocr_text) > len(text):
-                    text = ocr_text
-
-            except Exception as e:
-
-                print(
-                    f"OCR page {index} gagal:",
-                    e
+                future_map[
+                    future
+                ] = (
+                    page_number,
+                    original_text
                 )
 
-        if text:
+            for future in as_completed(
+                future_map
+            ):
 
-            pages.append({
-                "page_number": index,
-                "text": text
-            })
+                (
+                    page_number,
+                    original_text
+                ) = future_map[
+                    future
+                ]
 
-    return pages
+                try:
+
+                    ocr_text = (
+                        future.result()
+                    )
+
+                    # ------------------------------------------------
+                    # Pilih text yang lebih panjang
+                    # ------------------------------------------------
+
+                    if len(ocr_text) > len(
+                        original_text
+                    ):
+
+                        final_text = (
+                            ocr_text
+                        )
+
+                    else:
+
+                        final_text = (
+                            original_text
+                        )
+
+                    pages[
+                        page_number
+                    ] = final_text
+
+                    # ------------------------------------------------
+                    # Simpan terus page cache
+                    # ------------------------------------------------
+
+                    save_page_cache(
+                        file_hash,
+                        page_number,
+                        final_text
+                    )
+
+                    completed_ocr += 1
+
+                    print(
+                        f"✅ OCR selesai "
+                        f"page {page_number} "
+                        f"({completed_ocr}/"
+                        f"{total_ocr})"
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"❌ OCR page "
+                        f"{page_number} gagal:",
+                        e
+                    )
+
+                    # Simpan text asal jika ada
+                    pages[
+                        page_number
+                    ] = original_text
+
+                    # Simpan cache walaupun
+                    # OCR gagal supaya status
+                    # boleh diketahui
+                    try:
+
+                        save_page_cache(
+                            file_hash,
+                            page_number,
+                            original_text
+                        )
+
+                    except Exception:
+                        pass
+
+    # --------------------------------------------------------
+    # Susun page
+    # --------------------------------------------------------
+
+    result = []
+
+    for page_number in sorted(
+        pages.keys()
+    ):
+
+        text = clean_text(
+            pages[page_number]
+        )
+
+        if not text:
+
+            continue
+
+        result.append(
+            {
+                "page_number": page_number,
+                "text": text,
+            }
+        )
+
+    print(
+        "\n================================"
+    )
+
+    print(
+        f"Extraction selesai: "
+        f"{len(result)}/"
+        f"{total_pages} halaman "
+        f"mempunyai teks."
+    )
+
+    print(
+        "================================\n"
+    )
+
+    return result
 
 
 # ============================================================
 # EXTRACT TXT
 # ============================================================
 
-def extract_txt(filepath):
+def extract_txt(
+    filepath
+):
 
     try:
 
@@ -490,9 +956,12 @@ def extract_txt(filepath):
 
             text = f.read()
 
-    text = clean_text(text)
+    text = clean_text(
+        text
+    )
 
     if not text:
+
         return []
 
     return [
@@ -507,7 +976,9 @@ def extract_txt(filepath):
 # CACHE EXTRACTION
 # ============================================================
 
-def get_extraction_cache(hash_value):
+def get_extraction_cache(
+    hash_value
+):
 
     return os.path.join(
         EXTRACTED_DIR,
@@ -520,11 +991,16 @@ def save_extraction_cache(
     pages
 ):
 
-    cache_file = get_extraction_cache(
-        hash_value
+    cache_file = (
+        get_extraction_cache(
+            hash_value
+        )
     )
 
-    temp_file = cache_file + ".tmp"
+    temp_file = (
+        cache_file
+        + ".tmp"
+    )
 
     with open(
         temp_file,
@@ -548,11 +1024,16 @@ def load_extraction_cache(
     hash_value
 ):
 
-    cache_file = get_extraction_cache(
-        hash_value
+    cache_file = (
+        get_extraction_cache(
+            hash_value
+        )
     )
 
-    if not os.path.exists(cache_file):
+    if not os.path.exists(
+        cache_file
+    ):
+
         return None
 
     try:
@@ -616,7 +1097,9 @@ def create_documents_for_book(
     file_hash
 ):
 
-    info = get_book_info(filepath)
+    info = get_book_info(
+        filepath
+    )
 
     extension = (
         Path(filepath)
@@ -646,7 +1129,8 @@ def create_documents_for_book(
         if extension == ".pdf":
 
             pages = extract_pdf(
-                filepath
+                filepath,
+                file_hash
             )
 
         elif extension == ".txt":
@@ -659,6 +1143,10 @@ def create_documents_for_book(
 
             return []
 
+        # ----------------------------------------------------
+        # Simpan whole-book cache
+        # ----------------------------------------------------
+
         save_extraction_cache(
             file_hash,
             pages
@@ -670,38 +1158,48 @@ def create_documents_for_book(
 
     documents = []
 
+    # Import sekali sahaja
+    from langchain_core.documents import (
+        Document
+    )
+
     for page in pages:
 
         text = page["text"]
 
         if not text.strip():
+
             continue
 
         metadata = {
 
-            "source_file": info["file_name"],
+            "source_file":
+                info["file_name"],
 
-            "source_path": info["relative_path"],
+            "source_path":
+                info["relative_path"],
 
-            "book_name": info["book_name"],
+            "book_name":
+                info["book_name"],
 
-            "category": info["category"],
+            "category":
+                info["category"],
 
-            "file_type": extension.replace(
-                ".",
-                ""
-            ),
+            "file_type":
+                extension.replace(
+                    ".",
+                    ""
+                ),
 
-            "file_hash": file_hash,
+            "file_hash":
+                file_hash,
 
-            "source_id": file_hash,
+            "source_id":
+                file_hash,
 
-            "page_number": (
-                page["page_number"]
-            ),
+            "page_number":
+                page["page_number"],
         }
-
-        from langchain_core.documents import Document
 
         documents.append(
             Document(
@@ -714,14 +1212,22 @@ def create_documents_for_book(
     # Split
     # --------------------------------------------------------
 
-    splits = text_splitter.split_documents(
-        documents
+    splits = (
+        text_splitter
+        .split_documents(
+            documents
+        )
     )
 
     # Tambah chunk index
-    for index, doc in enumerate(splits):
 
-        doc.metadata["chunk_index"] = index
+    for index, doc in enumerate(
+        splits
+    ):
+
+        doc.metadata[
+            "chunk_index"
+        ] = index
 
     return splits
 
@@ -771,7 +1277,8 @@ def delete_source(
 
         vectorstore.delete(
             where={
-                "source_id": source_id
+                "source_id":
+                    source_id
             }
         )
 
@@ -797,7 +1304,9 @@ def index_book(
     old_record=None
 ):
 
-    info = get_book_info(filepath)
+    info = get_book_info(
+        filepath
+    )
 
     print(
         "\n================================"
@@ -838,15 +1347,26 @@ def index_book(
         )
 
         return {
-            "hash": file_hash,
-            "book_name": info["book_name"],
-            "category": info["category"],
-            "file_name": info["file_name"],
-            "relative_path": info[
-                "relative_path"
-            ],
-            "indexed_at": time.time(),
-            "skipped": True,
+            "hash":
+                file_hash,
+
+            "book_name":
+                info["book_name"],
+
+            "category":
+                info["category"],
+
+            "file_name":
+                info["file_name"],
+
+            "relative_path":
+                info["relative_path"],
+
+            "indexed_at":
+                time.time(),
+
+            "skipped":
+                True,
         }
 
     # --------------------------------------------------------
@@ -862,9 +1382,11 @@ def index_book(
     # Extract + OCR + split
     # --------------------------------------------------------
 
-    splits = create_documents_for_book(
-        filepath,
-        file_hash
+    splits = (
+        create_documents_for_book(
+            filepath,
+            file_hash
+        )
     )
 
     if not splits:
@@ -875,12 +1397,13 @@ def index_book(
         )
 
         raise RuntimeError(
-            "Kitab tidak mempunyai teks "
-            "yang boleh diproses."
+            "Kitab tidak mempunyai "
+            "teks yang boleh diproses."
         )
 
     print(
-        f"Jumlah chunk: {len(splits)}"
+        f"Jumlah chunk: "
+        f"{len(splits)}"
     )
 
     # --------------------------------------------------------
@@ -912,7 +1435,10 @@ def index_book(
             batch_size
         ):
 
-            end = start + batch_size
+            end = (
+                start
+                + batch_size
+            )
 
             batch_docs = splits[
                 start:end
@@ -938,7 +1464,8 @@ def index_book(
 
         print(
             "Embedding gagal. "
-            "Membersihkan vector separa..."
+            "Membersihkan vector "
+            "separa..."
         )
 
         delete_source(
@@ -951,12 +1478,12 @@ def index_book(
     # Index berjaya
     # --------------------------------------------------------
 
-    # Kalau hash lama berbeza,
-    # baru padam vector lama
     if old_record:
 
-        old_hash = old_record.get(
-            "hash"
+        old_hash = (
+            old_record.get(
+                "hash"
+            )
         )
 
         if (
@@ -975,29 +1502,29 @@ def index_book(
 
     return {
 
-        "hash": file_hash,
+        "hash":
+            file_hash,
 
-        "book_name": info[
-            "book_name"
-        ],
+        "book_name":
+            info["book_name"],
 
-        "category": info[
-            "category"
-        ],
+        "category":
+            info["category"],
 
-        "file_name": info[
-            "file_name"
-        ],
+        "file_name":
+            info["file_name"],
 
-        "relative_path": info[
-            "relative_path"
-        ],
+        "relative_path":
+            info["relative_path"],
 
-        "chunks": len(splits),
+        "chunks":
+            len(splits),
 
-        "indexed_at": time.time(),
+        "indexed_at":
+            time.time(),
 
-        "skipped": False,
+        "skipped":
+            False,
     }
 
 
@@ -1015,13 +1542,19 @@ def sync_books():
 
         INDEX_STATUS[
             "message"
-        ] = "Sedang memproses kitab..."
+        ] = (
+            "Sedang memproses kitab..."
+        )
 
         try:
 
-            manifest = load_manifest()
+            manifest = (
+                load_manifest()
+            )
 
-            files = get_all_books()
+            files = (
+                get_all_books()
+            )
 
             INDEX_STATUS[
                 "total_files"
@@ -1041,6 +1574,11 @@ def sync_books():
             )
 
             print(
+                f"OCR WORKERS: "
+                f"{OCR_WORKERS}"
+            )
+
+            print(
                 "================================\n"
             )
 
@@ -1055,8 +1593,10 @@ def sync_books():
 
             for filepath in files:
 
-                abs_path = os.path.abspath(
-                    filepath
+                abs_path = (
+                    os.path.abspath(
+                        filepath
+                    )
                 )
 
                 INDEX_STATUS[
@@ -1066,13 +1606,16 @@ def sync_books():
                 )
 
                 relative_path = str(
-                    Path(filepath).relative_to(
+                    Path(filepath)
+                    .relative_to(
                         Path(KITAB_DIR)
                     )
                 )
 
-                old_record = manifest.get(
-                    relative_path
+                old_record = (
+                    manifest.get(
+                        relative_path
+                    )
                 )
 
                 try:
@@ -1109,28 +1652,39 @@ def sync_books():
                 manifest.keys()
             )
 
-            for old_relative in old_paths:
+            for old_relative in (
+                old_paths
+            ):
 
-                old_abs = os.path.abspath(
-                    os.path.join(
-                        KITAB_DIR,
-                        old_relative
+                old_abs = (
+                    os.path.abspath(
+                        os.path.join(
+                            KITAB_DIR,
+                            old_relative
+                        )
                     )
                 )
 
-                if old_abs not in current_paths:
+                if (
+                    old_abs
+                    not in current_paths
+                ):
 
                     print(
                         "Kitab sudah dipadam:"
                         f" {old_relative}"
                     )
 
-                    old_record = manifest[
-                        old_relative
-                    ]
+                    old_record = (
+                        manifest[
+                            old_relative
+                        ]
+                    )
 
-                    old_hash = old_record.get(
-                        "hash"
+                    old_hash = (
+                        old_record.get(
+                            "hash"
+                        )
                     )
 
                     if old_hash:
@@ -1187,7 +1741,6 @@ def sync_books():
                 e
             )
 
-            # Tetap set supaya bot hidup
             INDEX_READY.set()
 
 
@@ -1200,6 +1753,7 @@ def format_sources(
 ):
 
     if not documents:
+
         return ""
 
     seen = set()
@@ -1231,6 +1785,7 @@ def format_sources(
         )
 
         if key in seen:
+
             continue
 
         seen.add(key)
@@ -1251,6 +1806,7 @@ def format_sources(
             )
 
     if not sources:
+
         return ""
 
     return (
@@ -1332,11 +1888,16 @@ def search_documents(
         search_kwargs[
             "filter"
         ] = {
-            "category": category.upper()
+            "category":
+                category.upper()
         }
 
-    retriever = vectorstore.as_retriever(
-        search_kwargs=search_kwargs
+    retriever = (
+        vectorstore
+        .as_retriever(
+            search_kwargs=
+                search_kwargs
+        )
     )
 
     return retriever.invoke(
@@ -1375,8 +1936,9 @@ def answer_question(
     if category:
 
         category_instruction = (
-            f"\nSoalan ini diminta dicari "
-            f"khusus dalam kategori "
+            f"\nSoalan ini diminta "
+            f"dicari khusus dalam "
+            f"kategori "
             f"{category.upper()}."
         )
 
@@ -1450,7 +2012,9 @@ ringkas tetapi mencukupi.
                 for x in answer
             )
 
-        answer = str(answer).strip()
+        answer = str(
+            answer
+        ).strip()
 
     except Exception as e:
 
@@ -1461,14 +2025,20 @@ ringkas tetapi mencukupi.
 
         return (
             "Maaf, berlaku ralat "
-            "semasa menghasilkan jawapan."
+            "semasa menghasilkan "
+            "jawapan."
         )
 
-    source_text = format_sources(
-        documents
+    source_text = (
+        format_sources(
+            documents
+        )
     )
 
-    return answer + source_text
+    return (
+        answer
+        + source_text
+    )
 
 
 # ============================================================
@@ -1623,9 +2193,11 @@ async def process_question(
 
         return
 
-    loading = await update.message.reply_text(
-        "🔎 Sedang mencari jawapan "
-        "dalam kitab..."
+    loading = (
+        await update.message.reply_text(
+            "🔎 Sedang mencari jawapan "
+            "dalam kitab..."
+        )
     )
 
     try:
@@ -1653,9 +2225,9 @@ async def process_question(
         await loading.delete()
 
     except Exception:
+
         pass
 
-    # Telegram limit kira-kira 4096
     max_length = 3900
 
     if len(answer) <= max_length:
@@ -1666,7 +2238,6 @@ async def process_question(
 
         return
 
-    # Pecahkan jawapan panjang
     chunks = []
 
     current = ""
@@ -1675,9 +2246,12 @@ async def process_question(
         "\n\n"
     ):
 
-        if len(current) + len(
-            paragraph
-        ) + 2 > max_length:
+        if (
+            len(current)
+            + len(paragraph)
+            + 2
+            > max_length
+        ):
 
             if current:
 
@@ -1690,12 +2264,16 @@ async def process_question(
         else:
 
             if current:
+
                 current += "\n\n"
 
             current += paragraph
 
     if current:
-        chunks.append(current)
+
+        chunks.append(
+            current
+        )
 
     for chunk in chunks:
 
@@ -1714,6 +2292,7 @@ async def handle_message(
 ):
 
     if not update.message:
+
         return
 
     question = (
@@ -1722,6 +2301,7 @@ async def handle_message(
     ).strip()
 
     if not question:
+
         return
 
     print(
@@ -1794,7 +2374,9 @@ def run_telegram():
             application.add_handler(
                 MessageHandler(
                     filters.TEXT
-                    & (~filters.COMMAND),
+                    & (
+                        ~filters.COMMAND
+                    ),
                     handle_message
                 )
             )
@@ -1808,9 +2390,12 @@ def run_telegram():
 
             await application.start()
 
-            await application.updater.start_polling()
+            await (
+                application
+                .updater
+                .start_polling()
+            )
 
-            # Kekalkan thread hidup
             while True:
 
                 await asyncio.sleep(
@@ -1849,25 +2434,33 @@ def home():
 def health():
 
     return {
-        "status": INDEX_STATUS[
-            "status"
-        ],
+        "status":
+            INDEX_STATUS[
+                "status"
+            ],
 
-        "message": INDEX_STATUS[
-            "message"
-        ],
+        "message":
+            INDEX_STATUS[
+                "message"
+            ],
 
-        "total_files": INDEX_STATUS[
-            "total_files"
-        ],
+        "total_files":
+            INDEX_STATUS[
+                "total_files"
+            ],
 
-        "processed": INDEX_STATUS[
-            "processed"
-        ],
+        "processed":
+            INDEX_STATUS[
+                "processed"
+            ],
 
-        "current_file": INDEX_STATUS[
-            "current_file"
-        ],
+        "current_file":
+            INDEX_STATUS[
+                "current_file"
+            ],
+
+        "ocr_workers":
+            OCR_WORKERS,
     }
 
 
@@ -1875,11 +2468,18 @@ def health():
 def status():
 
     return {
-        "bot": "TanyaFiqhBot",
 
-        "index": INDEX_STATUS,
+        "bot":
+            "TanyaFiqhBot",
 
-        "ready": INDEX_READY.is_set(),
+        "index":
+            INDEX_STATUS,
+
+        "ready":
+            INDEX_READY.is_set(),
+
+        "ocr_workers":
+            OCR_WORKERS,
 
         "categories": [
             "FIQH",
@@ -1894,7 +2494,10 @@ def status():
 
 def start_background_tasks():
 
+    # --------------------------------------------------------
     # Index kitab
+    # --------------------------------------------------------
+
     indexing_thread = threading.Thread(
         target=sync_books,
         daemon=True
@@ -1902,7 +2505,10 @@ def start_background_tasks():
 
     indexing_thread.start()
 
+    # --------------------------------------------------------
     # Telegram
+    # --------------------------------------------------------
+
     telegram_thread = threading.Thread(
         target=run_telegram,
         daemon=True
