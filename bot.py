@@ -20,7 +20,6 @@ FOLDER_PATH = "kitab"
 print(f"Sedang memproses fail di dalam folder '{FOLDER_PATH}'...")
 docs = []
 
-# Baca fail .pdf jika ada
 for pdf_file in glob.glob(f"{FOLDER_PATH}/*.pdf"):
     try:
         loader = PyPDFLoader(pdf_file)
@@ -28,7 +27,6 @@ for pdf_file in glob.glob(f"{FOLDER_PATH}/*.pdf"):
     except Exception as e:
         print(f"Gagal membaca {pdf_file}: {e}")
 
-# Baca fail .txt jika ada
 for txt_file in glob.glob(f"{FOLDER_PATH}/*.txt"):
     try:
         loader = TextLoader(txt_file, encoding='utf-8')
@@ -36,25 +34,25 @@ for txt_file in glob.glob(f"{FOLDER_PATH}/*.txt"):
     except Exception as e:
         print(f"Gagal membaca {txt_file}: {e}")
 
-print(f"Jumlah dokumen/mukasurat dikesan: {len(docs)}")
+print(f"Jumlah dokumen dikesan: {len(docs)}")
 
-# Pecahkan teks kepada bahagian kecil
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 splits = text_splitter.split_documents(docs)
 
-# Tapis teks kosong
 splits = [doc for doc in splits if doc.page_content.strip()]
-print(f"Jumlah pecahan teks yang mengandungi isi: {len(splits)}")
+print(f"Jumlah pecahan teks: {len(splits)}")
 
-# SISTEM PENYELAMAT: Halang 'crash' jika kitab PDF adalah imbasan (scanned image)
 if len(splits) == 0:
     print("RALAT: Tiada teks dijumpai! Memasukkan teks sementara supaya bot tidak mati...")
-    # Cipta teks sementara
     dummy_text = "Makluman: Sistem bot berjaya dihidupkan, TETAPI kitab PDF yang dimasukkan adalah kosong atau berbentuk imbasan gambar (scanned). Sila muat naik fail kitab PDF berformat teks digital atau fail .txt ke dalam folder kitab."
     splits = text_splitter.create_documents([dummy_text])
 
-# Masukkan ke dalam pangkalan data (Chroma) - Menggunakan model embedding yang betul
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+# MENGGUNAKAN MODEL EMBEDDING TERKINI DENGAN TETAPAN YANG BETUL
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/text-embedding-004",
+    task_type="retrieval_document"
+)
+
 vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
@@ -84,7 +82,7 @@ rag_chain = (
 
 print("Semua kitab dan prompt berjaya dimuat naik ke dalam sistem AI!")
 
-# --- 3. SETUP WEB SERVER KECIL UNTUK RENDER (SUPAYA BOT HIDUP 24 JAM) ---
+# --- 3. SETUP WEB SERVER UNTUK RENDER ---
 app = Flask('')
 
 @app.route('/')
@@ -114,7 +112,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
     if not TOKEN:
-        print("Ralat: TELEGRAM_TOKEN tidak dijumpai di Environment Variables!")
+        print("Ralat: TELEGRAM_TOKEN tiada!")
         return
 
     application = ApplicationBuilder().token(TOKEN).build()
