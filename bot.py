@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
@@ -31,7 +31,6 @@ retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 # --- 2. SETUP MODEL AI & PROMPT KHAS FIQH ---
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
 
-# Anda boleh ubah arahan / prompt di sini mengikut kesesuaian bot anda
 system_prompt = (
     "Anda adalah TanyaFiqhBot, pembantu rujukan ilmu fiqh berasaskan Ahli Sunnah Wal Jamaah.\n"
     "Jawab soalan pengguna HANYA berdasarkan konteks kitab-kitab yang diberikan di bawah.\n"
@@ -69,7 +68,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Soalan diterima: {user_query}")
     
     try:
-        # Cari jawapan menggunakan sistem RAG Kitab & Prompt
         response = rag_chain.invoke({"input": user_query})
         answer = response["answer"]
     except Exception as e:
@@ -91,8 +89,5 @@ async def main():
     await application.run_polling()
 
 if __name__ == '__main__':
-    # Jalankan web server Flask di latar belakang
     keep_alive()
-    
-    # Jalankan bot Telegram
     asyncio.run(main())
