@@ -1,5 +1,5 @@
 import http from "http";
-import { search, getBookInfo, getPage } from "turath-sdk";
+import { search, getBookInfo } from "turath-sdk";
 
 const PORT = Number(process.env.TURATH_PORT || 8765);
 const HOST = process.env.TURATH_HOST || "127.0.0.1";
@@ -107,23 +107,16 @@ const QUERY_MAP = {
 };
 
 /* =========================================================
-   GENERIC HELPERS
+   HELPERS
 ========================================================= */
 
 function cleanText(value) {
-  if (
-    value === undefined ||
-    value === null
-  ) {
+  if (value === undefined || value === null) {
     return "";
   }
 
-  if (
-    typeof value === "string"
-  ) {
-    return value
-      .replace(/\s+/g, " ")
-      .trim();
+  if (typeof value === "string") {
+    return value.replace(/\s+/g, " ").trim();
   }
 
   return String(value)
@@ -133,10 +126,7 @@ function cleanText(value) {
 
 
 function firstValue(obj, keys = []) {
-  if (
-    !obj ||
-    typeof obj !== "object"
-  ) {
+  if (!obj || typeof obj !== "object") {
     return null;
   }
 
@@ -155,7 +145,108 @@ function firstValue(obj, keys = []) {
 
 
 /* =========================================================
-   DEEP TEXT EXTRACTOR
+   RECURSIVE OBJECT SEARCH
+========================================================= */
+
+function findValueDeep(
+  obj,
+  keys = [],
+  depth = 0,
+  visited = new Set()
+) {
+  if (
+    depth > 10 ||
+    obj === null ||
+    obj === undefined
+  ) {
+    return "";
+  }
+
+  if (
+    typeof obj !== "object"
+  ) {
+    return "";
+  }
+
+  if (visited.has(obj)) {
+    return "";
+  }
+
+  visited.add(obj);
+
+  // Direct keys dahulu
+  for (const key of keys) {
+    if (
+      Object.prototype.hasOwnProperty.call(obj, key) &&
+      obj[key] !== undefined &&
+      obj[key] !== null
+    ) {
+      const value = obj[key];
+
+      if (
+        typeof value === "string" &&
+        value.trim()
+      ) {
+        return cleanText(value);
+      }
+
+      if (
+        typeof value === "number"
+      ) {
+        return value;
+      }
+
+      if (
+        typeof value === "object"
+      ) {
+        const nested =
+          findValueDeep(
+            value,
+            keys,
+            depth + 1,
+            visited
+          );
+
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+  }
+
+  // Kemudian nested objects
+  for (const [key, value] of Object.entries(obj)) {
+
+    if (
+      value === null ||
+      value === undefined
+    ) {
+      continue;
+    }
+
+    if (
+      typeof value === "object"
+    ) {
+      const result =
+        findValueDeep(
+          value,
+          keys,
+          depth + 1,
+          visited
+        );
+
+      if (result) {
+        return result;
+      }
+    }
+  }
+
+  return "";
+}
+
+
+/* =========================================================
+   DEEP TEXT
 ========================================================= */
 
 function findTextDeep(
@@ -163,7 +254,7 @@ function findTextDeep(
   depth = 0
 ) {
   if (
-    depth > 8 ||
+    depth > 10 ||
     obj === null ||
     obj === undefined
   ) {
@@ -173,7 +264,8 @@ function findTextDeep(
   if (
     typeof obj === "string"
   ) {
-    const text = cleanText(obj);
+    const text =
+      cleanText(obj);
 
     if (
       text.length >= 30
@@ -207,6 +299,7 @@ function findTextDeep(
   if (
     typeof obj === "object"
   ) {
+
     const preferredKeys = [
       "text",
       "content",
@@ -216,15 +309,19 @@ function findTextDeep(
       "quote",
       "raw_text",
       "rawText",
+      "text_content",
+      "textContent",
     ];
 
     for (
       const key of preferredKeys
     ) {
+
       if (
         obj[key] !== undefined &&
         obj[key] !== null
       ) {
+
         const result =
           findTextDeep(
             obj[key],
@@ -241,6 +338,7 @@ function findTextDeep(
       const [key, value]
       of Object.entries(obj)
     ) {
+
       if (
         [
           "title",
@@ -275,50 +373,88 @@ function findTextDeep(
 
 
 /* =========================================================
-   METADATA EXTRACTORS
+   PAGE
 ========================================================= */
 
 function extractPage(obj) {
-  if (!obj) {
-    return "";
-  }
 
-  const value =
-    firstValue(obj, [
-      "page",
-      "page_number",
-      "pageNumber",
-      "page_no",
-      "pageNo",
-    ]);
-
-  if (
-    value !== null &&
-    value !== undefined
-  ) {
-    return value;
-  }
+  const direct =
+    findValueDeep(
+      obj,
+      [
+        "page",
+        "page_number",
+        "pageNumber",
+        "page_no",
+        "pageNo",
+        "pageno",
+        "pageNum",
+      ]
+    );
 
   if (
-    obj.meta
+    direct !== ""
   ) {
-    const metaValue =
+    return direct;
+  }
+
+  return "";
+}
+
+
+/* =========================================================
+   BOOK ID
+========================================================= */
+
+function extractBookId(obj) {
+
+  const direct =
+    findValueDeep(
+      obj,
+      [
+        "book_id",
+        "bookId",
+        "bookid",
+        "id_book",
+        "bookID",
+      ]
+    );
+
+  if (
+    direct !== ""
+  ) {
+    return direct;
+  }
+
+  /*
+   * Kalau object itu sendiri ada id
+   * dan nampak seperti metadata kitab.
+   */
+
+  if (
+    obj &&
+    typeof obj === "object"
+  ) {
+
+    const id =
       firstValue(
-        obj.meta,
-        [
-          "page",
-          "page_number",
-          "pageNumber",
-          "page_no",
-          "pageNo",
-        ]
+        obj,
+        ["id"]
       );
 
     if (
-      metaValue !== null &&
-      metaValue !== undefined
+      id !== null &&
+      id !== undefined
     ) {
-      return metaValue;
+
+      const numeric =
+        String(id).trim();
+
+      if (
+        /^\d+$/.test(numeric)
+      ) {
+        return numeric;
+      }
     }
   }
 
@@ -326,38 +462,87 @@ function extractPage(obj) {
 }
 
 
-function extractBookId(obj) {
-  if (!obj) {
+/* =========================================================
+   BOOK NAME
+========================================================= */
+
+function extractBook(obj) {
+
+  if (
+    !obj ||
+    typeof obj !== "object"
+  ) {
     return "";
   }
 
+  /*
+   * Keutamaan field nama kitab.
+   */
+
   const value =
-    firstValue(obj, [
-      "book_id",
-      "bookId",
-      "bookid",
-      "id_book",
-    ]);
+    findValueDeep(
+      obj,
+      [
+        "book_name",
+        "bookName",
+        "book_title",
+        "bookTitle",
+        "kitab_name",
+        "kitabName",
+        "name_ar",
+        "nameAr",
+        "title_ar",
+        "titleAr",
+      ]
+    );
 
   if (
-    value !== null &&
-    value !== undefined
+    value
   ) {
-    return value;
+    return cleanText(value);
   }
 
+  /*
+   * Cari object book.
+   */
+
   if (
-    obj.meta
+    obj.book &&
+    typeof obj.book === "object"
   ) {
-    return (
-      firstValue(
-        obj.meta,
+
+    const nested =
+      findValueDeep(
+        obj.book,
         [
-          "book_id",
-          "bookId",
-          "bookid",
+          "name",
+          "title",
+          "book_name",
+          "bookName",
+          "name_ar",
+          "nameAr",
+          "title_ar",
+          "titleAr",
         ]
-      ) || ""
+      );
+
+    if (
+      nested
+    ) {
+      return cleanText(nested);
+    }
+  }
+
+  /*
+   * Last fallback:
+   * field book jika string.
+   */
+
+  if (
+    typeof obj.book === "string"
+  ) {
+    return cleanText(
+      obj.book
     );
   }
 
@@ -365,86 +550,79 @@ function extractBookId(obj) {
 }
 
 
-function extractBook(obj) {
-  if (!obj) {
-    return "";
-  }
-
-  let value =
-    firstValue(obj, [
-      "book",
-      "book_name",
-      "bookName",
-      "title",
-      "name",
-    ]);
-
-  if (
-    typeof value === "object"
-  ) {
-    value =
-      firstValue(
-        value,
-        [
-          "name",
-          "title",
-          "book_name",
-          "bookName",
-        ]
-      );
-  }
-
-  return cleanText(value);
-}
-
+/* =========================================================
+   AUTHOR
+========================================================= */
 
 function extractAuthor(obj) {
-  if (!obj) {
-    return "";
-  }
-
-  let value =
-    firstValue(obj, [
-      "author",
-      "author_name",
-      "authorName",
-    ]);
 
   if (
-    typeof value === "object"
+    !obj ||
+    typeof obj !== "object"
   ) {
-    value =
-      firstValue(
-        value,
-        [
-          "name",
-          "author_name",
-          "authorName",
-        ]
-      );
-  }
-
-  return cleanText(value);
-}
-
-
-function extractUrl(obj) {
-  if (!obj) {
     return "";
   }
 
   const value =
-    firstValue(obj, [
-      "url",
-      "link",
-      "href",
-      "book_url",
-      "bookUrl",
-      "source_url",
-      "sourceUrl",
-    ]);
+    findValueDeep(
+      obj,
+      [
+        "author_name",
+        "authorName",
+        "author_full_name",
+        "authorFullName",
+        "writer_name",
+        "writerName",
+        "muallif",
+        "muallif_name",
+        "author_ar",
+        "authorAr",
+      ]
+    );
 
-  return cleanText(value);
+  if (
+    value
+  ) {
+    return cleanText(value);
+  }
+
+  /*
+   * Nested author object
+   */
+
+  if (
+    obj.author &&
+    typeof obj.author === "object"
+  ) {
+
+    const nested =
+      findValueDeep(
+        obj.author,
+        [
+          "name",
+          "full_name",
+          "fullName",
+          "author_name",
+          "authorName",
+        ]
+      );
+
+    if (
+      nested
+    ) {
+      return cleanText(nested);
+    }
+  }
+
+  if (
+    typeof obj.author === "string"
+  ) {
+    return cleanText(
+      obj.author
+    );
+  }
+
+  return "";
 }
 
 
@@ -452,18 +630,36 @@ function extractUrl(obj) {
    URL
 ========================================================= */
 
-/*
- * Jangan reka URL jika book_id tiada.
- *
- * Jika SDK sendiri beri URL,
- * kita utamakan URL SDK.
- *
- * Jika tiada tetapi book_id ada,
- * kita gunakan halaman kitab Turath
- * berdasarkan ID kitab.
- */
+function extractUrl(obj) {
+
+  const value =
+    findValueDeep(
+      obj,
+      [
+        "url",
+        "link",
+        "href",
+        "book_url",
+        "bookUrl",
+        "source_url",
+        "sourceUrl",
+      ]
+    );
+
+  if (
+    value
+  ) {
+    return cleanText(
+      value
+    );
+  }
+
+  return "";
+}
+
 
 function buildBookUrl(bookId) {
+
   if (
     bookId === undefined ||
     bookId === null ||
@@ -482,12 +678,60 @@ function buildBookUrl(bookId) {
 
 
 /* =========================================================
-   GET BOOK INFO
+   DEBUG BOOK INFO
+========================================================= */
+
+function debugBookInfo(
+  bookId,
+  info
+) {
+
+  console.log(
+    "\n========================================"
+  );
+
+  console.log(
+    `🧪 RAW BOOK INFO FOR ID: ${bookId}`
+  );
+
+  console.log(
+    "========================================"
+  );
+
+  try {
+
+    console.log(
+      JSON.stringify(
+        info,
+        null,
+        2
+      ).slice(
+        0,
+        12000
+      )
+    );
+
+  } catch {
+
+    console.log(
+      info
+    );
+  }
+
+  console.log(
+    "========================================\n"
+  );
+}
+
+
+/* =========================================================
+   ENRICH BOOK
 ========================================================= */
 
 async function enrichBook(
   item
 ) {
+
   let book =
     extractBook(item);
 
@@ -504,43 +748,68 @@ async function enrichBook(
     extractUrl(item);
 
   /*
-   * Kalau item mempunyai nested book object
+   * Debug item structure
    */
-  if (
-    !book &&
-    item?.book
-  ) {
-    book =
-      extractBook(
-        item.book
-      );
-  }
+
+  console.log(
+    "\n🧪 ITEM METADATA:"
+  );
+
+  console.log(
+    {
+      book,
+      author,
+      page,
+      bookId,
+      url,
+    }
+  );
+
+  /*
+   * Kalau ada book object
+   */
 
   if (
-    !author &&
-    item?.book
+    item?.book &&
+    typeof item.book === "object"
   ) {
-    author =
-      extractAuthor(
-        item.book
-      );
-  }
 
-  if (
-    !bookId &&
-    item?.book
-  ) {
-    bookId =
-      extractBookId(
-        item.book
-      );
+    if (!book) {
+      book =
+        extractBook(
+          item.book
+        );
+    }
+
+    if (!author) {
+      author =
+        extractAuthor(
+          item.book
+        );
+    }
+
+    if (!bookId) {
+      bookId =
+        extractBookId(
+          item.book
+        );
+    }
+
+    if (!url) {
+      url =
+        extractUrl(
+          item.book
+        );
+    }
   }
 
   /*
-   * Ambil info kitab jika book_id ada.
+   * GET BOOK INFO
    */
 
-  if (bookId) {
+  if (
+    bookId
+  ) {
 
     try {
 
@@ -553,41 +822,91 @@ async function enrichBook(
           bookId
         );
 
-      if (info) {
+      if (
+        info
+      ) {
+
+        /*
+         * PENTING:
+         * Paparkan struktur sebenar
+         * getBookInfo untuk diagnosis.
+         */
+
+        debugBookInfo(
+          bookId,
+          info
+        );
 
         if (!book) {
           book =
-            extractBook(info);
+            extractBook(
+              info
+            );
         }
 
         if (!author) {
           author =
-            extractAuthor(info);
+            extractAuthor(
+              info
+            );
         }
 
         if (!page) {
           page =
-            extractPage(info);
+            extractPage(
+              info
+            );
         }
 
         if (!url) {
           url =
-            extractUrl(info);
+            extractUrl(
+              info
+            );
         }
 
         /*
-         * Debug struktur info
+         * Ada kemungkinan metadata berada
+         * dalam result.data
          */
 
-        console.log(
-          "🧪 BOOK INFO KEYS:",
-          typeof info === "object"
-            ? Object.keys(info)
-            : []
-        );
+        if (
+          info.data
+        ) {
+
+          if (!book) {
+            book =
+              extractBook(
+                info.data
+              );
+          }
+
+          if (!author) {
+            author =
+              extractAuthor(
+                info.data
+              );
+          }
+
+          if (!page) {
+            page =
+              extractPage(
+                info.data
+              );
+          }
+
+          if (!url) {
+            url =
+              extractUrl(
+                info.data
+              );
+          }
+        }
       }
 
-    } catch (error) {
+    } catch (
+      error
+    ) {
 
       console.log(
         `⚠️ GET BOOK INFO ERROR ${bookId}:`,
@@ -597,9 +916,7 @@ async function enrichBook(
   }
 
   /*
-   * Kalau SDK tidak beri URL,
-   * tetapi book_id wujud,
-   * bina URL kitab.
+   * URL fallback
    */
 
   if (
@@ -612,17 +929,28 @@ async function enrichBook(
       );
   }
 
+  /*
+   * Text
+   */
+
   const text =
-    findTextDeep(item);
+    findTextDeep(
+      item
+    );
 
   return {
+
     text,
 
     book:
-      cleanText(book),
+      cleanText(
+        book
+      ),
 
     author:
-      cleanText(author),
+      cleanText(
+        author
+      ),
 
     page:
       page === null ||
@@ -634,7 +962,9 @@ async function enrichBook(
       bookId || "",
 
     url:
-      cleanText(url),
+      cleanText(
+        url
+      ),
 
     category:
       item?.category ||
@@ -642,7 +972,8 @@ async function enrichBook(
       item?.categoryName ||
       "",
 
-    raw: item,
+    raw:
+      item,
   };
 }
 
@@ -654,28 +985,16 @@ async function enrichBook(
 function extractRawItems(
   raw
 ) {
+
   if (!raw) {
     return [];
   }
-
-  /*
-   * Array terus
-   */
 
   if (
     Array.isArray(raw)
   ) {
     return raw;
   }
-
-  /*
-   * FORMAT RASMI SEARCH RESULTS
-   *
-   * {
-   *   count: ...,
-   *   data: [...]
-   * }
-   */
 
   if (
     Array.isArray(
@@ -684,10 +1003,6 @@ function extractRawItems(
   ) {
     return raw.data;
   }
-
-  /*
-   * Fallback
-   */
 
   if (
     Array.isArray(
@@ -720,10 +1035,6 @@ function extractRawItems(
   ) {
     return raw.sources;
   }
-
-  /*
-   * Nested data
-   */
 
   if (
     raw.data &&
@@ -760,23 +1071,8 @@ function extractRawItems(
 
 
 /* =========================================================
-   TURATH SDK SEARCH
+   SDK SEARCH
 ========================================================= */
-
-/*
- * INI PEMBETULAN UTAMA.
- *
- * turath-sdk menggunakan:
- *
- * search(query, {
- *   category: 16,
- *   page: 1
- * })
- *
- * BUKAN:
- *
- * categoryId
- */
 
 async function sdkSearch(
   query,
@@ -812,10 +1108,6 @@ async function sdkSearch(
         }
       );
 
-    /*
-     * DEBUG
-     */
-
     console.log(
       "🧪 SEARCH RESULT TYPE:",
       typeof result
@@ -828,7 +1120,9 @@ async function sdkSearch(
 
       console.log(
         "🧪 SEARCH RESULT KEYS:",
-        Object.keys(result)
+        Object.keys(
+          result
+        )
       );
 
       console.log(
@@ -844,11 +1138,6 @@ async function sdkSearch(
           ? result.data.length
           : "NOT ARRAY"
       );
-
-      /*
-       * Cetak data mentah sedikit sahaja
-       * supaya log tidak terlalu panjang.
-       */
 
       console.log(
         "🧪 FIRST RAW TURATH RESULT:"
@@ -868,10 +1157,12 @@ async function sdkSearch(
 
     return result;
 
-  } catch (error) {
+  } catch (
+    error
+  ) {
 
     console.error(
-      `❌ TURATH SEARCH ERROR:`,
+      "❌ TURATH SEARCH ERROR:",
       error
     );
 
@@ -917,8 +1208,19 @@ async function searchOneQuery(
 
   const normalized = [];
 
+  /*
+   * Hadkan jumlah setiap query
+   */
+
+  const limitedItems =
+    items.slice(
+      0,
+      MAX_RESULTS_PER_QUERY
+    );
+
   for (
-    const item of items
+    const item
+    of limitedItems
   ) {
 
     try {
@@ -931,6 +1233,7 @@ async function searchOneQuery(
       if (
         !result.text
       ) {
+
         console.log(
           "⚠️ RESULT TIADA TEXT"
         );
@@ -942,7 +1245,9 @@ async function searchOneQuery(
         result
       );
 
-    } catch (error) {
+    } catch (
+      error
+    ) {
 
       console.log(
         "⚠️ NORMALIZE ERROR:",
@@ -973,7 +1278,8 @@ function deduplicate(
   const output = [];
 
   for (
-    const item of results
+    const item
+    of results
   ) {
 
     const key =
@@ -998,7 +1304,9 @@ function deduplicate(
       continue;
     }
 
-    seen.add(key);
+    seen.add(
+      key
+    );
 
     output.push(
       item
@@ -1030,28 +1338,31 @@ function scoreResult(
     ).toLowerCase();
 
   const terms =
-    cleanText(query)
+    cleanText(
+      query
+    )
       .toLowerCase()
-      .split(/\s+/)
+      .split(
+        /\s+/
+      )
       .filter(
         (x) =>
           x.length >= 2
       );
 
   for (
-    const term of terms
+    const term
+    of terms
   ) {
 
     if (
-      text.includes(term)
+      text.includes(
+        term
+      )
     ) {
       score += 2;
     }
   }
-
-  /*
-   * Kandungan panjang
-   */
 
   if (
     result.text.length >= 200
@@ -1064,10 +1375,6 @@ function scoreResult(
   ) {
     score += 2;
   }
-
-  /*
-   * Metadata
-   */
 
   if (
     result.book
@@ -1119,7 +1426,9 @@ async function multiSearch(
           (q) =>
             cleanText(q)
         )
-        .filter(Boolean)
+        .filter(
+          Boolean
+        )
     ),
   ].slice(
     0,
@@ -1175,10 +1484,6 @@ async function multiSearch(
     `\n📚 TOTAL RAW NORMALIZED: ${allResults.length}`
   );
 
-  /*
-   * Duplicate
-   */
-
   const unique =
     deduplicate(
       allResults
@@ -1188,19 +1493,11 @@ async function multiSearch(
     `📚 AFTER DEDUPLICATE: ${unique.length}`
   );
 
-  /*
-   * Ranking
-   */
-
   unique.sort(
     (a, b) =>
       b._score -
       a._score
   );
-
-  /*
-   * Maksimum 10
-   */
 
   const finalResults =
     unique
@@ -1209,75 +1506,77 @@ async function multiSearch(
         MAX_FINAL_RESULTS
       )
       .map(
-        (item) => {
+        (item) => ({
+          text:
+            item.text,
 
-          const result = {
-            text:
-              item.text,
+          book:
+            item.book,
 
-            book:
-              item.book,
+          author:
+            item.author,
 
-            author:
-              item.author,
+          page:
+            item.page,
 
-            page:
-              item.page,
+          book_id:
+            item.book_id,
 
-            book_id:
-              item.book_id,
+          url:
+            item.url,
 
-            url:
-              item.url,
-
-            category:
-              item.category,
-          };
-
-          return result;
-        }
+          category:
+            item.category,
+        })
       );
 
   console.log(
     `🏆 FINAL SOURCES: ${finalResults.length}`
   );
 
-  /*
-   * Paparkan final sources
-   */
-
   finalResults.forEach(
-    (source, index) => {
+    (
+      source,
+      index
+    ) => {
 
       console.log(
         `\n[S${index + 1}]`
       );
 
       console.log(
-        `📖 KITAB: ${source.book || "TIADA"}`
+        `📖 KITAB: ${
+          source.book ||
+          "TIADA"
+        }`
       );
 
       console.log(
-        `✍️ PENGARANG: ${source.author || "TIADA"}`
+        `✍️ PENGARANG: ${
+          source.author ||
+          "TIADA"
+        }`
       );
 
       console.log(
-        `📄 HALAMAN: ${source.page || "TIADA"}`
+        `📄 HALAMAN: ${
+          source.page ||
+          "TIADA"
+        }`
       );
 
       console.log(
-        `🆔 BOOK ID: ${source.book_id || "TIADA"}`
+        `🆔 BOOK ID: ${
+          source.book_id ||
+          "TIADA"
+        }`
       );
 
       console.log(
-        `🔗 URL: ${source.url || "TIADA"}`
-      );
-
-      console.log(
-        `📝 TEXT: ${source.text.slice(
-          0,
-          500
-        )}`
+        `🔗 URL: ${
+          source.url ||
+          "TIADA"
+        }`
       );
     }
   );
@@ -1287,7 +1586,7 @@ async function multiSearch(
 
 
 /* =========================================================
-   HTTP HELPERS
+   HTTP
 ========================================================= */
 
 function sendJson(
@@ -1327,7 +1626,10 @@ function parseBody(
 ) {
 
   return new Promise(
-    (resolve, reject) => {
+    (
+      resolve,
+      reject
+    ) => {
 
       let body = "";
 
@@ -1372,7 +1674,7 @@ function parseBody(
 
 
 /* =========================================================
-   HTTP SERVER
+   SERVER
 ========================================================= */
 
 const server =
@@ -1414,6 +1716,7 @@ const server =
           );
         }
 
+
         /* ================================================
            CATEGORIES
         ================================================= */
@@ -1435,6 +1738,7 @@ const server =
             }
           );
         }
+
 
         /* ================================================
            GET SEARCH
@@ -1482,6 +1786,7 @@ const server =
             !queries.length &&
             query
           ) {
+
             queries = [
               query,
             ];
@@ -1520,8 +1825,6 @@ const server =
               {
                 category:
                   categoryId,
-                categoryId:
-                  categoryId,
               }
             );
 
@@ -1553,6 +1856,7 @@ const server =
             }
           );
         }
+
 
         /* ================================================
            POST SEARCH
@@ -1634,8 +1938,6 @@ const server =
               {
                 category:
                   categoryId,
-                categoryId:
-                  categoryId,
               }
             );
 
@@ -1644,7 +1946,9 @@ const server =
           );
 
           console.log(
-            `📚 TURATH SOURCES: ${results.length}`
+            `📚 TURATH SOURCES: ${
+              results.length
+            }`
           );
 
           return sendJson(
@@ -1678,6 +1982,7 @@ const server =
           );
         }
 
+
         /* ================================================
            ROOT
         ================================================= */
@@ -1697,7 +2002,7 @@ const server =
                 "TanyaFiqihBot Turath Service",
 
               version:
-                "3.0",
+                "4.0",
 
               target_sources:
                 MAX_FINAL_RESULTS,
@@ -1711,6 +2016,7 @@ const server =
           );
         }
 
+
         return sendJson(
           res,
           404,
@@ -1721,7 +2027,9 @@ const server =
           }
         );
 
-      } catch (error) {
+      } catch (
+        error
+      ) {
 
         console.error(
           "❌ TURATH SERVER ERROR:",
@@ -1769,11 +2077,15 @@ server.listen(
     );
 
     console.log(
-      `🎯 TARGET SOURCES: ${MAX_FINAL_RESULTS}`
+      `🎯 TARGET SOURCES: ${
+        MAX_FINAL_RESULTS
+      }`
     );
 
     console.log(
-      `🔎 RESULTS / QUERY: ${MAX_RESULTS_PER_QUERY}`
+      `🔎 RESULTS / QUERY: ${
+        MAX_RESULTS_PER_QUERY
+      }`
     );
 
     console.log(
