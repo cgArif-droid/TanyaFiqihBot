@@ -90,7 +90,6 @@ ISLAMIC_LIBRARY_DOMAINS = [
     "waqfeya.net",
 ]
 
-# Domain tambahan yang dikecualikan
 ADDITIONAL_ISLAMIC_DOMAINS = []
 
 ALL_ISLAMIC_DOMAINS = (
@@ -120,7 +119,7 @@ QUERY_MAP = {
     "junub": "الجنابة",
     "mandi wajib": "الغسل",
     "nikah": "النكاح",
-    "kahwin": "النkاح",
+    "kahwin": "النكاح",
     "talak": "الطلاق",
     "cerai": "الطلاق",
     "rujuk": "الرجعة",
@@ -162,8 +161,6 @@ def gemini_generate(
     retries: int = None,
     temperature: float = 0.25,
 ) -> str:
-    """Panggil Gemini dengan kawalan cubaan semula dan suhu yang stabil."""
-
     if GEMINI_CLIENT is None:
         raise RuntimeError("GOOGLE_API_KEY belum ditetapkan.")
 
@@ -204,10 +201,7 @@ def gemini_generate(
 
 
 def extract_json(text: str) -> dict:
-    """Ekstrak objek JSON daripada respons model."""
-
     cleaned = (text or "").strip()
-
     cleaned = re.sub(
         r"^```(?:json)?\s*",
         "",
@@ -234,7 +228,7 @@ def extract_json(text: str) -> dict:
 
 
 # ============================================================
-# MESSAGE CLASSIFIER
+# MESSAGE CLASSIFIER (DIPERBAIKI DENGAN SMART FALLBACK)
 # ============================================================
 
 def classify_message(message: str) -> str:
@@ -243,71 +237,58 @@ def classify_message(message: str) -> str:
     if not message:
         return "UNCLEAR"
 
+    lowered = message.lower()
+    normalized = re.sub(r"[^a-zA-Z0-9\s]", "", lowered).strip()
+
+    # 1. Semakan Sapaan Pantas
+    greeting_patterns = {
+        "hi", "hii", "hiii", "hai", "hello", "helo",
+        "assalamualaikum", "assalamualaikum wbt",
+        "salam", "salam sejahtera", "selamat pagi", "selamat petang",
+    }
+    if normalized in greeting_patterns:
+        return "GREETING"
+
+    # 2. Semakan Kata Kunci Fiqh Asas (Elak 'UNCLEAR' jika ada perkataan agama)
+    fiqh_keywords = set(QUERY_MAP.keys()) | {
+        "hukum", "bolehkah", "adakah", "syarat", "rukun",
+        "batal", "sah", "haram", "halal", "makruh", "sunat",
+        "darah", "hadas", "najis", "istihadah", "cara", "panduan"
+    }
+    if any(k in lowered for k in fiqh_keywords):
+        return "FIQH_QUESTION"
+
+    # 3. Klasifikasi Menggunakan LLM Jika Ragu-ragu
     prompt = f"""
-Anda ialah pengelas mesej bagi Telegram TanyaFiqihBot.
+Anda ialah pengelas mesej TanyaFiqihBot.
+Tentukan SATU kategori sahaja:
+- GREETING: Sapaan sahaja
+- GENERAL_QUESTION: Soalan fungsi bot
+- FIQH_QUESTION: Soalan fiqh, hukum, ibadah, atau agama
+- UNCLEAR: Teks rawak atau spam yang tiada maksud
 
-Tentukan SATU kategori untuk mesej pengguna.
+Pulangkan JSON sahaja dalam format: {{"category":"KATEGORI"}}
 
-GREETING:
-Sapaan sahaja seperti hi, hai, hello, salam atau assalamualaikum tanpa pertanyaan lain.
-
-FIQH_QUESTION:
-Pertanyaan tentang hukum Islam, fiqh, ibadah, taharah, solat, puasa, zakat, haji, muamalat, nikah, talak, faraid, akidah, adab Islam, fatwa, dalil atau kitab agama.
-
-GENERAL_QUESTION:
-Pertanyaan tentang fungsi atau cara menggunakan bot, atau soalan bukan fiqh yang jelas.
-
-UNCLEAR:
-Mesej yang tidak jelas, tidak cukup konteks, atau bukan pertanyaan yang boleh dikenal pasti.
-
-Arahan:
-- Jangan jawab soalan.
-- Jangan cari sumber.
-- Pulangkan JSON sahaja: {{"category":"KATEGORI"}}
-
-Mesej pengguna:
+Mesej:
 {message}
 """
-
     try:
         raw = gemini_generate(prompt, retries=1, temperature=0.1)
         data = extract_json(raw)
+        category = str(data.get("category", "")).strip().upper()
 
-        category = str(
-            data.get("category", "")
-        ).strip().upper()
-
-        allowed = {
-            "GREETING",
-            "FIQH_QUESTION",
-            "GENERAL_QUESTION",
-            "UNCLEAR",
-        }
-
-        if category in allowed:
+        if category in {"GREETING", "FIQH_QUESTION", "GENERAL_QUESTION", "UNCLEAR"}:
             return category
-
-        return "UNCLEAR"
 
     except Exception as exc:
         print(f"[CLASSIFIER ERROR] {exc}")
 
-        normalized = re.sub(
-            r"[^a-zA-Z0-9\s]",
-            "",
-            message.lower(),
-        ).strip()
+    # 4. Fallback Pintar: Jika ayat mengandungi sekurang-kurangnya 3 perkataan,
+    # terus anggap sebagai soalan fiqh supaya proses carian tidak disekat.
+    if len(message.split()) >= 3:
+        return "FIQH_QUESTION"
 
-        greeting_patterns = {
-            "hi", "hii", "hiii", "hai", "hello", "helo",
-            "assalamualaikum", "assalamualaikum wbt",
-            "salam", "salam sejahtera",
-        }
-
-        if normalized in greeting_patterns:
-            return "GREETING"
-
-        return "UNCLEAR"
+    return "UNCLEAR"
 
 
 def greeting_response(message: str) -> str:
@@ -326,7 +307,7 @@ def greeting_response(message: str) -> str:
     return (
         "Hai! 👋 Selamat datang ke *TanyaFiqihBot*.\n\n"
         "Saya membantu mencari jawapan berkaitan fiqh Islam "
-        "berserta rujukan sumber. Apa yang anda ingin tanya?"
+        "berserta rujukan sumber kitab Turath. Apa yang anda ingin tanya?"
     )
 
 
@@ -334,7 +315,7 @@ def general_response() -> str:
     return (
         "📚 *Tentang TanyaFiqihBot*\n\n"
         "Bot ini membantu menjawab persoalan fiqh Islam "
-        "dengan mencari sumber kitab dan sumber agama yang berkaitan.\n\n"
+        "dengan mencari sumber kitab dan fatwa yang muktamad.\n\n"
         "Contoh soalan:\n"
         "• Apakah hukum solat jamak ketika musafir?\n"
         "• Bagaimanakah cara sujud sahwi?\n"
@@ -685,7 +666,7 @@ def search_brave_web(question: str) -> list:
 
 
 # ============================================================
-# ANSWER GENERATION (MENGEKALKAN GAYA ASAL YANG NATURAL)
+# ANSWER GENERATION
 # ============================================================
 
 def build_source_context(sources: list) -> str:
@@ -730,11 +711,6 @@ def generate_fiqh_answer(
     question: str,
     sources: list,
 ) -> str:
-    """
-    Jana jawapan dengan berpandukan sumber yang diberikan.
-    Kekalkan etika ilmiah yang telus dan adab perbincangan fiqh.
-    """
-
     if not sources:
         return (
             "Maaf, saya belum menemui sumber yang mencukupi "
@@ -762,9 +738,9 @@ PERATURAN PENTING:
 2. Jangan mendakwa sumber menyatakan sesuatu jika perkara itu tidak terdapat dalam petikan sumber.
 3. Gunakan penanda [S1], [S2] dan seterusnya untuk dakwaan yang benar-benar disokong oleh sumber berkenaan.
 4. Jika sumber bercanggah, terangkan perbezaannya dengan cermat dan berhati-hati.
-5. Jika ada perbezaan pandangan mazhab atau khilaf dalam petikan, terangkan secara adil dan ilmiah di bawah huraian.
+5. Jika ada perbezaan pandangan mazhab atau khilaf dalam petikan, terangkan secara ilmiah di bawah huraian.
 6. Bezakan antara rukun/syarat wajib dengan amalan sunat mengikut konteks teks mazhab.
-7. Gunakan gaya tulisan Markdown yang kemas (*bold* pada kata kunci dan senarai bernombor/bullet yang teratur).
+7. Gunakan gaya tulisan Markdown yang kemas (*bold* pada kata kunci dan senarai bullet yang teratur).
 8. JANGAN tambah senarai rujukan panjang atau asal penciptaan bot di hujung jawapan, ia akan disambung secara automatik oleh sistem.
 
 Format yang digalakkan:
@@ -795,8 +771,6 @@ Berikan jawapan berdasarkan sumber di atas sahaja.
 
 
 def format_source_reference(source: dict, index: int) -> str:
-    """Format satu sumber untuk senarai rujukan Telegram."""
-
     title = source.get("title", "Sumber tidak diketahui")
     author = source.get("author", "")
     page = source.get("page", "")
@@ -835,7 +809,6 @@ def build_references(sources: list) -> str:
 
 
 def get_bot_origin_footer() -> str:
-    """Maklumat asal penciptaan bot yang ditambah di hujung jawapan."""
     return (
         "---\n"
         "ℹ️ *Asal Penciptaan Bot*\n"
@@ -887,7 +860,6 @@ def answer_question(question: str) -> str:
     references = build_references(sources)
     footer = get_bot_origin_footer()
 
-    # Susun jawapan akhir: Isi Kandungan -> Rujukan Kitab -> Footer Asal Penciptaan
     final_output = answer
     if references:
         final_output += "\n\n" + references
@@ -897,7 +869,7 @@ def answer_question(question: str) -> str:
 
 
 # ============================================================
-# TELEGRAM HANDLERS (DENGAN SOKONGAN MARKDOWN SELAMAT)
+# TELEGRAM HANDLERS
 # ============================================================
 
 async def start_command(
@@ -983,7 +955,6 @@ async def telegram_answer(
         ]
 
         if chunks:
-            # Gunakan parse_mode="Markdown" supaya gaya tulisan bold dan tajuk kemas di Telegram
             try:
                 await status_message.edit_text(
                     chunks[0],
@@ -991,7 +962,6 @@ async def telegram_answer(
                     disable_web_page_preview=True,
                 )
             except Exception:
-                # Fallback ke plain text jika terdapat simbol luar biasa
                 await status_message.edit_text(
                     chunks[0],
                     disable_web_page_preview=True,
