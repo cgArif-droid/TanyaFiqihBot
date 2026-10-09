@@ -21,8 +21,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 
 # ============================================================
@@ -64,13 +62,8 @@ MAX_SOURCE_COUNT = int(os.getenv("MAX_SOURCE_COUNT", "8"))
 MAX_SOURCE_CHARS = int(os.getenv("MAX_SOURCE_CHARS", "2500"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "14000"))
 
-# Konfigurasi Session dengan Retry Policy untuk ketahanan rangkaian
 HTTP_SESSION = requests.Session()
-retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-HTTP_SESSION.mount("https://", HTTPAdapter(max_retries=retries))
-HTTP_SESSION.mount("http://", HTTPAdapter(max_retries=retries))
 
-# Client Gemini dikongsi oleh fungsi-fungsi aplikasi.
 GEMINI_CLIENT = (
     genai.Client(api_key=GOOGLE_API_KEY)
     if GOOGLE_API_KEY
@@ -97,6 +90,7 @@ ISLAMIC_LIBRARY_DOMAINS = [
     "waqfeya.net",
 ]
 
+# Domain tambahan yang dikecualikan
 ADDITIONAL_ISLAMIC_DOMAINS = []
 
 ALL_ISLAMIC_DOMAINS = (
@@ -126,7 +120,7 @@ QUERY_MAP = {
     "junub": "الجنابة",
     "mandi wajib": "الغسل",
     "nikah": "النكاح",
-    "kahwin": "النكاح",
+    "kahwin": "النkاح",
     "talak": "الطلاق",
     "cerai": "الطلاق",
     "rujuk": "الرجعة",
@@ -151,7 +145,7 @@ QUERY_MAP = {
     "masjid": "المسجد",
     "azan": "الأذان",
     "iqamah": "الإقامة",
-    "sah": "الصحة والبطلan في الفقه",
+    "sah": "الصحة والبطلان في الفقه",
     "batal": "مبطلات العبادة",
     "haram": "الحرام",
     "halal": "الحلال",
@@ -168,7 +162,7 @@ def gemini_generate(
     retries: int = None,
     temperature: float = 0.25,
 ) -> str:
-    """Panggil Gemini dengan cubaan semula apabila berlaku ralat."""
+    """Panggil Gemini dengan kawalan cubaan semula dan suhu yang stabil."""
 
     if GEMINI_CLIENT is None:
         raise RuntimeError("GOOGLE_API_KEY belum ditetapkan.")
@@ -250,8 +244,26 @@ def classify_message(message: str) -> str:
         return "UNCLEAR"
 
     prompt = f"""
-Anda ialah pengelas mesej bagi TanyaFiqihBot. Tentukan SATU kategori sahaja (GREETING, FIQH_QUESTION, GENERAL_QUESTION, UNCLEAR).
-Pulangkan JSON sahaja dalam format: {{"category":"KATEGORI"}}
+Anda ialah pengelas mesej bagi Telegram TanyaFiqihBot.
+
+Tentukan SATU kategori untuk mesej pengguna.
+
+GREETING:
+Sapaan sahaja seperti hi, hai, hello, salam atau assalamualaikum tanpa pertanyaan lain.
+
+FIQH_QUESTION:
+Pertanyaan tentang hukum Islam, fiqh, ibadah, taharah, solat, puasa, zakat, haji, muamalat, nikah, talak, faraid, akidah, adab Islam, fatwa, dalil atau kitab agama.
+
+GENERAL_QUESTION:
+Pertanyaan tentang fungsi atau cara menggunakan bot, atau soalan bukan fiqh yang jelas.
+
+UNCLEAR:
+Mesej yang tidak jelas, tidak cukup konteks, atau bukan pertanyaan yang boleh dikenal pasti.
+
+Arahan:
+- Jangan jawab soalan.
+- Jangan cari sumber.
+- Pulangkan JSON sahaja: {{"category":"KATEGORI"}}
 
 Mesej pengguna:
 {message}
@@ -287,16 +299,9 @@ Mesej pengguna:
         ).strip()
 
         greeting_patterns = {
-            "hi",
-            "hii",
-            "hiii",
-            "hai",
-            "hello",
-            "helo",
-            "assalamualaikum",
-            "assalamualaikum wbt",
-            "salam",
-            "salam sejahtera",
+            "hi", "hii", "hiii", "hai", "hello", "helo",
+            "assalamualaikum", "assalamualaikum wbt",
+            "salam", "salam sejahtera",
         }
 
         if normalized in greeting_patterns:
@@ -315,32 +320,37 @@ def greeting_response(message: str) -> str:
         return (
             "Waalaikumussalam warahmatullahi wabarakatuh 😊\n\n"
             "Selamat datang ke *TanyaFiqihBot*.\n"
-            "Boleh tanya saya soalan berkaitan hukum dan fiqh Islam."
+            "Boleh tanya saya soalan berkaitan fiqh Islam."
         )
 
     return (
         "Hai! 👋 Selamat datang ke *TanyaFiqihBot*.\n\n"
         "Saya membantu mencari jawapan berkaitan fiqh Islam "
-        "berserta rujukan kitab Turath. Apa yang anda ingin tanyakan?"
+        "berserta rujukan sumber. Apa yang anda ingin tanya?"
     )
 
 
 def general_response() -> str:
     return (
         "📚 *Tentang TanyaFiqihBot*\n\n"
-        "Bot ini dibangunkan untuk membantu menjawab persoalan fiqh Islam "
-        "dengan menyemak sumber kitab Turath dan rujukan fatwa yang muktamad.\n\n"
-        "Sila ajukan sebarang soalan fiqh yang ingin anda semak."
+        "Bot ini membantu menjawab persoalan fiqh Islam "
+        "dengan mencari sumber kitab dan sumber agama yang berkaitan.\n\n"
+        "Contoh soalan:\n"
+        "• Apakah hukum solat jamak ketika musafir?\n"
+        "• Bagaimanakah cara sujud sahwi?\n"
+        "• Apakah perkara yang membatalkan wuduk?\n\n"
+        "Sila ajukan soalan fiqh yang ingin anda semak."
     )
 
 
 # ============================================================
-# TURATH QUERY PLANNER & SEARCH
+# TURATH QUERY PLANNER
 # ============================================================
 
 def fallback_turath_queries(question: str) -> list:
     question = question.strip()
     lowered = question.lower()
+
     queries = [question]
 
     for keyword, arabic in QUERY_MAP.items():
@@ -362,11 +372,20 @@ def fallback_turath_queries(question: str) -> list:
 
 def plan_turath_queries(question: str) -> list:
     prompt = f"""
-Tukarkan soalan pengguna kepada kata kunci ringkas untuk carian kitab turath Arab.
-Pulangkan JSON sahaja dalam format: {{"queries":["kata kunci 1","kata kunci 2"]}}
-Maksimum 5 pertanyaan.
+Anda pakar membina kata kunci carian kitab fiqh Arab.
 
-Soalan: {question}
+Tukarkan soalan pengguna kepada beberapa kata kunci ringkas
+yang sesuai dicari dalam kitab turath Arab.
+
+Peraturan:
+- Jangan jawab soalan.
+- Jangan membuat hukum sendiri.
+- Sertakan kata kunci Arab yang relevan jika mampu.
+- Pulangkan JSON sahaja dalam format: {{"queries":["kata kunci 1","kata kunci 2"]}}
+- Maksimum 5 pertanyaan.
+
+Soalan pengguna:
+{question}
 """
 
     try:
@@ -389,7 +408,9 @@ Soalan: {question}
         for query in queries:
             if not isinstance(query, str):
                 continue
+
             query = query.strip()
+
             if query and query not in seen:
                 cleaned.append(query)
                 seen.add(query)
@@ -405,6 +426,10 @@ Soalan: {question}
 
     return fallback_turath_queries(question)
 
+
+# ============================================================
+# TURATH SEARCH
+# ============================================================
 
 def search_turath(queries: list) -> list:
     endpoint = f"{TURATH_SERVICE_URL}/search"
@@ -424,11 +449,7 @@ def search_turath(queries: list) -> list:
 
         if isinstance(payload, dict):
             for key in (
-                "results",
-                "sources",
-                "items",
-                "data",
-                "documents",
+                "results", "sources", "items", "data", "documents",
             ):
                 value = payload.get(key)
                 if isinstance(value, list):
@@ -437,21 +458,22 @@ def search_turath(queries: list) -> list:
             if any(
                 key in payload
                 for key in (
-                    "text",
-                    "content",
-                    "book",
-                    "title",
-                    "snippet",
+                    "text", "content", "book", "title", "snippet",
                 )
             ):
                 return [payload]
 
+        print("[TURATH] Respons tidak mengandungi senarai hasil.")
         return []
 
     except Exception as exc:
         print(f"[TURATH SEARCH ERROR] {exc}")
         return []
 
+
+# ============================================================
+# SOURCE NORMALIZATION
+# ============================================================
 
 def first_value(item: dict, keys: tuple) -> str:
     for key in keys:
@@ -476,20 +498,32 @@ def normalize_turath_sources(raw_sources: list) -> list:
             item,
             ("book", "book_name", "bookTitle", "title", "name", "source"),
         )
-        author = first_value(item, ("author", "author_name", "writer"))
+        author = first_value(
+            item,
+            ("author", "author_name", "writer"),
+        )
         text = first_value(
             item,
             ("text", "content", "passage", "body", "snippet", "matched_text", "excerpt"),
         )
-        page = first_value(item, ("page", "page_number", "page_no", "volume_page"))
-        volume = first_value(item, ("volume", "vol", "volume_number"))
-        url = first_value(item, ("url", "link", "source_url"))
+        page = first_value(
+            item,
+            ("page", "page_number", "page_no", "volume_page"),
+        )
+        volume = first_value(
+            item,
+            ("volume", "vol", "volume_number"),
+        )
+        url = first_value(
+            item,
+            ("url", "link", "source_url"),
+        )
 
         if not text:
             continue
 
         if not title:
-            title = "Sumber Turath"
+            title = "Sumber Turath (maklumat kitab tidak lengkap)"
 
         normalized.append(
             {
@@ -508,133 +542,279 @@ def normalize_turath_sources(raw_sources: list) -> list:
 
 
 def rank_sources(sources: list, question: str) -> list:
-    return sources[:MAX_SOURCE_COUNT]
+    question_words = {
+        word.lower()
+        for word in re.findall(r"\w+", question)
+        if len(word) > 2
+    }
 
+    def score(source):
+        text = (
+            source.get("title", "")
+            + " "
+            + source.get("text", "")
+        ).lower()
+
+        overlap = sum(
+            1 for word in question_words if word in text
+        )
+
+        has_text = bool(source.get("text"))
+        has_book = bool(source.get("title"))
+        has_page = bool(source.get("page"))
+
+        return (
+            overlap,
+            int(has_text),
+            int(has_book),
+            int(has_page),
+        )
+
+    ranked = sorted(
+        sources,
+        key=score,
+        reverse=True,
+    )
+
+    unique = []
+    seen = set()
+
+    for source in ranked:
+        fingerprint = re.sub(
+            r"\s+",
+            " ",
+            (
+                source.get("title", "")
+                + source.get("text", "")
+            ).lower(),
+        ).strip()
+
+        if fingerprint in seen:
+            continue
+
+        seen.add(fingerprint)
+        unique.append(source)
+
+    return unique[:MAX_SOURCE_COUNT]
+
+
+# ============================================================
+# BRAVE WEB SEARCH FALLBACK
+# ============================================================
 
 def search_brave_web(question: str) -> list:
     if not BRAVE_SEARCH_API_KEY:
+        print("[BRAVE] BRAVE_SEARCH_API_KEY belum ditetapkan.")
         return []
 
     endpoint = "https://api.search.brave.com/res/v1/web/search"
+
     headers = {
         "Accept": "application/json",
         "X-Subscription-Token": BRAVE_SEARCH_API_KEY,
     }
 
-    try:
-        response = HTTP_SESSION.get(
-            endpoint,
-            headers=headers,
-            params={
-                "q": question,
-                "count": BRAVE_SEARCH_COUNT,
-                "country": "MY",
-                "search_lang": "ms",
-                "safesearch": "moderate",
-            },
-            timeout=BRAVE_TIMEOUT,
-        )
+    domain_query = " OR ".join(
+        f"site:{domain}"
+        for domain in ALL_ISLAMIC_DOMAINS
+    )
 
-        response.raise_for_status()
-        payload = response.json()
-        results = payload.get("web", {}).get("results", [])
+    queries = [
+        question,
+        f"{question} ({domain_query})",
+    ]
 
-        sources = []
-        for r in results:
-            url = r.get("url", "")
-            desc = r.get("description", "")
-            title = r.get("title", "")
+    sources = []
+    seen_urls = set()
 
-            if url and desc:
-                domain = urlparse(url).hostname or ""
+    for query in queries:
+        try:
+            response = HTTP_SESSION.get(
+                endpoint,
+                headers=headers,
+                params={
+                    "q": query,
+                    "count": BRAVE_SEARCH_COUNT,
+                    "country": "MY",
+                    "search_lang": "ms",
+                    "safesearch": "moderate",
+                },
+                timeout=BRAVE_TIMEOUT,
+            )
+
+            response.raise_for_status()
+            payload = response.json()
+
+            web_data = payload.get("web", {})
+            results = web_data.get("results", [])
+
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+
+                title = str(result.get("title", "")).strip()
+                description = str(result.get("description", "")).strip()
+                url = str(result.get("url", "")).strip()
+
+                if not description or not url:
+                    continue
+
+                if url in seen_urls:
+                    continue
+
+                seen_urls.add(url)
+                domain = (urlparse(url).hostname or "").lower()
+
                 sources.append(
                     {
                         "kind": "web",
-                        "title": title or domain or "Sumber Web",
+                        "title": title or domain or "Sumber web",
                         "author": "",
-                        "text": desc[:MAX_SOURCE_CHARS],
+                        "text": description[:MAX_SOURCE_CHARS],
                         "page": "",
                         "volume": "",
                         "url": url,
-                        "domain": domain.lower(),
+                        "domain": domain,
                     }
                 )
-        return sources
 
-    except Exception as exc:
-        print(f"[BRAVE SEARCH ERROR] {exc}")
-        return []
+        except Exception as exc:
+            print(f"[BRAVE SEARCH ERROR] {exc}")
+
+    return sources[:MAX_SOURCE_COUNT]
 
 
 # ============================================================
-# ANSWER GENERATION (TEMPLAT 4 BAHAGIAN & KESIMPULAN)
+# ANSWER GENERATION (MENGEKALKAN GAYA ASAL YANG NATURAL)
 # ============================================================
 
 def build_source_context(sources: list) -> str:
     blocks = []
+    used_chars = 0
+
     for index, source in enumerate(sources, start=1):
         title = source.get("title", "Sumber tidak diketahui")
+        author = source.get("author", "")
         text = source.get("text", "")
-        blocks.append(f"[S{index}] Tajuk: {title}\nPetikan:\n{text}")
+        page = source.get("page", "")
+        volume = source.get("volume", "")
+        url = source.get("url", "")
+
+        metadata = [f"[S{index}]", f"Tajuk: {title}"]
+
+        if author:
+            metadata.append(f"Pengarang: {author}")
+        if volume:
+            metadata.append(f"Jilid: {volume}")
+        if page:
+            metadata.append(f"Muka surat: {page}")
+        if url:
+            metadata.append(f"URL: {url}")
+
+        block = (
+            "\n".join(metadata)
+            + "\nPetikan:\n"
+            + text
+        )
+
+        if used_chars + len(block) > MAX_CONTEXT_CHARS:
+            break
+
+        blocks.append(block)
+        used_chars += len(block)
+
     return "\n\n---\n\n".join(blocks)
 
 
-def generate_fiqh_answer(question: str, sources: list) -> str:
+def generate_fiqh_answer(
+    question: str,
+    sources: list,
+) -> str:
+    """
+    Jana jawapan dengan berpandukan sumber yang diberikan.
+    Kekalkan etika ilmiah yang telus dan adab perbincangan fiqh.
+    """
+
     if not sources:
-        return "Maaf, tiada sumber yang mencukupi untuk mengesahkan jawapan."
+        return (
+            "Maaf, saya belum menemui sumber yang mencukupi "
+            "untuk mengesahkan jawapan bagi soalan ini.\n\n"
+            "Cuba ubah perkataan soalan atau nyatakan mazhab "
+            "yang ingin dirujuk."
+        )
 
     context = build_source_context(sources)
+
+    if not context.strip():
+        return (
+            "Maaf, kandungan sumber yang diterima tidak mencukupi "
+            "untuk menghasilkan jawapan yang boleh disemak."
+        )
+
     prompt = f"""
-Anda ialah penyelidik fiqh Islam bagi TanyaFiqihBot.
-Jawab soalan pengguna berasaskan sumber rujukan yang diberikan dengan mematuhi struktur 4 bahagian rasmi ini secara konsisten:
+Anda ialah pembantu penyelidikan fiqh Islam bagi TanyaFiqihBot.
 
-### 1. Hukum
-Nyatakan ketetapan hukum syarak secara tepat, tegas, dan padat berserta penanda rujukan [S..].
+Jawab soalan pengguna dalam bahasa Melayu yang jelas, santun, dan tersusun rapi.
+Gunakan sumber yang disertakan sebagai asas jawapan.
 
-### 2. Huraian
-Huraikan rukun, syarat sah, cara pelaksanaan, dan dalil secara tersusun rapi.
-JIKA TERDAPAT PERBAHASAN KHILAF atau perbezaan pandangan dalam perkara furuk/cabang (contoh: isu amalan sunat, rintangan zahir, atau perincian amalan), masukkan dan huraikan di bawah bahagian Huraian ini.
+PERATURAN PENTING:
+1. Jangan mereka-reka petikan kitab, nama pengarang, nombor jilid, nombor halaman, hadis, ayat atau pautan.
+2. Jangan mendakwa sumber menyatakan sesuatu jika perkara itu tidak terdapat dalam petikan sumber.
+3. Gunakan penanda [S1], [S2] dan seterusnya untuk dakwaan yang benar-benar disokong oleh sumber berkenaan.
+4. Jika sumber bercanggah, terangkan perbezaannya dengan cermat dan berhati-hati.
+5. Jika ada perbezaan pandangan mazhab atau khilaf dalam petikan, terangkan secara adil dan ilmiah di bawah huraian.
+6. Bezakan antara rukun/syarat wajib dengan amalan sunat mengikut konteks teks mazhab.
+7. Gunakan gaya tulisan Markdown yang kemas (*bold* pada kata kunci dan senarai bernombor/bullet yang teratur).
+8. JANGAN tambah senarai rujukan panjang atau asal penciptaan bot di hujung jawapan, ia akan disambung secara automatik oleh sistem.
 
-### 3. Perbandingan Mazhab
-Bandingkan pandangan mazhab utama (Syafi'i, Hanafi, Maliki, Hanbali) yang berkaitan dengan isu ini berasaskan teks rujukan.
+Format yang digalakkan:
+- Pernyataan hukum ringkas pada ayat pembukaan
+- Huraian (termasuk rukun, syarat, dan perbahasan khilaf/perbezaan pandangan jika ada dalam sumber)
+- Ringkasan pendek atau kesimpulan amali
 
-### 4. Kesimpulan
-Beri rumusan ringkas dan panduan praktikal untuk amalan mukallaf.
-
-Arahan Tambahan:
-- Gunakan penanda rujukan [S1], [S2] dan seterusnya pada setiap fakta yang disokong oleh sumber rujukan.
-- Gunakan format Markdown yang kemas (*bold* pada istilah kunci, senarai bullet points yang tersusun).
-- JANGAN sertakan bahagian asal penciptaan bot di dalam jawapan anda, ia akan ditambah oleh sistem secara berasingan.
-
-Soalan Pengguna:
+Soalan pengguna:
 {question}
 
 SUMBER RUJUKAN:
 {context}
+
+Berikan jawapan berdasarkan sumber di atas sahaja.
 """
 
     try:
         return gemini_generate(prompt, temperature=0.25)
+
     except Exception as exc:
         print(f"[ANSWER GENERATION ERROR] {exc}")
-        return "Maaf, ralat berlaku semasa menjana jawapan."
+
+        return (
+            "Maaf, berlaku masalah semasa menghasilkan jawapan. "
+            "Sumber telah dicari, tetapi jawapan tidak dapat "
+            "disediakan buat masa ini. Sila cuba sebentar lagi."
+        )
 
 
 def format_source_reference(source: dict, index: int) -> str:
+    """Format satu sumber untuk senarai rujukan Telegram."""
+
     title = source.get("title", "Sumber tidak diketahui")
     author = source.get("author", "")
     page = source.get("page", "")
     volume = source.get("volume", "")
     url = source.get("url", "")
+    kind = source.get("kind", "")
 
     parts = [f"[S{index}] *{title}*"]
+
     if author:
         parts.append(f"Pengarang: {author}")
     if volume:
         parts.append(f"Jilid: {volume}")
     if page:
         parts.append(f"Hlm.: {page}")
-    if url:
+    if kind == "web" and url:
+        parts.append(f"Pautan: {url}")
+    elif url:
         parts.append(f"Pautan: {url}")
 
     return "\n".join(parts)
@@ -648,37 +828,66 @@ def build_references(sources: list) -> str:
         format_source_reference(source, index)
         for index, source in enumerate(sources, start=1)
     ]
-    return "📚 *Rujukan yang diperoleh*\n\n" + "\n\n".join(references)
+
+    return "📚 *Rujukan yang diperoleh*\n\n" + "\n\n".join(
+        references
+    )
 
 
 def get_bot_origin_footer() -> str:
-    """Mengembalikan maklumat asal penciptaan bot untuk diletakkan di bahagian bawah."""
+    """Maklumat asal penciptaan bot yang ditambah di hujung jawapan."""
     return (
         "---\n"
         "ℹ️ *Asal Penciptaan Bot*\n"
         "_TanyaFiqihBot dibangunkan sebagai inisiatif penyelidikan digital fiqh Islam "
         "yang berteraskan rujukan kitab Turath muktamad serta fatwa autoriti rasmi, "
-        "dijana dengan sokongan model kecerdasan buatan (Gemini) bagi memudahkan "
+        "dijana dengan sokongan model kecerdasan buatan bagi memudahkan "
         "masyarakat menyemak sandaran hukum secara telus, beradab, dan berautoriti._"
     )
 
 
 def answer_question(question: str) -> str:
+    print(f"[QUESTION] {question}")
+
     queries = plan_turath_queries(question)
+    print(f"[TURATH QUERIES] {queries}")
+
     raw_turath = search_turath(queries)
-    sources = normalize_turath_sources(raw_turath)
+    turath_sources = normalize_turath_sources(raw_turath)
+
+    turath_sources = rank_sources(
+        turath_sources,
+        question,
+    )
+
+    useful_turath = [
+        source
+        for source in turath_sources
+        if source.get("text", "").strip()
+    ]
+
+    sources = useful_turath
 
     if not sources:
+        print("[FALLBACK] Sumber Turath tidak mencukupi; mencari web.")
         sources = search_brave_web(question)
+        sources = rank_sources(sources, question)
 
     if not sources:
-        return "Maaf, saya tidak menemui sumber yang mencukupi untuk mengesahkan jawapan ini."
+        return (
+            "Maaf, saya tidak menemui sumber yang mencukupi "
+            "untuk mengesahkan jawapan ini.\n\n"
+            "Anda boleh cuba:\n"
+            "• Menulis semula soalan dengan lebih khusus.\n"
+            "• Menyatakan mazhab yang ingin dirujuk.\n"
+            "• Menyertakan konteks kejadian yang berkaitan."
+        )
 
     answer = generate_fiqh_answer(question, sources)
     references = build_references(sources)
     footer = get_bot_origin_footer()
 
-    # Susun jawapan akhir: Jawapan -> Rujukan -> Asal Penciptaan Bot
+    # Susun jawapan akhir: Isi Kandungan -> Rujukan Kitab -> Footer Asal Penciptaan
     final_output = answer
     if references:
         final_output += "\n\n" + references
@@ -688,15 +897,22 @@ def answer_question(question: str) -> str:
 
 
 # ============================================================
-# TELEGRAM HANDLERS
+# TELEGRAM HANDLERS (DENGAN SOKONGAN MARKDOWN SELAMAT)
 # ============================================================
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     message = (
         "Assalamualaikum warahmatullahi wabarakatuh! 👋\n\n"
         "Selamat datang ke *TanyaFiqihBot*.\n\n"
-        "Saya sedia membantu mencari jawapan bagi persoalan fiqh "
-        "Islam berserta rujukan sumber kitab Turath yang muktamad.\n\n"
+        "Saya membantu mencari jawapan bagi persoalan fiqh "
+        "Islam berserta rujukan sumber kitab Turath.\n\n"
+        "Contoh:\n"
+        "• Apakah hukum solat jamak ketika musafir?\n"
+        "• Bagaimanakah cara sujud sahwi?\n"
+        "• Apakah perkara yang membatalkan wuduk?\n\n"
         "Sila taip soalan fiqh anda."
     )
 
@@ -707,16 +923,25 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def telegram_answer(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if not update.message or not update.message.text:
         return
 
     question = update.message.text.strip()
+
     if not question:
         return
 
     try:
-        category = await asyncio.to_thread(classify_message, question)
+        category = await asyncio.to_thread(
+            classify_message,
+            question,
+        )
+
+        print(f"[MESSAGE CATEGORY] {category}: {question}")
 
         if category == "GREETING":
             await update.message.reply_text(
@@ -734,35 +959,56 @@ async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if category == "UNCLEAR":
             await update.message.reply_text(
-                "Maaf, saya kurang pasti maksud mesej anda. Sila kemukakan persoalan fiqh dengan jelas."
+                "Maaf, saya kurang pasti maksud mesej anda. 😊\n\n"
+                "Boleh tulis soalan dengan lebih jelas? "
+                "Jika berkaitan fiqh, nyatakan persoalan yang "
+                "ingin diketahui."
             )
             return
 
         status_message = await update.message.reply_text(
-            "🔎 Sedang menyemak sumber kitab Turath dan rujukan fatwa... Sila tunggu sebentar..."
+            "🔎 Saya sedang menyemak sumber Turath dan rujukan "
+            "yang berkaitan. Sila tunggu sebentar..."
         )
 
-        answer = await asyncio.to_thread(answer_question, question)
+        answer = await asyncio.to_thread(
+            answer_question,
+            question,
+        )
 
         max_length = 4000
         chunks = [
-            answer[i : i + max_length]
+            answer[i:i + max_length]
             for i in range(0, len(answer), max_length)
         ]
 
         if chunks:
-            await status_message.edit_text(
-                chunks[0],
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
-            )
-
-            for chunk in chunks[1:]:
-                await update.message.reply_text(
-                    chunk,
+            # Gunakan parse_mode="Markdown" supaya gaya tulisan bold dan tajuk kemas di Telegram
+            try:
+                await status_message.edit_text(
+                    chunks[0],
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
                 )
+            except Exception:
+                # Fallback ke plain text jika terdapat simbol luar biasa
+                await status_message.edit_text(
+                    chunks[0],
+                    disable_web_page_preview=True,
+                )
+
+            for chunk in chunks[1:]:
+                try:
+                    await update.message.reply_text(
+                        chunk,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    await update.message.reply_text(
+                        chunk,
+                        disable_web_page_preview=True,
+                    )
         else:
             await status_message.edit_text(
                 "Maaf, tiada jawapan yang dapat dihasilkan."
@@ -774,16 +1020,21 @@ async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await update.message.reply_text(
-                "Maaf, berlaku masalah teknikal semasa memproses mesej. Sila cuba sebentar lagi."
+                "Maaf, berlaku masalah semasa memproses mesej. "
+                "Sila cuba semula sebentar lagi."
             )
         except Exception as reply_error:
             print(f"[TELEGRAM REPLY ERROR] {reply_error}")
 
 
-async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def unknown_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if update.message:
         await update.message.reply_text(
-            "Maaf, arahan itu tidak dikenali. Taip /start untuk memulakan bot."
+            "Maaf, arahan itu tidak dikenali. "
+            "Taip /start untuk melihat panduan penggunaan."
         )
 
 
@@ -795,13 +1046,29 @@ def create_telegram_app() -> Application:
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN belum ditetapkan.")
 
-    telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_answer)
+    telegram_app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .build()
     )
-    telegram_app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    telegram_app.add_handler(
+        CommandHandler("start", start_command)
+    )
+
+    telegram_app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            telegram_answer,
+        )
+    )
+
+    telegram_app.add_handler(
+        MessageHandler(
+            filters.COMMAND,
+            unknown_command,
+        )
+    )
 
     return telegram_app
 
@@ -814,17 +1081,25 @@ async def run_telegram():
         await telegram_app.start()
 
         if telegram_app.updater is None:
-            raise RuntimeError("Telegram updater tidak tersedia.")
+            raise RuntimeError(
+                "Telegram updater tidak tersedia."
+            )
 
-        await telegram_app.updater.start_polling(drop_pending_updates=False)
+        await telegram_app.updater.start_polling(
+            drop_pending_updates=False,
+        )
+
         print("[TELEGRAM] Polling bermula.")
-
         await asyncio.Event().wait()
 
     finally:
         print("[TELEGRAM] Sedang menutup polling...")
+
         try:
-            if telegram_app.updater and telegram_app.updater.running:
+            if (
+                telegram_app.updater is not None
+                and telegram_app.updater.running
+            ):
                 await telegram_app.updater.stop()
         except Exception as exc:
             print(f"[TELEGRAM STOP ERROR] {exc}")
@@ -846,7 +1121,12 @@ def start_telegram():
         try:
             print("[TELEGRAM] Memulakan servis...")
             asyncio.run(run_telegram())
-            print("[TELEGRAM] Polling tamat. Cuba mulakan semula...")
+
+            print(
+                "[TELEGRAM] Polling tamat. "
+                "Cuba mulakan semula..."
+            )
+
         except Exception as exc:
             print(f"[TELEGRAM SUPERVISOR ERROR] {exc}")
             traceback.print_exc()
@@ -856,7 +1136,10 @@ def start_telegram():
 
 def start_telegram_background():
     if not TELEGRAM_TOKEN:
-        print("[WARNING] TELEGRAM_TOKEN tiada. Telegram polling tidak dimulakan.")
+        print(
+            "[WARNING] TELEGRAM_TOKEN tiada. "
+            "Telegram polling tidak dimulakan."
+        )
         return None
 
     thread = threading.Thread(
@@ -864,6 +1147,7 @@ def start_telegram_background():
         name="telegram-supervisor",
         daemon=True,
     )
+
     thread.start()
     return thread
 
@@ -874,7 +1158,12 @@ def start_telegram_background():
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"service": "TanyaFiqihBot", "status": "running"})
+    return jsonify(
+        {
+            "service": "TanyaFiqihBot",
+            "status": "running",
+        }
+    )
 
 
 @app.route("/health", methods=["GET"])
