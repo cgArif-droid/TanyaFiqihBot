@@ -97,11 +97,8 @@ ISLAMIC_LIBRARY_DOMAINS = [
     "waqfeya.net",
 ]
 
-ADDITIONAL_ISLAMIC_DOMAINS = [
-    "islamqa.info",
-    "islamweb.net",
-    "binbaz.org.sa",
-]
+# Domain tambahan telah dibuang mengikut arahan
+ADDITIONAL_ISLAMIC_DOMAINS = []
 
 ALL_ISLAMIC_DOMAINS = (
     OFFICIAL_FATWA_DOMAINS
@@ -711,7 +708,6 @@ async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         answer = await asyncio.to_thread(answer_question, question)
 
-        # Pemecahan mesej dan tetapan parse_mode="Markdown" untuk pastikan bold berfungsi
         max_length = 4000
         chunks = [
             answer[i : i + max_length]
