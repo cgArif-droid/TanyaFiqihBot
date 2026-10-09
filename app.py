@@ -97,7 +97,6 @@ ISLAMIC_LIBRARY_DOMAINS = [
     "waqfeya.net",
 ]
 
-# Domain tambahan telah dibuang mengikut arahan
 ADDITIONAL_ISLAMIC_DOMAINS = []
 
 ALL_ISLAMIC_DOMAINS = (
@@ -152,7 +151,7 @@ QUERY_MAP = {
     "masjid": "المسجد",
     "azan": "الأذان",
     "iqamah": "الإقامة",
-    "sah": "الصحة والبطلان في الفقه",
+    "sah": "الصحة والبطلan في الفقه",
     "batal": "مبطلات العبادة",
     "haram": "الحرام",
     "halal": "الحلال",
@@ -167,7 +166,7 @@ def gemini_generate(
     prompt: str,
     model: str = None,
     retries: int = None,
-    temperature: float = 0.3,
+    temperature: float = 0.25,
 ) -> str:
     """Panggil Gemini dengan cubaan semula apabila berlaku ralat."""
 
@@ -315,23 +314,23 @@ def greeting_response(message: str) -> str:
     ):
         return (
             "Waalaikumussalam warahmatullahi wabarakatuh 😊\n\n"
-            "Selamat datang ke TanyaFiqihBot.\n"
-            "Boleh tanya saya soalan berkaitan fiqh Islam."
+            "Selamat datang ke *TanyaFiqihBot*.\n"
+            "Boleh tanya saya soalan berkaitan hukum dan fiqh Islam."
         )
 
     return (
-        "Hai! 👋 Selamat datang ke TanyaFiqihBot.\n\n"
+        "Hai! 👋 Selamat datang ke *TanyaFiqihBot*.\n\n"
         "Saya membantu mencari jawapan berkaitan fiqh Islam "
-        "berserta rujukan sumber. Apa yang anda ingin tanya?"
+        "berserta rujukan kitab Turath. Apa yang anda ingin tanyakan?"
     )
 
 
 def general_response() -> str:
     return (
         "📚 *Tentang TanyaFiqihBot*\n\n"
-        "Bot ini membantu menjawab persoalan fiqh Islam "
-        "dengan mencari sumber kitab dan sumber agama yang berkaitan.\n\n"
-        "Sila ajukan soalan fiqh yang ingin anda semak."
+        "Bot ini dibangunkan untuk membantu menjawab persoalan fiqh Islam "
+        "dengan menyemak sumber kitab Turath dan rujukan fatwa yang muktamad.\n\n"
+        "Sila ajukan sebarang soalan fiqh yang ingin anda semak."
     )
 
 
@@ -568,7 +567,7 @@ def search_brave_web(question: str) -> list:
 
 
 # ============================================================
-# ANSWER GENERATION
+# ANSWER GENERATION (TEMPLAT 4 BAHAGIAN & KESIMPULAN)
 # ============================================================
 
 def build_source_context(sources: list) -> str:
@@ -586,10 +585,28 @@ def generate_fiqh_answer(question: str, sources: list) -> str:
 
     context = build_source_context(sources)
     prompt = f"""
-Anda ialah pembantu penyelidikan fiqh Islam bagi TanyaFiqihBot.
-Jawab soalan pengguna dalam bahasa Melayu yang jelas dan sopan berpandukan sumber di bawah sahaja. Gunakan penanda [S1], [S2] dan seterusnya.
+Anda ialah penyelidik fiqh Islam bagi TanyaFiqihBot.
+Jawab soalan pengguna berasaskan sumber rujukan yang diberikan dengan mematuhi struktur 4 bahagian rasmi ini secara konsisten:
 
-Soalan:
+### 1. Hukum
+Nyatakan ketetapan hukum syarak secara tepat, tegas, dan padat berserta penanda rujukan [S..].
+
+### 2. Huraian
+Huraikan rukun, syarat sah, cara pelaksanaan, dan dalil secara tersusun rapi.
+JIKA TERDAPAT PERBAHASAN KHILAF atau perbezaan pandangan dalam perkara furuk/cabang (contoh: isu amalan sunat, rintangan zahir, atau perincian amalan), masukkan dan huraikan di bawah bahagian Huraian ini.
+
+### 3. Perbandingan Mazhab
+Bandingkan pandangan mazhab utama (Syafi'i, Hanafi, Maliki, Hanbali) yang berkaitan dengan isu ini berasaskan teks rujukan.
+
+### 4. Kesimpulan
+Beri rumusan ringkas dan panduan praktikal untuk amalan mukallaf.
+
+Arahan Tambahan:
+- Gunakan penanda rujukan [S1], [S2] dan seterusnya pada setiap fakta yang disokong oleh sumber rujukan.
+- Gunakan format Markdown yang kemas (*bold* pada istilah kunci, senarai bullet points yang tersusun).
+- JANGAN sertakan bahagian asal penciptaan bot di dalam jawapan anda, ia akan ditambah oleh sistem secara berasingan.
+
+Soalan Pengguna:
 {question}
 
 SUMBER RUJUKAN:
@@ -597,7 +614,7 @@ SUMBER RUJUKAN:
 """
 
     try:
-        return gemini_generate(prompt, temperature=0.3)
+        return gemini_generate(prompt, temperature=0.25)
     except Exception as exc:
         print(f"[ANSWER GENERATION ERROR] {exc}")
         return "Maaf, ralat berlaku semasa menjana jawapan."
@@ -634,6 +651,18 @@ def build_references(sources: list) -> str:
     return "📚 *Rujukan yang diperoleh*\n\n" + "\n\n".join(references)
 
 
+def get_bot_origin_footer() -> str:
+    """Mengembalikan maklumat asal penciptaan bot untuk diletakkan di bahagian bawah."""
+    return (
+        "---\n"
+        "ℹ️ *Asal Penciptaan Bot*\n"
+        "_TanyaFiqihBot dibangunkan sebagai inisiatif penyelidikan digital fiqh Islam "
+        "yang berteraskan rujukan kitab Turath muktamad serta fatwa autoriti rasmi, "
+        "dijana dengan sokongan model kecerdasan buatan (Gemini) bagi memudahkan "
+        "masyarakat menyemak sandaran hukum secara telus, beradab, dan berautoriti._"
+    )
+
+
 def answer_question(question: str) -> str:
     queries = plan_turath_queries(question)
     raw_turath = search_turath(queries)
@@ -647,11 +676,15 @@ def answer_question(question: str) -> str:
 
     answer = generate_fiqh_answer(question, sources)
     references = build_references(sources)
+    footer = get_bot_origin_footer()
 
+    # Susun jawapan akhir: Jawapan -> Rujukan -> Asal Penciptaan Bot
+    final_output = answer
     if references:
-        return answer + "\n\n" + references
+        final_output += "\n\n" + references
+    final_output += "\n\n" + footer
 
-    return answer
+    return final_output
 
 
 # ============================================================
@@ -662,9 +695,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         "Assalamualaikum warahmatullahi wabarakatuh! 👋\n\n"
         "Selamat datang ke *TanyaFiqihBot*.\n\n"
-        "Saya membantu mencari jawapan bagi persoalan fiqh "
-        "Islam berserta rujukan sumber.\n\n"
-        "Sila taip soalan anda."
+        "Saya sedia membantu mencari jawapan bagi persoalan fiqh "
+        "Islam berserta rujukan sumber kitab Turath yang muktamad.\n\n"
+        "Sila taip soalan fiqh anda."
     )
 
     if update.message:
@@ -686,7 +719,10 @@ async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = await asyncio.to_thread(classify_message, question)
 
         if category == "GREETING":
-            await update.message.reply_text(greeting_response(question))
+            await update.message.reply_text(
+                greeting_response(question),
+                parse_mode="Markdown",
+            )
             return
 
         if category == "GENERAL_QUESTION":
@@ -698,12 +734,12 @@ async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if category == "UNCLEAR":
             await update.message.reply_text(
-                "Maaf, saya kurang pasti maksud mesej anda. Boleh tulis soalan dengan lebih jelas?"
+                "Maaf, saya kurang pasti maksud mesej anda. Sila kemukakan persoalan fiqh dengan jelas."
             )
             return
 
         status_message = await update.message.reply_text(
-            "🔎 Saya sedang menyemak sumber rujukan... Sila tunggu sebentar..."
+            "🔎 Sedang menyemak sumber kitab Turath dan rujukan fatwa... Sila tunggu sebentar..."
         )
 
         answer = await asyncio.to_thread(answer_question, question)
@@ -738,7 +774,7 @@ async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await update.message.reply_text(
-                "Maaf, berlaku masalah semasa memproses mesej. Sila cuba semula."
+                "Maaf, berlaku masalah teknikal semasa memproses mesej. Sila cuba sebentar lagi."
             )
         except Exception as reply_error:
             print(f"[TELEGRAM REPLY ERROR] {reply_error}")
@@ -747,7 +783,7 @@ async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(
-            "Maaf, arahan itu tidak dikenali. Taip /start untuk panduan."
+            "Maaf, arahan itu tidak dikenali. Taip /start untuk memulakan bot."
         )
 
 
