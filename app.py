@@ -7,15 +7,10 @@ import asyncio
 import logging
 import threading
 from typing import Any
-from collections import Counter
 
 import requests
 from flask import Flask, jsonify
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -45,40 +40,44 @@ BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
 PORT = int(os.getenv("PORT", "5000"))
 TURATH_TIMEOUT = int(os.getenv("TURATH_TIMEOUT", "15"))
-BRAVE_TIMEOUT = int(os.getenv("BRAVE_TIMEOUT", "12"))
+BRAVE_TIMEOUT = int(os.getenv("BRAVE_TIMEOUT", "15"))
+
 MAX_TURATH_QUERIES = int(os.getenv("MAX_TURATH_QUERIES", "4"))
-MAX_TURATH_RESULTS = int(os.getenv("MAX_TURATH_RESULTS", "8"))
+MAX_TURATH_RESULTS = int(os.getenv("MAX_TURATH_RESULTS", "10"))
 MAX_BRAVE_RESULTS = int(os.getenv("MAX_BRAVE_RESULTS", "5"))
+
 MAX_CONCURRENT_QUESTIONS = int(
     os.getenv("MAX_CONCURRENT_QUESTIONS", "4")
 )
+
+PENDING_SEARCH_EXPIRY = 1800
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("tanyafiqihbot")
 
+logger = logging.getLogger("tanyafiqihbot")
 app = Flask(__name__)
 
-if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-else:
-    gemini_client = None
+gemini_client = (
+    genai.Client(api_key=GEMINI_API_KEY)
+    if GEMINI_API_KEY
+    else None
+)
 
 QUESTION_SEMAPHORE = threading.BoundedSemaphore(
     MAX_CONCURRENT_QUESTIONS
 )
 
+TELEGRAM_RUNNING = False
+TELEGRAM_APPLICATION = None
+TELEGRAM_THREAD = None
+
 HTTP_HEADERS = {
     "User-Agent": "TanyaFiqihBot/1.0",
     "Accept": "application/json",
 }
-
-TELEGRAM_APPLICATION = None
-TELEGRAM_THREAD = None
-TELEGRAM_RUNNING = False
-TELEGRAM_LOCK = threading.Lock()
 
 
 # ============================================================
@@ -86,8 +85,7 @@ TELEGRAM_LOCK = threading.Lock()
 # ============================================================
 
 def gemini_generate(prompt: str) -> str:
-    """Panggil Gemini secara segerak; fungsi ini dijalankan dalam thread."""
-    if not gemini_client:
+    if gemini_client is None:
         raise RuntimeError("GEMINI_API_KEY belum ditetapkan.")
 
     response = gemini_client.models.generate_content(
@@ -95,11 +93,12 @@ def gemini_generate(prompt: str) -> str:
         contents=prompt,
     )
 
-    text = getattr(response, "text", None)
-    if not text:
+    result = getattr(response, "text", None)
+
+    if not result:
         raise RuntimeError("Gemini tidak memulangkan teks.")
 
-    return text.strip()
+    return result.strip()
 
 
 async def gemini_generate_async(prompt: str) -> str:
@@ -107,7 +106,7 @@ async def gemini_generate_async(prompt: str) -> str:
 
 
 # ============================================================
-# GENERAL HELPERS
+# RESULT NORMALIZATION
 # ============================================================
 
 def clean_text(value: Any) -> str:
@@ -115,10 +114,7 @@ def clean_text(value: Any) -> str:
         return ""
 
     if isinstance(value, (dict, list)):
-        try:
-            return json.dumps(value, ensure_ascii=False)
-        except Exception:
-            return str(value)
+        return json.dumps(value, ensure_ascii=False)
 
     return re.sub(r"\s+", " ", str(value)).strip()
 
@@ -126,6 +122,7 @@ def clean_text(value: Any) -> str:
 def first_value(data: dict, keys: list[str]) -> str:
     for key in keys:
         value = data.get(key)
+
         if value is not None and str(value).strip():
             return clean_text(value)
 
@@ -133,7 +130,6 @@ def first_value(data: dict, keys: list[str]) -> str:
 
 
 def extract_result_list(payload: Any) -> list:
-    """Sokong beberapa bentuk respons API carian."""
     if isinstance(payload, list):
         return payload
 
@@ -157,15 +153,21 @@ def extract_result_list(payload: Any) -> list:
 
         if isinstance(value, dict):
             nested = extract_result_list(value)
+
             if nested:
                 return nested
 
     return []
 
 
-def normalize_result(item: Any, source_type: str) -> dict | None:
+def normalize_result(
+    item: Any,
+    source_type: str,
+) -> dict | None:
+
     if isinstance(item, str):
         text = item.strip()
+
         if not text:
             return None
 
@@ -185,6 +187,7 @@ def normalize_result(item: Any, source_type: str) -> dict | None:
         item,
         ["title", "name", "heading", "label", "document_title"],
     )
+
     text = first_value(
         item,
         [
@@ -199,38 +202,45 @@ def normalize_result(item: Any, source_type: str) -> dict | None:
             "description",
         ],
     )
+
     book = first_value(
         item,
         ["book", "book_title", "kitab", "source_book", "collection"],
     )
+
     author = first_value(
         item,
         ["author", "scholar", "pengarang", "writer"],
     )
+
     url = first_value(
         item,
         ["url", "link", "source_url"],
     )
 
-    # Sesetengah API meletakkan teks dalam medan nested.
+    # Semak struktur metadata bersarang.
     if not text:
         for key in ("metadata", "document", "payload"):
             nested = item.get(key)
-            if isinstance(nested, dict):
-                text = first_value(
-                    nested,
-                    ["text", "content", "snippet", "passage", "body"],
-                )
-                if text:
-                    book = book or first_value(
-                        nested, ["book", "kitab", "title"]
-                    )
-                    author = author or first_value(
-                        nested, ["author", "pengarang"]
-                    )
-                    break
 
-    # Hasil tanpa kandungan tidak dikira sebagai rujukan berguna.
+            if not isinstance(nested, dict):
+                continue
+
+            text = first_value(
+                nested,
+                ["text", "content", "snippet", "passage", "body"],
+            )
+
+            if text:
+                book = book or first_value(
+                    nested, ["book", "kitab", "title"]
+                )
+                author = author or first_value(
+                    nested, ["author", "pengarang"]
+                )
+                break
+
+    # Keputusan tanpa kandungan tidak dikira sebagai rujukan.
     if not text:
         return None
 
@@ -245,25 +255,28 @@ def normalize_result(item: Any, source_type: str) -> dict | None:
 
 
 def normalize_results(payload: Any, source_type: str) -> list[dict]:
-    output = []
+    items = extract_result_list(payload)
+    results = []
 
-    for item in extract_result_list(payload):
+    for item in items:
         normalized = normalize_result(item, source_type)
-        if normalized:
-            output.append(normalized)
 
-    # Sesetengah API mengembalikan satu objek keputusan sahaja.
-    if not output and isinstance(payload, dict):
+        if normalized:
+            results.append(normalized)
+
+    # Sokong API yang memulangkan satu objek keputusan.
+    if not results and isinstance(payload, dict):
         normalized = normalize_result(payload, source_type)
-        if normalized:
-            output.append(normalized)
 
-    return output
+        if normalized:
+            results.append(normalized)
+
+    return results
 
 
 def unique_results(results: list[dict]) -> list[dict]:
     seen = set()
-    output = []
+    unique = []
 
     for item in results:
         identity = (
@@ -272,20 +285,318 @@ def unique_results(results: list[dict]) -> list[dict]:
             item.get("text", "")[:300],
             item.get("url", ""),
         )
-        identity = tuple(str(x).lower().strip() for x in identity)
+
+        identity = tuple(
+            str(value).lower().strip()
+            for value in identity
+        )
 
         if identity in seen:
             continue
 
         seen.add(identity)
-        output.append(item)
+        unique.append(item)
 
-    return output
+    return unique
 
+
+# ============================================================
+# TURATH SEARCH
+# ============================================================
+
+def search_turath_once(query: str) -> list[dict]:
+    """
+    Format permintaan lalai:
+        POST /search
+        {"query": "soalan"}
+
+    Jika API Turath anda menggunakan medan berlainan,
+    sesuaikan payload dengan format API sebenar.
+    """
+    logger.info("[TURATH] Mencari: %s", query)
+
+    response = requests.post(
+        TURATH_SEARCH_URL,
+        json={"query": query},
+        headers=HTTP_HEADERS,
+        timeout=TURATH_TIMEOUT,
+    )
+
+    response.raise_for_status()
+    payload = response.json()
+
+    results = normalize_results(payload, "Turath")
+
+    logger.info(
+        "[TURATH] Keputusan berguna: %s",
+        len(results),
+    )
+
+    return results
+
+
+def make_alternative_queries(question: str) -> list[str]:
+    if not gemini_client:
+        # Fallback ringkas jika Gemini tidak tersedia.
+        return []
+
+    prompt = f"""
+Hasilkan sehingga 3 pertanyaan alternatif untuk carian kitab Turath.
+
+Peraturan:
+- Kekalkan maksud dan isu asal.
+- Gunakan kata kunci ringkas yang sesuai untuk carian kitab.
+- Boleh sertakan istilah Arab jika sesuai.
+- Jangan jawab soalan.
+- Jangan buat carian web.
+- Pulangkan JSON sahaja.
+
+Format:
+{{"queries": ["kata kunci 1", "kata kunci 2"]}}
+
+Soalan:
+{question}
+"""
+
+    try:
+        raw = gemini_generate(prompt)
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+
+        if not match:
+            return []
+
+        data = json.loads(match.group(0))
+        queries = data.get("queries", [])
+
+        if not isinstance(queries, list):
+            return []
+
+        return [
+            str(query).strip()
+            for query in queries
+            if str(query).strip()
+        ][:3]
+
+    except Exception:
+        logger.exception(
+            "[TURATH] Gagal menghasilkan pertanyaan alternatif."
+        )
+        return []
+
+
+def search_turath(question: str) -> list[dict]:
+    """
+    Aliran:
+    1. Cari soalan asal.
+    2. Jika kosong, cari pertanyaan alternatif.
+    3. Jika masih kosong, pulangkan [].
+
+    Tiada carian umum dilakukan dalam fungsi ini.
+    Walaupun hanya satu rujukan ditemui, ia tetap digunakan.
+    """
+    try:
+        results = search_turath_once(question)
+
+        if results:
+            logger.info(
+                "[TURATH] Menggunakan %s rujukan daripada carian utama.",
+                len(results),
+            )
+            return unique_results(results)[:MAX_TURATH_RESULTS]
+
+    except Exception:
+        logger.exception("[TURATH] Carian utama gagal.")
+
+    alternative_queries = make_alternative_queries(question)
+    attempted = {question.lower()}
+    queries_used = 1
+
+    for alternative in alternative_queries:
+        alternative = alternative.strip()
+
+        if not alternative:
+            continue
+
+        if alternative.lower() in attempted:
+            continue
+
+        if queries_used >= MAX_TURATH_QUERIES:
+            break
+
+        attempted.add(alternative.lower())
+        queries_used += 1
+
+        try:
+            results = search_turath_once(alternative)
+
+            if results:
+                logger.info(
+                    "[TURATH] Menemukan %s rujukan alternatif.",
+                    len(results),
+                )
+                return unique_results(results)[:MAX_TURATH_RESULTS]
+
+        except Exception:
+            logger.exception(
+                "[TURATH] Carian alternatif gagal: %s",
+                alternative,
+            )
+
+    logger.warning(
+        "[TURATH] Tiada rujukan berguna selepas semua cubaan."
+    )
+
+    return []
+
+
+# ============================================================
+# BRAVE GENERAL WEB SEARCH
+# ============================================================
+
+def search_brave(question: str) -> list[dict]:
+    """
+    Fungsi ini hanya dipanggil selepas pengguna
+    menekan butang persetujuan.
+    """
+    if not BRAVE_API_KEY:
+        raise RuntimeError("BRAVE_API_KEY belum ditetapkan.")
+
+    logger.info("[WEB] Carian umum dimulakan selepas persetujuan.")
+
+    response = requests.get(
+        BRAVE_SEARCH_URL,
+        params={
+            "q": question,
+            "count": MAX_BRAVE_RESULTS,
+        },
+        headers={
+            **HTTP_HEADERS,
+            "X-Subscription-Token": BRAVE_API_KEY,
+        },
+        timeout=BRAVE_TIMEOUT,
+    )
+
+    response.raise_for_status()
+    payload = response.json()
+
+    web_results = payload.get("web", {}).get("results", [])
+    results = []
+
+    for item in web_results[:MAX_BRAVE_RESULTS]:
+        normalized = normalize_result(item, "Web")
+
+        if normalized:
+            results.append(normalized)
+
+    results = unique_results(results)
+
+    logger.info("[WEB] Keputusan berguna: %s", len(results))
+
+    return results
+
+
+# ============================================================
+# ANSWER GENERATION
+# ============================================================
+
+def format_sources(results: list[dict]) -> str:
+    sections = []
+
+    for index, item in enumerate(results, start=1):
+        source_id = f"S{index}"
+
+        title = item.get("title") or "Rujukan"
+        book = item.get("book") or ""
+        author = item.get("author") or ""
+        url = item.get("url") or ""
+        content = item.get("text") or ""
+
+        metadata = []
+
+        if book:
+            metadata.append(f"Kitab: {book}")
+
+        if author:
+            metadata.append(f"Pengarang: {author}")
+
+        if url:
+            metadata.append(f"Pautan: {url}")
+
+        sections.append(
+            f"[{source_id}] {title}\n"
+            + "\n".join(metadata)
+            + f"\nKandungan: {content[:3500]}"
+        )
+
+    return "\n\n".join(sections)
+
+
+async def generate_answer(
+    question: str,
+    results: list[dict],
+    source_type: str,
+) -> str:
+
+    if source_type == "Turath":
+        instruction = """
+Jawab berdasarkan sumber Turath yang diberikan.
+
+- Jawab dalam Bahasa Melayu yang jelas.
+- Gunakan label [S1], [S2] dan seterusnya sebagai rujukan.
+- Jangan reka petikan, jilid, halaman atau maklumat kitab.
+- Jangan mendakwa sesuatu hukum disebut dalam sumber jika
+  kandungan sumber tidak menyokong dakwaan tersebut.
+- Jika maklumat tidak mencukupi, nyatakan dengan jujur.
+- Jika terdapat khilaf, elakkan mendakwa ijmak tanpa bukti.
+- Jangan menggunakan carian web umum.
+"""
+    else:
+        instruction = """
+Jawab berdasarkan hasil carian web yang diberikan.
+
+- Jawab dalam Bahasa Melayu yang jelas.
+- Gunakan label [S1], [S2] dan seterusnya sebagai rujukan.
+- Jangan mereka-reka fakta atau kandungan sumber.
+- Untuk persoalan fiqih, nyatakan batasan hasil web umum.
+- Jika sumber tidak mencukupi atau bercanggah, nyatakan hal itu.
+"""
+
+    prompt = f"""
+Anda ialah TanyaFiqihBot, pembantu maklumat Islam yang berhati-hati.
+
+{instruction}
+
+SOALAN:
+{question}
+
+SUMBER:
+{format_sources(results)}
+
+Berikan jawapan tersusun yang menjawab soalan.
+Akhiri dengan bahagian Rujukan yang menyenaraikan sumber
+yang benar-benar digunakan.
+"""
+
+    try:
+        return await gemini_generate_async(prompt)
+
+    except Exception:
+        logger.exception("[GEMINI] Gagal menghasilkan jawapan.")
+
+        return (
+            "Maaf, rujukan telah ditemui tetapi jawapan automatik "
+            "gagal dijana.\n\n"
+            + format_sources(results)
+        )
+
+
+# ============================================================
+# TELEGRAM MESSAGE HELPERS
+# ============================================================
 
 def split_message(text: str, limit: int = 3900) -> list[str]:
-    """Elakkan mesej Telegram melebihi had."""
     text = text.strip()
+
     if not text:
         return ["Tiada jawapan teks diterima."]
 
@@ -330,341 +641,51 @@ async def reply_long(
 
 
 # ============================================================
-# TURATH SEARCH
-# ============================================================
-
-def search_turath_once(query: str) -> list[dict]:
-    """
-    Hantar pertanyaan ke API Turath tempatan.
-
-    Andaian lalai:
-        POST /search
-        JSON: {"query": "..."}
-    Jika API Turath anda menggunakan nama medan lain, ubah
-    payload di bawah mengikut format API sebenar.
-    """
-    response = requests.post(
-        TURATH_SEARCH_URL,
-        json={"query": query},
-        headers=HTTP_HEADERS,
-        timeout=TURATH_TIMEOUT,
-    )
-    response.raise_for_status()
-
-    try:
-        payload = response.json()
-    except ValueError:
-        logger.warning("API Turath memulangkan respons bukan JSON.")
-        return []
-
-    return normalize_results(payload, "Turath")
-
-
-def make_alternative_queries(question: str) -> list[str]:
-    """
-    Jana pertanyaan alternatif untuk Turath sahaja.
-    Tidak membuat carian web umum di sini.
-    """
-    prompt = f"""
-Anda membantu sistem carian kitab Turath.
-
-Berdasarkan soalan pengguna, hasilkan maksimum 3 pertanyaan
-carian alternatif yang ringkas dan sesuai untuk enjin carian kitab.
-
-Syarat:
-- Kekalkan isu fiqih atau istilah asal.
-- Boleh gunakan istilah Arab jika sesuai.
-- Jangan jawab soalan.
-- Jangan sertakan penerangan.
-- Pulangkan JSON sahaja dalam bentuk:
-  {{"queries": ["pertanyaan 1", "pertanyaan 2"]}}
-
-Soalan pengguna:
-{question}
-"""
-
-    try:
-        raw = gemini_generate(prompt)
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-
-        if not match:
-            return []
-
-        data = json.loads(match.group(0))
-        queries = data.get("queries", [])
-
-        if not isinstance(queries, list):
-            return []
-
-        return [
-            str(q).strip()
-            for q in queries
-            if str(q).strip()
-        ][:3]
-
-    except Exception:
-        logger.exception("Gagal menjana pertanyaan alternatif Turath.")
-        return []
-
-
-def search_turath(question: str) -> list[dict]:
-    """
-    Keutamaan mutlak:
-    1. Carian Turath asal.
-    2. Jika tiada hasil berguna, cuba pertanyaan alternatif Turath.
-    3. Pulangkan senarai kosong hanya jika semuanya tiada hasil.
-
-    Fungsi ini TIDAK menjalankan carian umum.
-    """
-    queries = [question]
-
-    # Pertanyaan alternatif hanya diperlukan jika carian pertama kosong.
-    try:
-        first_results = search_turath_once(question)
-    except Exception:
-        logger.exception("Carian Turath utama gagal.")
-        first_results = []
-
-    if first_results:
-        logger.info(
-            "Turath menemukan %s rujukan melalui pertanyaan utama.",
-            len(first_results),
-        )
-        return unique_results(first_results)[:MAX_TURATH_RESULTS]
-
-    alternative_queries = make_alternative_queries(question)
-
-    for query in alternative_queries:
-        query = query.strip()
-
-        if not query or query.lower() in {
-            item.lower() for item in queries
-        }:
-            continue
-
-        queries.append(query)
-
-        try:
-            results = search_turath_once(query)
-        except Exception:
-            logger.exception(
-                "Carian alternatif Turath gagal: %s", query
-            )
-            results = []
-
-        if results:
-            logger.info(
-                "Turath menemukan %s rujukan melalui pertanyaan alternatif.",
-                len(results),
-            )
-            return unique_results(results)[:MAX_TURATH_RESULTS]
-
-        if len(queries) >= MAX_TURATH_QUERIES:
-            break
-
-    logger.info("Tiada rujukan berguna ditemui dalam Turath.")
-    return []
-
-
-# ============================================================
-# BRAVE SEARCH
-# ============================================================
-
-def search_brave(question: str) -> list[dict]:
-    """
-    Carian umum hanya dipanggil selepas pengguna menekan
-    butang persetujuan dalam Telegram.
-    """
-    if not BRAVE_API_KEY:
-        logger.warning("BRAVE_API_KEY belum ditetapkan.")
-        return []
-
-    response = requests.get(
-        BRAVE_SEARCH_URL,
-        params={
-            "q": question,
-            "count": MAX_BRAVE_RESULTS,
-        },
-        headers={
-            **HTTP_HEADERS,
-            "X-Subscription-Token": BRAVE_API_KEY,
-        },
-        timeout=BRAVE_TIMEOUT,
-    )
-    response.raise_for_status()
-    payload = response.json()
-
-    web_results = payload.get("web", {}).get("results", [])
-    output = []
-
-    for item in web_results[:MAX_BRAVE_RESULTS]:
-        result = normalize_result(item, "Web")
-
-        if result:
-            output.append(result)
-
-    return unique_results(output)
-
-
-# ============================================================
-# ANSWER GENERATION
-# ============================================================
-
-def format_sources(results: list[dict]) -> str:
-    sections = []
-
-    for index, item in enumerate(results, start=1):
-        source_id = f"S{index}"
-        title = item.get("title") or "Rujukan"
-        book = item.get("book") or ""
-        author = item.get("author") or ""
-        url = item.get("url") or ""
-        content = item.get("text") or ""
-
-        metadata = []
-
-        if book:
-            metadata.append(f"Kitab: {book}")
-
-        if author:
-            metadata.append(f"Pengarang: {author}")
-
-        if url:
-            metadata.append(f"Pautan: {url}")
-
-        metadata_text = "\n".join(metadata)
-
-        sections.append(
-            f"[{source_id}] {title}\n"
-            f"{metadata_text}\n"
-            f"Petikan/kandungan: {content[:3500]}"
-        )
-
-    return "\n\n".join(sections)
-
-
-async def generate_answer(
-    question: str,
-    results: list[dict],
-    source_type: str,
-) -> str:
-    sources = format_sources(results)
-
-    if source_type == "Turath":
-        instruction = """
-Gunakan rujukan Turath yang diberikan sebagai asas jawapan.
-
-Penting:
-- Jawab dalam Bahasa Melayu yang jelas.
-- Bezakan petikan sumber dengan huraian anda sendiri.
-- Gunakan tanda [S1], [S2] dan seterusnya untuk dakwaan
-  yang disokong oleh rujukan berkenaan.
-- Jangan mereka-reka petikan, nama kitab, jilid, halaman,
-  pengarang atau hukum yang tidak terkandung dalam sumber.
-- Jika sumber tidak mencukupi untuk menentukan hukum,
-  nyatakan batasan itu dengan jelas.
-- Jika terdapat khilaf, jangan gambarkan satu pandangan
-  sebagai ijmak melainkan sumber menyokongnya.
-- Jangan anggap maklumat bibliografi yang tiada sebagai fakta.
-- Jangan gunakan carian web umum.
-"""
-    else:
-        instruction = """
-Jawab dalam Bahasa Melayu berdasarkan hasil carian web yang diberikan.
-
-Penting:
-- Bezakan fakta yang disokong sumber dengan kesimpulan.
-- Gunakan [S1], [S2] dan seterusnya untuk rujukan.
-- Jangan mereka-reka maklumat atau mendakwa sesuatu sumber
-  menyatakan perkara yang tidak terdapat dalam hasil carian.
-- Bagi persoalan fiqih, jelaskan bahawa hasil web umum
-  bukan pengganti semakan sumber ilmiah yang berautoriti.
-- Jika sumber bercanggah atau tidak mencukupi, nyatakan batasannya.
-"""
-
-    prompt = f"""
-Anda ialah TanyaFiqihBot, pembantu maklumat Islam yang berhati-hati.
-
-{instruction}
-
-SOALAN PENGGUNA:
-{question}
-
-SUMBER YANG DITEMUI:
-{sources}
-
-Sediakan jawapan yang berguna, tersusun dan tidak terlalu panjang.
-Akhiri dengan bahagian "Rujukan" yang menyenaraikan sumber
-yang benar-benar digunakan menggunakan label [S1], [S2] dan seterusnya.
-"""
-
-    try:
-        answer = await gemini_generate_async(prompt)
-        return answer
-    except Exception:
-        logger.exception("Gagal menjana jawapan dengan Gemini.")
-
-        if source_type == "Turath":
-            return (
-                "Saya menemui rujukan Turath, tetapi gagal menjana "
-                "huraian jawapan buat masa ini. Berikut ialah kandungan "
-                "rujukan yang ditemui:\n\n"
-                + format_sources(results)
-            )
-
-        return (
-            "Carian umum telah selesai, tetapi saya gagal menjana "
-            "huraian jawapan. Berikut ialah hasil carian yang ditemui:\n\n"
-            + format_sources(results)
-        )
-
-
-# ============================================================
-# TELEGRAM COMMANDS
+# TELEGRAM COMMAND HANDLERS
 # ============================================================
 
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    text = (
+
+    logger.info("[TELEGRAM] Arahan /start diterima.")
+
+    await reply_long(
+        update,
         "Assalamualaikum! Saya TanyaFiqihBot.\n\n"
         "Hantarkan soalan anda untuk mencari rujukan Turath.\n\n"
-        "Aliran carian:\n"
-        "1. Saya akan mencari dalam Turath terlebih dahulu.\n"
-        "2. Jika ada sekurang-kurangnya satu rujukan, saya akan "
-        "menjawab berdasarkan sumber itu.\n"
-        "3. Jika tiada rujukan Turath selepas carian alternatif, "
-        "saya akan bertanya sama ada anda mahu carian umum di web.\n"
-        "4. Carian umum hanya dibuat jika anda bersetuju."
+        "Saya akan mencari Turath dahulu. Jika ada sekurang-kurangnya "
+        "satu rujukan berguna, saya akan terus menjawab berdasarkan "
+        "sumber itu.\n\n"
+        "Jika tiada rujukan selepas carian alternatif, saya akan "
+        "bertanya sama ada anda mahu carian umum di web.",
     )
-
-    await reply_long(update, text)
 
 
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+
     await reply_long(
         update,
-        "Hantarkan soalan fiqih atau soalan berkaitan Islam.\n\n"
-        "Saya akan mencari sumber Turath dahulu. Jika tiada "
-        "rujukan yang berguna selepas percubaan alternatif, "
-        "anda boleh memilih sama ada mahu carian umum di web.",
+        "Hantarkan soalan anda dalam bentuk teks.\n\n"
+        "Turath ialah carian utama. Carian web umum hanya dilakukan "
+        "selepas anda memberi persetujuan melalui butang Telegram.",
     )
 
 
 # ============================================================
-# QUESTION FLOW
+# TELEGRAM QUESTION HANDLER
 # ============================================================
 
 async def handle_question(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+
     message = update.effective_message
-    user = update.effective_user
 
     if message is None or not message.text:
         return
@@ -674,10 +695,12 @@ async def handle_question(
     if not question:
         return
 
-    # Elakkan pengguna membuat terlalu banyak permintaan serentak.
+    # Log yang diminta.
+    logger.info("📩 TELEGRAM MESSAGE: %s", question)
+
     if not QUESTION_SEMAPHORE.acquire(blocking=False):
         await message.reply_text(
-            "Bot sedang memproses beberapa soalan. "
+            "Bot sedang sibuk memproses soalan lain. "
             "Sila cuba semula sebentar lagi."
         )
         return
@@ -687,15 +710,20 @@ async def handle_question(
             "📚 Sedang mencari rujukan dalam Turath..."
         )
 
+        # Langkah pertama: Turath sahaja.
         turath_results = await asyncio.to_thread(
             search_turath,
             question,
         )
 
-        # PENTING:
-        # Jika ada walaupun satu rujukan, jawab terus.
-        # Jangan tunjuk butang carian umum.
+        # Walaupun satu rujukan ditemui, jangan tawarkan carian web.
         if turath_results:
+            logger.info(
+                "[BOT] Turath mempunyai %s rujukan; "
+                "carian umum tidak diperlukan.",
+                len(turath_results),
+            )
+
             answer = await generate_answer(
                 question,
                 turath_results,
@@ -705,8 +733,12 @@ async def handle_question(
             await reply_long(update, answer)
             return
 
-        # Tiada rujukan berguna selepas carian Turath alternatif.
-        # Simpan soalan asal untuk callback butang Telegram.
+        # Hanya sampai ke sini jika semua carian Turath kosong.
+        logger.info(
+            "[BOT] Tiada rujukan Turath. Meminta persetujuan "
+            "untuk carian umum."
+        )
+
         context.user_data["pending_general_search_question"] = question
         context.user_data["pending_general_search_time"] = time.time()
 
@@ -731,15 +763,16 @@ async def handle_question(
             "Saya tidak menemui rujukan yang berguna dalam Turath "
             "selepas mencuba pertanyaan alternatif.\n\n"
             "Adakah anda mahu saya cuba carian umum di web?\n\n"
-            "Carian umum hanya akan bermula jika anda menekan "
-            "butang persetujuan di bawah.",
+            "Carian web hanya bermula jika anda menekan butang "
+            "persetujuan di bawah.",
             reply_markup=keyboard,
         )
 
     except Exception:
-        logger.exception("Ralat ketika mengendalikan soalan.")
+        logger.exception("[BOT] Ralat semasa memproses soalan.")
+
         await message.reply_text(
-            "Maaf, berlaku ralat ketika memproses soalan anda. "
+            "Maaf, berlaku ralat semasa memproses soalan. "
             "Sila cuba semula sebentar lagi."
         )
 
@@ -748,13 +781,14 @@ async def handle_question(
 
 
 # ============================================================
-# INLINE BUTTON CALLBACKS
+# TELEGRAM INLINE BUTTON CALLBACKS
 # ============================================================
 
 async def general_search_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+
     query = update.callback_query
 
     if query is None:
@@ -770,6 +804,8 @@ async def general_search_callback(
             "pending_general_search_time", None
         )
 
+        logger.info("[WEB] Pengguna membatalkan carian umum.")
+
         await query.edit_message_text(
             "Baik, carian umum dibatalkan. "
             "Tiada carian web dijalankan."
@@ -782,21 +818,21 @@ async def general_search_callback(
     question = context.user_data.get(
         "pending_general_search_question"
     )
+
     created_at = context.user_data.get(
         "pending_general_search_time"
     )
 
     if not question:
         await query.edit_message_text(
-            "Soalan asal tidak ditemui atau permintaan ini "
-            "telah selesai. Sila hantar semula soalan anda."
+            "Permintaan ini telah selesai atau soalan asal "
+            "tidak ditemui. Sila hantar semula soalan anda."
         )
         return
 
-    # Tamat tempoh pilihan selepas 30 minit.
     if (
         created_at is not None
-        and time.time() - float(created_at) > 1800
+        and time.time() - float(created_at) > PENDING_SEARCH_EXPIRY
     ):
         context.user_data.pop(
             "pending_general_search_question", None
@@ -806,13 +842,13 @@ async def general_search_callback(
         )
 
         await query.edit_message_text(
-            "Pilihan carian ini telah tamat tempoh. "
+            "Pilihan carian telah tamat tempoh. "
             "Sila hantar semula soalan anda."
         )
         return
 
-    # Kosongkan permintaan tertangguh supaya butang tidak
-    # menjalankan carian yang sama berulang kali.
+    # Buang permintaan tertangguh supaya butang sama
+    # tidak boleh menjalankan carian berulang kali.
     context.user_data.pop(
         "pending_general_search_question", None
     )
@@ -822,8 +858,8 @@ async def general_search_callback(
 
     if not BRAVE_API_KEY:
         await query.edit_message_text(
-            "Carian umum belum tersedia kerana BRAVE_API_KEY "
-            "belum ditetapkan dalam konfigurasi bot."
+            "Carian umum belum tersedia. "
+            "BRAVE_API_KEY belum ditetapkan di Render."
         )
         return
 
@@ -836,7 +872,11 @@ async def general_search_callback(
 
     try:
         await query.edit_message_text(
-            "🔎 Anda telah bersetuju. Sedang membuat carian umum..."
+            "🔎 Persetujuan diterima. Sedang membuat carian umum..."
+        )
+
+        logger.info(
+            "[WEB] Pengguna bersetuju. Memulakan carian Brave."
         )
 
         web_results = await asyncio.to_thread(
@@ -846,8 +886,7 @@ async def general_search_callback(
 
         if not web_results:
             await query.message.reply_text(
-                "Carian umum tidak menemukan hasil yang boleh "
-                "digunakan, atau perkhidmatan carian tidak tersedia."
+                "Carian umum tidak menemukan hasil yang berguna."
             )
             return
 
@@ -857,13 +896,10 @@ async def general_search_callback(
             "Web",
         )
 
-        await reply_long(
-            update,
-            answer,
-        )
+        await reply_long(update, answer)
 
     except Exception:
-        logger.exception("Carian umum gagal.")
+        logger.exception("[WEB] Carian umum gagal.")
 
         await query.message.reply_text(
             "Maaf, carian umum gagal dilaksanakan. "
@@ -875,7 +911,7 @@ async def general_search_callback(
 
 
 # ============================================================
-# TELEGRAM APPLICATION
+# BUILD TELEGRAM APPLICATION
 # ============================================================
 
 def build_telegram_application() -> Application:
@@ -884,6 +920,8 @@ def build_telegram_application() -> Application:
             "TELEGRAM_BOT_TOKEN belum ditetapkan."
         )
 
+    logger.info("🤖 Creating Telegram application...")
+
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
@@ -891,8 +929,13 @@ def build_telegram_application() -> Application:
         .build()
     )
 
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(
+        CommandHandler("start", start_command)
+    )
+
+    application.add_handler(
+        CommandHandler("help", help_command)
+    )
 
     application.add_handler(
         CallbackQueryHandler(
@@ -911,85 +954,152 @@ def build_telegram_application() -> Application:
     return application
 
 
-def telegram_worker() -> None:
+# ============================================================
+# TELEGRAM ASYNC LIFECYCLE
+# ============================================================
+
+async def telegram_main() -> None:
     """
-    Jalankan polling dalam thread tersendiri supaya Flask
-    boleh menyediakan endpoint kesihatan.
+    Mengurus kitaran hayat Telegram secara manual
+    dalam event loop milik thread Telegram.
+
+    Jangan panggil run_polling() di dalam fungsi ini.
     """
     global TELEGRAM_RUNNING, TELEGRAM_APPLICATION
 
+    application = build_telegram_application()
+    TELEGRAM_APPLICATION = application
+
+    initialized = False
+    started = False
+    polling_started = False
+
+    try:
+        logger.info("🤖 TELEGRAM_TOKEN: %s",
+                    "SET" if TELEGRAM_BOT_TOKEN else "MISSING")
+
+        logger.info("🤖 TELEGRAM: initializing...")
+        await application.initialize()
+        initialized = True
+
+        logger.info("🤖 TELEGRAM: starting...")
+        await application.start()
+        started = True
+
+        if application.updater is None:
+            raise RuntimeError(
+                "Telegram updater tidak tersedia."
+            )
+
+        logger.info("🤖 TELEGRAM: starting polling...")
+
+        await application.updater.start_polling(
+            drop_pending_updates=False,
+        )
+
+        polling_started = True
+        TELEGRAM_RUNNING = True
+
+        logger.info("✅ TELEGRAM BOT POLLING STARTED")
+        logger.info("[TELEGRAM] Polling bermula.")
+
+        # Kekalkan event loop hidup selagi bot berjalan.
+        await asyncio.Event().wait()
+
+    finally:
+        TELEGRAM_RUNNING = False
+
+        if application.updater and polling_started:
+            try:
+                await application.updater.stop()
+            except Exception:
+                logger.exception("[TELEGRAM] Gagal menghentikan updater.")
+
+        if started:
+            try:
+                await application.stop()
+            except Exception:
+                logger.exception("[TELEGRAM] Gagal menghentikan aplikasi.")
+
+        if initialized:
+            try:
+                await application.shutdown()
+            except Exception:
+                logger.exception("[TELEGRAM] Gagal menutup aplikasi.")
+
+        TELEGRAM_APPLICATION = None
+
+
+def telegram_worker() -> None:
+    """
+    Thread supervisor Telegram.
+    Jika polling terhenti akibat ralat, cuba mula semula.
+    """
+    logger.info("🚀 Starting Telegram background thread...")
+    logger.info("🚀 Telegram supervisor bermula")
+
     while True:
         try:
-            logger.info("Memulakan Telegram bot...")
-            application = build_telegram_application()
-            TELEGRAM_APPLICATION = application
-            TELEGRAM_RUNNING = True
+            logger.info("🔄 Cuba memulakan Telegram bot...")
 
-            application.run_polling(
-                drop_pending_updates=False,
-                close_loop=True,
-            )
-
-            logger.warning(
-                "Telegram polling berhenti. Cuba mula semula."
-            )
+            asyncio.run(telegram_main())
 
         except Exception:
             logger.exception(
-                "Telegram worker gagal. Cuba mula semula."
+                "[TELEGRAM] Polling gagal; cuba semula."
             )
 
         finally:
+            global TELEGRAM_RUNNING
             TELEGRAM_RUNNING = False
-            TELEGRAM_APPLICATION = None
 
+        logger.warning(
+            "[TELEGRAM] Polling berhenti. Cuba semula dalam 5 saat."
+        )
         time.sleep(5)
 
 
 def start_telegram_background() -> None:
     global TELEGRAM_THREAD
 
-    with TELEGRAM_LOCK:
-        if TELEGRAM_THREAD and TELEGRAM_THREAD.is_alive():
-            return
+    if TELEGRAM_THREAD and TELEGRAM_THREAD.is_alive():
+        logger.info("[TELEGRAM] Thread sudah berjalan.")
+        return
 
-        TELEGRAM_THREAD = threading.Thread(
-            target=telegram_worker,
-            name="telegram-polling",
-            daemon=True,
-        )
-        TELEGRAM_THREAD.start()
+    TELEGRAM_THREAD = threading.Thread(
+        target=telegram_worker,
+        name="telegram-background",
+        daemon=True,
+    )
+
+    TELEGRAM_THREAD.start()
 
 
 # ============================================================
-# FLASK ENDPOINTS
+# FLASK HEALTH ENDPOINTS
 # ============================================================
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify(
-        {
-            "service": "TanyaFiqihBot",
-            "status": "running",
-            "search_priority": [
-                "Turath",
-                "Ask user before general web search",
-            ],
-        }
-    )
+    return jsonify({
+        "service": "TanyaFiqihBot",
+        "status": "running",
+        "telegram_running": TELEGRAM_RUNNING,
+        "turath_configured": bool(TURATH_SEARCH_URL),
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "brave_configured": bool(BRAVE_API_KEY),
+    })
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify(
-        {
-            "status": "ok",
-            "telegram_running": TELEGRAM_RUNNING,
-            "gemini_configured": bool(GEMINI_API_KEY),
-            "brave_configured": bool(BRAVE_API_KEY),
-            "turath_url": TURATH_SEARCH_URL,
-        }
-    )
+    return jsonify({
+        "status": "ok" if TELEGRAM_RUNNING else "starting",
+        "telegram_running": TELEGRAM_RUNNING,
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "brave_configured": bool(BRAVE_API_KEY),
+        "turath_search_url": TURATH_SEARCH_URL,
+    }), 200
 
 
 # ============================================================
@@ -997,7 +1107,27 @@ def health():
 # ============================================================
 
 if __name__ == "__main__":
+    logger.info("[TELEGRAM] Memulakan servis...")
+
+    logger.info(
+        "🤖 TELEGRAM_TOKEN: %s",
+        "SET" if TELEGRAM_BOT_TOKEN else "MISSING",
+    )
+
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError(
+            "Sila tetapkan TELEGRAM_BOT_TOKEN di Render."
+        )
+
+    # Telegram berada dalam thread latar.
     start_telegram_background()
+
+    # Flask berjalan pada thread utama.
+    # Gunakan Start Command: python app.py
+    logger.info(
+        "[FLASK] Memulakan server pada port %s...",
+        PORT,
+    )
 
     app.run(
         host="0.0.0.0",
