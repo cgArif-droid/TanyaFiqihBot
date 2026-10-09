@@ -428,8 +428,31 @@ Soalan pengguna:
 # ============================================================
 
 def search_turath(queries: list) -> list:
-    """Hantar pertanyaan ke servis aplikasi Turath; tiada fallback web."""
+    """Hantar pertanyaan ke servis Turath dan ekstrak hasil daripada beberapa format respons."""
     endpoint = f"{TURATH_SERVICE_URL}/search"
+
+    def extract_items(payload, depth=0):
+        if depth > 4:
+            return []
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            return []
+        if any(key in payload for key in (
+            "text", "content", "passage", "body", "snippet", "matched_text",
+            "excerpt", "page_content", "content_text", "full_text", "paragraph",
+        )):
+            return [payload]
+        for key in (
+            "results", "sources", "items", "documents", "hits", "records",
+            "passages", "matches", "data", "response", "result",
+        ):
+            if key in payload:
+                found = extract_items(payload[key], depth + 1)
+                if found:
+                    return found
+        return []
+
     try:
         response = HTTP_SESSION.post(
             endpoint,
@@ -438,20 +461,18 @@ def search_turath(queries: list) -> list:
         )
         response.raise_for_status()
         payload = response.json()
-
-        if isinstance(payload, list):
-            return payload
-        if isinstance(payload, dict):
-            for key in ("results", "sources", "items", "data", "documents"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return value
-            if any(key in payload for key in ("text", "content", "book", "title", "snippet")):
-                return [payload]
-        print("[TURATH] Respons tidak mengandungi senarai hasil.")
-        return []
+        results = extract_items(payload)
+        if results:
+            print(f"[TURATH] Respons berjaya: {len(results)} hasil.")
+            if isinstance(results[0], dict):
+                print(f"[TURATH] Medan hasil pertama: {list(results[0].keys())[:30]}")
+        else:
+            print(f"[TURATH] Respons diterima tetapi format hasil tidak dikenali: {type(payload).__name__}")
+            if isinstance(payload, dict):
+                print(f"[TURATH] Medan respons utama: {list(payload.keys())[:40]}")
+        return results
     except Exception as exc:
-        print(f"[TURATH SEARCH ERROR] {exc}")
+        print(f"[TURATH SEARCH ERROR] {type(exc).__name__}: {exc}")
         return []
 
 
@@ -472,46 +493,95 @@ def first_value(item: dict, keys: tuple) -> str:
 
 
 def normalize_turath_sources(raw_sources: list) -> list:
+    """Seragamkan hasil Turath walaupun backend menggunakan nama medan berbeza atau metadata bersarang."""
     normalized = []
-    for item in raw_sources:
+    title_keys = (
+        "book", "book_name", "bookName", "bookTitle", "book_title",
+        "title", "name", "source_title", "kitab", "book_title_ar",
+    )
+    author_keys = ("author", "author_name", "writer", "book_author", "authorName")
+    text_keys = (
+        "text", "content", "passage", "body", "snippet", "matched_text",
+        "excerpt", "page_content", "content_text", "text_content", "full_text",
+        "plain_text", "arabic_text", "text_ar", "content_ar", "passage_text",
+        "matched_passage", "hit_text", "paragraph", "quote", "quote_text",
+        "preview", "result_text", "highlight", "matched_content", "content_snippet",
+    )
+
+    def get_deep_value(item, keys, depth=0):
+        if not isinstance(item, dict) or depth > 3:
+            return ""
+        value = first_value(item, keys)
+        if value:
+            return value
+        for nested_key in ("metadata", "meta", "document", "doc", "source", "book_info", "bookInfo", "attributes", "data", "payload"):
+            nested = item.get(nested_key)
+            if isinstance(nested, dict):
+                value = get_deep_value(nested, keys, depth + 1)
+                if value:
+                    return value
+        return ""
+
+    for index, item in enumerate(raw_sources, start=1):
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                normalized.append({
+                    "kind": "turath", "title": f"Petikan Turath {index}",
+                    "author": "", "text": text[:MAX_SOURCE_CHARS],
+                    "page": "", "volume": "", "url": "", "domain": "",
+                })
+            continue
         if not isinstance(item, dict):
             continue
-        title = first_value(item, (
-            "book", "book_name", "bookTitle", "book_title", "title", "name", "source"
-        ))
-        author = first_value(item, ("author", "author_name", "writer", "book_author"))
-        text = first_value(item, (
-            "text", "content", "passage", "body", "snippet", "matched_text", "excerpt"
-        ))
-        page = first_value(item, ("page", "page_number", "page_no", "volume_page"))
-        volume = first_value(item, ("volume", "vol", "volume_number"))
-        url = first_value(item, ("url", "link", "source_url"))
+
+        title = get_deep_value(item, title_keys)
+        author = get_deep_value(item, author_keys)
+        text = get_deep_value(item, text_keys)
+        page = get_deep_value(item, ("page", "page_number", "page_no", "volume_page", "pageIndex"))
+        volume = get_deep_value(item, ("volume", "vol", "volume_number", "volume_no", "juz"))
+        url = get_deep_value(item, ("url", "link", "source_url", "book_url", "uri"))
+
+        if not text:
+            for nested_key in ("result", "match", "passage_data", "matched", "document"):
+                nested = item.get(nested_key)
+                if isinstance(nested, dict):
+                    text = get_deep_value(nested, text_keys)
+                    if text:
+                        break
+                elif isinstance(nested, str) and nested.strip():
+                    text = nested.strip()
+                    break
 
         if not text:
             continue
         if not title:
-            title = "Sumber Turath (tajuk kitab tidak dinyatakan)"
+            title = f"Sumber Turath (tajuk kitab tidak dinyatakan, hasil {index})"
 
         normalized.append({
-            "kind": "turath",
-            "title": title,
-            "author": author,
-            "text": text[:MAX_SOURCE_CHARS],
-            "page": page,
-            "volume": volume,
-            "url": url,
-            "domain": "",
+            "kind": "turath", "title": title, "author": author,
+            "text": text[:MAX_SOURCE_CHARS], "page": page,
+            "volume": volume, "url": url, "domain": "",
         })
     return normalized
 
 
+def _normalize_search_text(value: str) -> str:
+    """Normalkan teks Melayu/Arab untuk skor padanan ringan (bukan penentu tunggal)."""
+    value = str(value or "").casefold()
+    value = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", value)
+    value = re.sub(r"[أإآٱ]", "ا", value)
+    value = value.replace("ى", "ي")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
 def source_relevance_score(source: dict, question: str, queries: list = None) -> int:
-    searchable_text = (
-        str(source.get("title", "")) + " " +
-        str(source.get("author", "")) + " " +
-        str(source.get("text", ""))
-    ).casefold()
-    search_text = " ".join([question or ""] + (queries or [])).casefold()
+    """Skor padanan anggaran; skor 0 tidak bermakna hasil Turath tidak relevan."""
+    searchable_text = _normalize_search_text(
+        " ".join((str(source.get("title", "")), str(source.get("author", "")), str(source.get("text", ""))))
+    )
+    search_text = _normalize_search_text(" ".join([question or ""] + (queries or [])))
     stopwords = {
         "apa", "apakah", "bagaimana", "mengapa", "kenapa", "siapa", "bila",
         "dimana", "mana", "adakah", "boleh", "perlu", "saya", "anda", "kamu",
@@ -521,8 +591,8 @@ def source_relevance_score(source: dict, question: str, queries: list = None) ->
         "where", "why", "how", "for", "and", "with", "from", "does", "are", "is",
     }
     words = {
-        word.casefold() for word in re.findall(r"\w+", search_text)
-        if len(word) > 2 and word.casefold() not in stopwords
+        word for word in re.findall(r"\w+", search_text)
+        if len(word) > 2 and word not in stopwords
     }
     return sum(1 for word in words if word in searchable_text)
 
@@ -824,38 +894,71 @@ def ensure_answer_title(question: str, answer: str) -> str:
 
 
 def answer_question(question: str) -> str:
-    """Cari Turath sahaja, utamakan kitab berlainan dan jana jawapan dengan rujukan."""
+    """Cari Turath sahaja; skor padanan tidak digunakan untuk membuang semua hasil secara automatik."""
     print(f"[QUESTION] {question}")
-
     queries = plan_turath_queries(question)
     print(f"[TURATH QUERIES] {queries}")
 
     raw_turath = search_turath(queries)
     print(f"[TURATH RAW RESULTS] {len(raw_turath)}")
 
-    turath_sources = normalize_turath_sources(raw_turath)
-    turath_sources = rank_sources(turath_sources, question, queries)
+    normalized = normalize_turath_sources(raw_turath)
+    print(f"[TURATH NORMALIZED SOURCES] {len(normalized)}")
 
-    sources = [
-        source for source in turath_sources
-        if str(source.get("text", "")).strip()
-        and source_relevance_score(source, question, queries) > 0
-    ][:MAX_SOURCE_COUNT]
+    if raw_turath and not normalized:
+        sample = raw_turath[0]
+        if isinstance(sample, dict):
+            print(f"[TURATH NORMALIZATION WARNING] Hasil ada tetapi medan teks tidak dikenali. Keys: {list(sample.keys())[:50]}")
+        return (
+            "### ⚠️ Hasil Turath Diterima, Tetapi Petikan Tidak Dapat Dibaca\n\n"
+            "Servis Turath memulangkan hasil carian, tetapi format medan teksnya tidak dikenali oleh bot. "
+            "Semak log `[TURATH] Medan hasil pertama` dan sesuaikan pemetaan medan dalam `normalize_turath_sources()`.\n\n"
+            "Carian web luar tidak digunakan."
+        )
 
-    print(f"[TURATH NORMALIZED SOURCES] {len(turath_sources)}")
-    print(f"[TURATH SOURCES USED] {len(sources)}")
-    print(f"[TURATH DISTINCT TITLES] {len({str(s.get('title', '')).strip().casefold() for s in sources})}")
-
-    if not sources:
+    ranked_sources = rank_sources(normalized, question, queries)
+    if not ranked_sources:
         return (
             "### 🔎 Sumber Turath Tidak Ditemukan\n\n"
-            "Maaf, aplikasi Turath tidak memulangkan petikan yang cukup relevan "
-            "untuk mengesahkan jawapan ini.\n\n"
-            "**Cuba:**\n"
-            "• Tulis soalan dengan istilah fiqh yang lebih khusus.\n"
-            "• Sertakan istilah Arab, nama kitab atau mazhab jika diketahui.\n\n"
-            "ℹ️ Carian web luar tidak digunakan; carian ini bergantung pada kandungan servis Turath."
+            "Servis Turath tidak memulangkan petikan teks yang boleh digunakan untuk soalan ini.\n\n"
+            "**Sila semak:**\n"
+            "• Sama ada endpoint Turath `/search` mengembalikan medan teks.\n"
+            "• Sama ada pangkalan data kitab telah diindeks dan servis boleh dicapai.\n\n"
+            "ℹ️ Carian web luar tidak digunakan."
         )
+
+    scored = [(source_relevance_score(source, question, queries), source) for source in ranked_sources]
+    positive = [source for score, source in scored if score > 0]
+
+    # Padanan positif diutamakan. Jika sumber sepadan terlalu sedikit,
+    # tambah beberapa hasil lain daripada Turath agar tidak kehilangan kitab relevan
+    # hanya kerana padanan literal Melayu-Arab gagal.
+    if positive:
+        selected = list(positive[:MAX_SOURCE_COUNT])
+        minimum_target = min(8, MAX_SOURCE_COUNT)
+        if len(selected) < minimum_target:
+            fingerprints = {
+                re.sub(r"\s+", " ", (source.get("title", "") + " " + source.get("text", "")).casefold()).strip()
+                for source in selected
+            }
+            for source in ranked_sources:
+                fingerprint = re.sub(r"\s+", " ", (source.get("title", "") + " " + source.get("text", "")).casefold()).strip()
+                if fingerprint not in fingerprints:
+                    selected.append(source)
+                    fingerprints.add(fingerprint)
+                if len(selected) >= minimum_target:
+                    break
+    else:
+        print("[TURATH RELEVANCE WARNING] Semua skor padanan ialah 0; gunakan hasil Turath yang telah disusun.")
+        selected = ranked_sources[:MAX_SOURCE_COUNT]
+
+    sources = selected[:MAX_SOURCE_COUNT]
+    print(f"[TURATH SOURCES USED] {len(sources)}")
+    print(f"[TURATH DISTINCT TITLES] {len({str(s.get('title', '')).strip().casefold() for s in sources})}")
+    print("[TURATH TOP SOURCES] " + " | ".join(
+        f"{source.get('title', 'Tanpa tajuk')} (skor={source_relevance_score(source, question, queries)})"
+        for source in sources[:8]
+    ))
 
     answer = generate_fiqh_answer(question, sources)
     answer = ensure_answer_title(question, answer)
