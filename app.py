@@ -36,7 +36,8 @@ GEMINI_RETRIES = max(0, int(os.getenv("GEMINI_RETRIES", "1")))
 TELEGRAM_RESTART_WAIT = max(1, int(os.getenv("TELEGRAM_RESTART_WAIT", "5")))
 TURATH_TIMEOUT = max(10, int(os.getenv("TURATH_TIMEOUT", "60")))
 
-MAX_CONCURRENT_SEARCHES = max(1, int(os.getenv("MAX_CONCURRENT_SEARCHES", "5")))
+# Hadkan secara keras kepada lima pengguna aktif supaya konfigurasi tidak membuka terlalu banyak carian.
+MAX_CONCURRENT_SEARCHES = min(5, max(1, int(os.getenv("MAX_CONCURRENT_SEARCHES", "5"))))
 TELEGRAM_CONCURRENT_UPDATES = max(
     MAX_CONCURRENT_SEARCHES + 5,
     int(os.getenv("TELEGRAM_CONCURRENT_UPDATES", "50")),
@@ -858,6 +859,28 @@ def is_broad_topic_question(question: str) -> bool:
     return len(words) <= 5
 
 
+def is_enumeration_question(question: str) -> bool:
+    """Kenal pasti soalan yang jawapan utamanya perlu berupa senarai."""
+    normalized = re.sub(r"[^\w\s'-]", " ", str(question or "").casefold())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    markers = (
+        "rukun", "syarat", "sebab", "punca", "jenis", "kategori", "pembahagi",
+        "membatalkan", "pembatal", "perkara yang membatalkan", "perkara yang mewajibkan",
+        "perkara yang menyebabkan", "faktor", "senaraikan", "berapa jenis", "berapa rukun",
+        "berapa syarat", "apakah perkara", "apa sahaja perkara", "tanda-tanda", "ciri-ciri",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def has_direct_enumerated_answer(answer: str) -> bool:
+    """Semak secara ringan sama ada jawapan menyenaraikan isi pokok dengan jelas."""
+    head = re.sub(r"\*\*", "", str(answer or "")[:2600])
+    numbered = re.search(r"(?:^|\n)\s*\d{1,2}[.)]\s+", head)
+    bulleted = re.search(r"(?:^|\n)\s*[-*•]\s+", head)
+    inline_numbered = re.search(r"\b(?:1[.)]|1\s*[-:])\s+", head)
+    return bool(numbered or bulleted or inline_numbered)
+
+
 def generate_fiqh_answer(question: str, sources: list) -> str:
     if not sources:
         return "### ⚠️ Sumber Turath Belum Mencukupi\n\nTurath tidak memulangkan petikan yang mencukupi untuk menghuraikan isu ini."
@@ -870,6 +893,7 @@ def generate_fiqh_answer(question: str, sources: list) -> str:
         for source in sources
     )
     broad_topic = is_broad_topic_question(question)
+    enumeration_question = is_enumeration_question(question)
     if broad_topic:
         # Sasaran membantu jawapan tajuk umum menjadi menyeluruh, tetapi bukan
         # arahan untuk mereka-reka atau memanjangkan isi di luar sumber.
@@ -899,11 +923,21 @@ PENYUSUNAN UNTUK TAJUK UMUM:
     else:
         structure_rules = """
 PENYUSUNAN UNTUK SOALAN KHUSUS:
-- Jawab terus hukum atau persoalan yang ditanya dalam perenggan awal.
+- Jawab terus hukum atau persoalan yang ditanya dalam perenggan pertama; jangan mulakan dengan isu sampingan.
 - Bina subtajuk kecil hanya bagi syarat, pengecualian, keadaan khas atau cabang yang benar-benar membantu jawapan.
 - Jangan menulis keseluruhan bab bagi topik besar apabila pengguna hanya bertanya satu perkara tertentu.
 - Jika relevan, nyatakan pandangan mazhab Syafi‘i dahulu, kemudian khilaf yang disokong sumber.
 """
+
+    enumeration_rules = """
+KEUTAMAAN WAJIB BAGI SOALAN BERBENTUK SENARAI:
+- Jika pengguna bertanya tentang rukun, syarat, sebab, punca, jenis, kategori, pembatal atau perkara yang mewajibkan sesuatu, senaraikan jawapan utama terlebih dahulu sebelum huraian panjang.
+- Nyatakan senarai utama dengan jelas dan tersusun (gunakan nombor atau butiran berbulet), kemudian huraikan setiap item satu demi satu.
+- Lengkapkan senarai mengikut apa yang benar-benar dapat disokong oleh petikan Turath. Jangan menggugurkan perkara utama semata-mata untuk membincangkan perincian kecil.
+- Jika petikan yang diterima tidak cukup untuk memastikan senarai lengkap, terangkan batas sumber secara jujur; jangan mereka-reka item atau mendakwa senarai itu lengkap tanpa sandaran.
+- Jangan biarkan isu cabang seperti muwalat, perkara sunat atau khilaf menenggelamkan jawapan asas yang ditanya.
+- Bagi soalan “rukun wuduk”, misalnya, jawapan mesti bermula dengan rukun wuduk dalam mazhab Syafi‘i yang disokong petikan; perbincangan isu lain hanya selepas senarai dan huraian rukun.
+""" if enumeration_question else ""
 
     prompt = f"""
 Anda ialah penyelidik fiqh Islam dan penulis TanyaFiqihBot. Hasilkan jawapan fiqh yang tepat,
@@ -921,6 +955,12 @@ SASARAN:
 - Jangan sengaja memenuhi kuota perkataan dengan pengetahuan umum yang tidak terdapat dalam petikan.
 
 {structure_rules}
+{enumeration_rules}
+
+PRIORITI KANDUNGAN:
+- Padankan jawapan dengan bentuk soalan sebenar; jangan menggantikan jawapan yang diminta dengan bab sampingan yang berkaitan tetapi bukan pokok.
+- Jika soalan meminta bilangan atau senarai, beri senarai dahulu, kemudian terangkan setiap perkara. Jika soalan meminta hukum satu kes, beri keputusan kes itu dahulu.
+- Sebelum menghantar jawapan, semak bahawa soalan pokok telah dijawab secara nyata dan bukan sekadar disentuh secara tidak langsung.
 
 KHILAF DAN PANDANGAN MAZHAB LAIN:
 - Mazhab Syafi‘i didahulukan sebagai asas huraian.
@@ -975,23 +1015,26 @@ Berikan jawapan akhir sahaja. Pastikan ia terperinci mengikut keluasan soalan, t
             f"words={word_count}/{target_words}; cited_books={len(cited_titles)}"
         )
 
-        # Semakan kedua hanya apabila jawapan terlalu pendek sedangkan sumber
-        # menyediakan bahan yang munasabah untuk dihuraikan. Tidak memaksa
-        # model menambah kitab atau khilaf yang tidak ada.
+        # Semakan kedua dijalankan jika jawapan terlalu pendek sedangkan sumber
+        # mencukupi, ATAU soalan meminta senarai tetapi draf tidak menyenaraikan
+        # jawapan pokok. Ini mengelakkan huraian isu sampingan menggantikan jawapan.
         minimum_acceptable = max(450, int(target_words * 0.55)) if broad_topic else max(220, int(target_words * 0.50))
         can_expand = source_word_count >= (650 if broad_topic else 350)
-        if word_count < minimum_acceptable and can_expand:
+        missing_direct_list = enumeration_question and not has_direct_enumerated_answer(draft)
+        should_revise = (word_count < minimum_acceptable and can_expand) or missing_direct_list
+        if should_revise:
             revision_prompt = f"""
-Baiki dan kembangkan draf fiqh berikut kerana ia terlalu ringkas untuk soalan ini.
-Kekalkan susunan yang sesuai dengan keluasan soalan: jika tajuk umum, bina perbahasan dengan subtajuk relevan;
-jika soalan khusus, fokus pada persoalan itu. Utamakan mazhab Syafi‘i.
+Semak dan baiki draf fiqh ini supaya menjawab soalan pengguna secara langsung, tepat dan bersumber.
+Mazhab Syafi‘i ialah asas utama. Jangan sekadar memanjangkan draf atau mengulang isi.
 
-Syarat:
-- Tambah hanya perincian yang benar-benar disokong petikan Turath.
-- Huraikan syarat, pengecualian, cabang masalah dan contoh keadaan jika ada sandaran.
+KEUTAMAAN:
+- Jika soalan meminta rukun, syarat, sebab, punca, jenis, kategori, pembatal atau senarai, mulakan dengan senarai jawapan utama yang jelas dan tersusun, kemudian huraikan setiap item satu demi satu.
+- Jika soalan khusus, jawab perkara yang ditanya dalam perenggan awal. Jangan biarkan isu sampingan seperti muwalat, perkara sunat atau khilaf mengambil tempat jawapan utama.
+- Bagi soalan “rukun wuduk”, nyatakan rukun wuduk mazhab Syafi‘i yang disokong petikan sebelum isu tambahan.
+- Tambah hanya butiran yang benar-benar disokong petikan Turath. Jika petikan tidak mencukupi untuk senarai lengkap, nyatakan batas sumber dan jangan mereka-reka.
 - Pandangan mazhab lain hanya boleh dimasukkan jika petikan yang ada menyokongnya; jangan memaksa perbandingan.
 - Kekalkan atau betulkan penanda [S#] agar tepat dengan petikan. Jangan mereka-reka sumber, teks Arab, halaman atau pendapat.
-- Elakkan pengulangan. Jika sumber tidak cukup, jangan cuba mencapai bilangan perkataan dengan dakwaan tanpa sandaran.
+- Elakkan pengulangan. Jika draf sudah memadai, baiki hanya bahagian yang tidak menjawab soalan.
 
 SOALAN: {question}
 MOD: {answer_mode}
@@ -1005,11 +1048,21 @@ Berikan versi akhir sahaja.
 """
             revised = gemini_generate(revision_prompt)
             revised_words, revised_titles = metrics(revised)
-            if revised_words > word_count and len(revised_titles) >= min(1, len(cited_titles)):
+            revised_has_list = has_direct_enumerated_answer(revised)
+            better_directness = missing_direct_list and revised_has_list
+            better_length = word_count < minimum_acceptable and revised_words > word_count
+            source_citations_preserved = len(revised_titles) >= min(1, len(cited_titles))
+            if (better_directness or better_length) and source_citations_preserved:
                 draft = revised
-                print(f"[ANSWER QUALITY] revised answer accepted: {revised_words} words")
+                print(
+                    f"[ANSWER QUALITY] revised answer accepted: words={revised_words}; "
+                    f"direct_list={revised_has_list}"
+                )
             else:
-                print(f"[ANSWER QUALITY] original retained; revised={revised_words} words")
+                print(
+                    f"[ANSWER QUALITY] original retained; revised_words={revised_words}; "
+                    f"direct_list={revised_has_list}"
+                )
         return draft.strip()
     except Exception as exc:
         print(f"[ANSWER GENERATION ERROR] {exc}")
@@ -1504,7 +1557,7 @@ def health():
         "max_comparison_turath_queries": MAX_COMPARISON_TURATH_QUERIES,
         "gemini_max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
         "broad_topic_target_words": MIN_DETAILED_ANSWER_WORDS,
-        "answer_structure": "dynamic_subtopics_source_based_khilaf",
+        "answer_structure": "direct_answer_first_enumeration_audit_dynamic_subtopics_source_based_khilaf",
     })
 
 # ============================================================
