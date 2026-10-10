@@ -39,6 +39,15 @@ GEMINI_RETRIES = int(os.getenv("GEMINI_RETRIES", "2"))
 TELEGRAM_RESTART_WAIT = int(os.getenv("TELEGRAM_RESTART_WAIT", "5"))
 TURATH_TIMEOUT = int(os.getenv("TURATH_TIMEOUT", "90"))
 
+# Had carian Turath yang dibenarkan berjalan pada masa yang sama.
+MAX_CONCURRENT_SEARCHES = max(1, int(os.getenv("MAX_CONCURRENT_SEARCHES", "5")))
+# Handler tambahan diperlukan supaya pengguna masih boleh menerima nombor giliran
+# ketika lima carian sedang berjalan.
+TELEGRAM_CONCURRENT_UPDATES = max(
+    MAX_CONCURRENT_SEARCHES + 5,
+    int(os.getenv("TELEGRAM_CONCURRENT_UPDATES", "50")),
+)
+
 # Lebihkan sumber dan konteks. Kepelbagaian tajuk kitab diutamakan
 # sebelum mengambil petikan tambahan daripada kitab yang sama.
 MAX_SOURCE_COUNT = int(os.getenv("MAX_SOURCE_COUNT", "24"))
@@ -54,7 +63,7 @@ TELEGRAM_AUTOSTART = os.getenv("TELEGRAM_AUTOSTART", "1").strip().lower() not in
     "0", "false", "no", "off"
 }
 
-HTTP_SESSION = requests.Session()
+HTTP_THREAD_LOCAL = threading.local()
 _TELEGRAM_THREAD = None
 _TELEGRAM_THREAD_LOCK = threading.Lock()
 _TELEGRAM_STATUS = "not_started"
@@ -70,50 +79,850 @@ app = Flask(__name__)
 # ============================================================
 
 QUERY_MAP = {
-    "solat": "الصلاة",
-    "sembahyang": "الصلاة",
-    "wuduk": "الوضوء",
-    "wudhu": "الوضوء",
-    "tayammum": "التيمم",
-    "puasa": "الصيام",
-    "zakat fitrah": "زكاة الفطر",
-    "zakat": "الزكاة",
-    "haji": "الحج",
-    "umrah": "العمرة",
-    "haid": "الحيض",
-    "nifas": "النفاس",
-    "junub": "الجنابة",
-    "mandi wajib": "الغسل",
-    "nikah": "النكاح",
-    "kahwin": "النكاح",
-    "talak": "الطلاق",
-    "cerai": "الطلاق",
-    "rujuk": "الرجعة",
-    "faraid": "الفرائض",
-    "pusaka": "الميراث",
-    "jual beli": "البيع",
-    "riba": "الربا",
-    "hutang": "الدين",
-    "sedekah": "الصدقة",
-    "wakaf": "الوقف",
-    "korban": "الأضحية",
-    "aqiqah": "العقيقة",
-    "sujud sahwi": "سجود السهو",
-    "imam": "الإمامة",
-    "makmum": "الاقتداء في الصلاة",
-    "jamak": "الجمع بين الصلاتين",
-    "qasar": "قصر الصلاة",
-    "jenazah": "صلاة الجنازة",
-    "najis": "النجاسة",
-    "istinja": "الاستنجاء",
-    "istihadah": "الاستحاضة",
-    "masjid": "المسجد",
-    "azan": "الأذان",
-    "iqamah": "الإقامة",
-    "sah": "الصحة والبطلان في الفقه",
-    "batal": "مبطلات العبادة",
+    # ========================================================
+    # ISTILAH UMUM FIQH
+    # ========================================================
+    "fiqh": "الفقه",
+    "fikah": "الفقه",
+    "hukum": "الحكم الشرعي",
+    "hukum syarak": "الحكم الشرعي",
+    "hukum taklifi": "الحكم التكليفي",
+    "hukum wad'i": "الحكم الوضعي",
+    "wajib": "الواجب",
+    "fardu": "الفرض",
+    "fardhu": "الفرض",
+    "sunat": "السنة",
+    "sunnah": "السنة",
+    "mustahab": "المستحب",
+    "mandub": "المندوب",
+    "harus": "المباح",
+    "mubah": "المباح",
+    "makruh": "المكروه",
     "haram": "الحرام",
     "halal": "الحلال",
+    "sah": "الصحة والبطلان في الفقه",
+    "sahih": "الصحيح",
+    "fasid": "الفاسد",
+    "batal": "مبطلات العبادات",
+    "rukun": "الأركان",
+    "syarat": "الشروط",
+    "syarat sah": "شروط الصحة",
+    "syarat wajib": "شروط الوجوب",
+    "sebab hukum": "السبب الشرعي",
+    "mani": "المانع الشرعي",
+    "rukhsah": "الرخصة",
+    "azimah": "العزيمة",
+    "khilaf": "الخلاف الفقهي",
+    "khilaf ulama": "اختلاف العلماء",
+    "ijtihad": "الاجتهاد",
+    "taqlid": "التقليد",
+    "fatwa": "الفتوى",
+    "mufti": "المفتي",
+    "mufti": "المفتي",
+    "mazhab": "المذهب الفقهي",
+    "mazhab syafie": "المذهب الشافعي",
+    "mazhab hanafi": "المذهب الحنفي",
+    "mazhab maliki": "المذهب المالكي",
+    "mazhab hanbali": "المذهب الحنبلي",
+    "rajih": "الراجح",
+    "marjuh": "المرجوح",
+    "khilaf awla": "خلاف الأولى",
+    "maqasid syariah": "مقاصد الشريعة",
+    "maslahah": "المصلحة",
+    "mafsadah": "المفسدة",
+    "darurat": "الضرورة",
+    "hajat": "الحاجة",
+    "urf": "العرف",
+    "adat": "العادة",
+    "istishab": "الاستصحاب",
+    "istihsan": "الاستحسان",
+    "maslahah mursalah": "المصلحة المرسلة",
+    "sadd zaraie": "سد الذرائع",
+
+    # ========================================================
+    # TAHARAH / BERSUCI
+    # ========================================================
+    "bersuci": "الطهارة",
+    "taharah": "الطهارة",
+    "suci": "الطهارة",
+    "hadas": "الحدث",
+    "hadas kecil": "الحدث الأصغر",
+    "hadas besar": "الحدث الأكبر",
+    "najis": "النجاسة",
+    "najis mukhaffafah": "النجاسة المخففة",
+    "najis mutawassitah": "النجاسة المتوسطة",
+    "najis mughallazah": "النجاسة المغلظة",
+    "air mutlak": "الماء المطلق",
+    "air mustamal": "الماء المستعمل",
+    "air mutanajjis": "الماء المتنجس",
+    "air musyammas": "الماء المشمس",
+    "air sedikit": "الماء القليل",
+    "air banyak": "الماء الكثير",
+    "wuduk": "الوضوء",
+    "wudhu": "الوضوء",
+    "ambil wuduk": "الوضوء",
+    "rukun wuduk": "فرائض الوضوء",
+    "batal wuduk": "نواقض الوضوء",
+    "pembatal wuduk": "نواقض الوضوء",
+    "tayammum": "التيمم",
+    "sebab tayammum": "أسباب التيمم",
+    "debu tayammum": "الصعيد الطيب",
+    "mandi wajib": "الغسل",
+    "mandi junub": "غسل الجنابة",
+    "mandi sunat": "الغسل المسنون",
+    "junub": "الجنابة",
+    "janabah": "الجنابة",
+    "haid": "الحيض",
+    "darah haid": "دم الحيض",
+    "tempoh haid": "مدة الحيض",
+    "nifas": "النفاس",
+    "darah nifas": "دم النفاس",
+    "istihadah": "الاستحاضة",
+    "wanita mustahadah": "المستحاضة",
+    "wiladah": "الولادة",
+    "keluar mani": "خروج المني",
+    "air mani": "المني",
+    "air mazi": "المذي",
+    "air wadi": "الودي",
+    "istinja": "الاستنجاء",
+    "istinjak": "الاستنجاء",
+    "istijmar": "الاستجمار",
+    "cebok": "الاستنجاء",
+    "membersihkan najis": "إزالة النجاسة",
+    "samak": "الدباغ",
+    "kulit bangkai": "جلد الميتة",
+    "bangkai": "الميتة",
+    "bersugi": "السواك",
+    "siwak": "السواك",
+
+    # ========================================================
+    # SOLAT
+    # ========================================================
+    "solat": "الصلاة",
+    "sembahyang": "الصلاة",
+    "solat fardu": "الصلوات المفروضة",
+    "solat sunat": "صلاة النافلة",
+    "solat berjemaah": "صلاة الجماعة",
+    "solat sendirian": "صلاة المنفرد",
+    "solat musafir": "صلاة المسافر",
+    "solat jumaat": "صلاة الجمعة",
+    "solat raya": "صلاة العيد",
+    "solat jenazah": "صلاة الجنازة",
+    "solat gerhana": "صلاة الكسوف",
+    "solat istisqa": "صلاة الاستسقاء",
+    "solat tahajud": "صلاة التهجد",
+    "solat dhuha": "صلاة الضحى",
+    "solat witir": "صلاة الوتر",
+    "solat tarawih": "صلاة التراويح",
+    "solat istikharah": "صلاة الاستخارة",
+    "solat taubat": "صلاة التوبة",
+    "solat hajat": "صلاة الحاجة",
+    "solat tasbih": "صلاة التسبيح",
+    "rukun solat": "أركان الصلاة",
+    "syarat solat": "شروط الصلاة",
+    "syarat sah solat": "شروط صحة الصلاة",
+    "waktu solat": "مواقيت الصلاة",
+    "masuk waktu": "دخول الوقت",
+    "qiblat": "القبلة",
+    "kiblat": "القبلة",
+    "menghadap kiblat": "استقبال القبلة",
+    "aurat": "العورة",
+    "menutup aurat": "ستر العورة",
+    "niat solat": "نية الصلاة",
+    "takbiratul ihram": "تكبيرة الإحرام",
+    "berdiri dalam solat": "القيام في الصلاة",
+    "bacaan fatihah": "قراءة الفاتحة",
+    "surah al-fatihah": "سورة الفاتحة",
+    "rukuk": "الركوع",
+    "iktidal": "الاعتدال",
+    "sujud": "السجود",
+    "duduk antara dua sujud": "الجلوس بين السجدتين",
+    "tahiyat": "التشهد",
+    "tasyahud": "التشهد",
+    "tahiyat akhir": "التشهد الأخير",
+    "selawat dalam solat": "الصلاة على النبي في الصلاة",
+    "salam solat": "السلام في الصلاة",
+    "tamakninah": "الطمأنينة",
+    "qunut": "القنوت",
+    "qunut subuh": "القنوت في صلاة الصبح",
+    "sujud sahwi": "سجود السهو",
+    "sujud tilawah": "سجود التلاوة",
+    "sujud syukur": "سجود الشكر",
+    "perkara makruh dalam solat": "مكروهات الصلاة",
+    "perkara membatalkan solat": "مبطلات الصلاة",
+    "bercakap dalam solat": "الكلام في الصلاة",
+    "bergerak dalam solat": "الحركة في الصلاة",
+    "menangis dalam solat": "البكاء في الصلاة",
+    "terlupa dalam solat": "السهو في الصلاة",
+    "masbuk": "المسبوق",
+    "muafik": "الموافق في الصلاة",
+    "imam": "الإمامة",
+    "makmum": "المأموم",
+    "mengikut imam": "الاقتداء بالإمام",
+    "imam tersalah": "سهو الإمام",
+    "makmum masbuk": "المأموم المسبوق",
+    "saf solat": "صفوف الصلاة",
+    "meluruskan saf": "تسوية الصفوف",
+    "azan": "الأذان",
+    "bang": "الأذان",
+    "iqamah": "الإقامة",
+    "jamak": "الجمع بين الصلاتين",
+    "jamak taqdim": "الجمع تقديمًا",
+    "jamak takhir": "الجمع تأخيرًا",
+    "qasar": "قصر الصلاة",
+    "jamak qasar": "الجمع والقصر",
+    "musafir": "السفر",
+    "jarak musafir": "مسافة السفر",
+    "tempoh musafir": "مدة السفر",
+    "solat qada": "قضاء الصلاة",
+    "qada solat": "قضاء الصلاة",
+    "solat tertinggal": "فوات الصلاة",
+    "solat dalam kapal terbang": "الصلاة في الطائرة",
+    "solat atas kenderaan": "الصلاة على الراحلة",
+    "solat orang sakit": "صلاة المريض",
+    "solat duduk": "الصلاة قاعدًا",
+    "solat baring": "الصلاة مضطجعًا",
+    "sutrah": "السترة في الصلاة",
+    "melintas di hadapan orang solat": "المرور بين يدي المصلي",
+
+    # ========================================================
+    # PUASA
+    # ========================================================
+    "puasa": "الصيام",
+    "siyam": "الصيام",
+    "puasa ramadan": "صيام رمضان",
+    "puasa wajib": "الصيام الواجب",
+    "puasa sunat": "صيام التطوع",
+    "puasa enam": "صيام ستة أيام من شوال",
+    "puasa syawal": "صيام شوال",
+    "puasa isnin khamis": "صيام الاثنين والخميس",
+    "puasa arafah": "صوم يوم عرفة",
+    "puasa asyura": "صوم عاشوراء",
+    "puasa tasua": "صوم تاسوعاء",
+    "puasa nazar": "صوم النذر",
+    "puasa kafarah": "صوم الكفارة",
+    "niat puasa": "نية الصيام",
+    "sahur": "السحور",
+    "berbuka puasa": "الإفطار",
+    "iftar": "الإفطار",
+    "perkara membatalkan puasa": "مفطرات الصيام",
+    "batal puasa": "مفسدات الصوم",
+    "qada puasa": "قضاء الصيام",
+    "fidyah": "الفدية",
+    "kafarah puasa": "كفارة الصيام",
+    "orang musafir berpuasa": "صوم المسافر",
+    "puasa orang sakit": "صوم المريض",
+    "puasa wanita haid": "صوم الحائض",
+    "puasa wanita nifas": "صوم النفساء",
+    "imsak": "الإمساك",
+    "terlupa makan ketika puasa": "الأكل ناسيًا في الصيام",
+    "muntah ketika puasa": "القيء في الصيام",
+    "suntikan ketika puasa": "الحقن للصائم",
+    "merasa makanan ketika puasa": "ذوق الطعام للصائم",
+    "berjimak ketika puasa": "الجماع في نهار رمضان",
+    "berbekam ketika puasa": "الحجامة للصائم",
+    "lailatul qadar": "ليلة القدر",
+    "iktikaf": "الاعتكاف",
+    "itikaf": "الاعتكاف",
+
+    # ========================================================
+    # ZAKAT DAN SEDEKAH
+    # ========================================================
+    "zakat": "الزكاة",
+    "zakat fitrah": "زكاة الفطر",
+    "zakat harta": "زكاة المال",
+    "zakat emas": "زكاة الذهب",
+    "zakat perak": "زكاة الفضة",
+    "zakat wang": "زكاة النقود",
+    "zakat perniagaan": "زكاة عروض التجارة",
+    "zakat pertanian": "زكاة الزروع والثمار",
+    "zakat ternakan": "زكاة الأنعام",
+    "zakat saham": "زكاة الأسهم",
+    "zakat pendapatan": "زكاة الدخل",
+    "zakat simpanan": "زكاة المال المدخر",
+    "nisab": "النصاب",
+    "haul": "الحول",
+    "kadar zakat": "مقدار الزكاة",
+    "asnaf zakat": "مصارف الزكاة",
+    "penerima zakat": "مستحقو الزكاة",
+    "amil zakat": "عامل الزكاة",
+    "zakat kepada keluarga": "دفع الزكاة إلى الأقارب",
+    "zakat kepada fakir": "الزكاة للفقراء",
+    "fakir": "الفقير",
+    "miskin": "المسكين",
+    "gharimin": "الغارمون",
+    "ibnu sabil": "ابن السبيل",
+    "muallaf": "المؤلفة قلوبهم",
+    "sedekah": "الصدقة",
+    "sadaqah": "الصدقة",
+    "infak": "الإنفاق",
+    "infaq": "الإنفاق",
+    "derma": "التبرع",
+    "wakaf": "الوقف",
+    "waqaf": "الوقف",
+    "wakaf tunai": "الوقف النقدي",
+    "wakaf keluarga": "الوقف الأهلي",
+    "wakaf am": "الوقف العام",
+    "wakaf khas": "الوقف الخاص",
+    "nazir wakaf": "ناظر الوقف",
+    "hibah": "الهبة",
+    "hadiah": "الهدية",
+    "sedekah jariah": "الصدقة الجارية",
+    "wasiat": "الوصية",
+    "wasiat harta": "الوصية بالمال",
+
+    # ========================================================
+    # HAJI DAN UMRAH
+    # ========================================================
+    "haji": "الحج",
+    "umrah": "العمرة",
+    "ihram": "الإحرام",
+    "niat ihram": "نية الإحرام",
+    "miqat": "الميقات",
+    "miqat zamani": "الميقات الزماني",
+    "miqat makani": "الميقات المكاني",
+    "talbiah": "التلبية",
+    "talbiyah": "التلبية",
+    "tawaf": "الطواف",
+    "tawaf qudum": "طواف القدوم",
+    "tawaf ifadah": "طواف الإفاضة",
+    "tawaf wada": "طواف الوداع",
+    "tawaf sunat": "الطواف النافلة",
+    "saie": "السعي",
+    "sa'i": "السعي بين الصفا والمروة",
+    "safa marwah": "الصفا والمروة",
+    "wuquf arafah": "الوقوف بعرفة",
+    "wukuf": "الوقوف بعرفة",
+    "mabit muzdalifah": "المبيت بمزدلفة",
+    "mabit mina": "المبيت بمنى",
+    "melontar jamrah": "رمي الجمار",
+    "jamrah aqabah": "جمرة العقبة",
+    "tahallul": "التحلل",
+    "bercukur haji": "الحلق والتقصير",
+    "dam haji": "دم الحج",
+    "larangan ihram": "محظورات الإحرام",
+    "fidyah ihram": "فدية الإحرام",
+    "haji tamattuk": "حج التمتع",
+    "haji ifrad": "حج الإفراد",
+    "haji qiran": "حج القران",
+    "haji badal": "الحج عن الغير",
+    "upah haji": "الإجارة على الحج",
+    "haji wanita": "حج المرأة",
+    "mahram haji": "المحرم في الحج",
+    "rukun haji": "أركان الحج",
+    "wajib haji": "واجبات الحج",
+    "rukun umrah": "أركان العمرة",
+    "dam tamattu": "دم التمتع",
+
+    # ========================================================
+    # KORBAN, AQIQAH DAN SEMBELIHAN
+    # ========================================================
+    "korban": "الأضحية",
+    "qurban": "الأضحية",
+    "udhhiyah": "الأضحية",
+    "aqiqah": "العقيقة",
+    "sembelihan": "الذبح",
+    "penyembelihan": "الذكاة الشرعية",
+    "sembelihan halal": "الذبيحة الحلال",
+    "syarat sembelihan": "شروط الذكاة",
+    "haiwan korban": "بهيمة الأنعام في الأضحية",
+    "umur haiwan korban": "سن الأضحية",
+    "pembahagian daging korban": "توزيع لحم الأضحية",
+    "korban nazar": "الأضحية المنذورة",
+    "korban sunat": "الأضحية المتطوع بها",
+    "korban untuk si mati": "الأضحية عن الميت",
+    "korban berkongsi": "الاشتراك في الأضحية",
+    "takbir hari raya": "تكبير العيد",
+    "hari tasyrik": "أيام التشريق",
+    "tasmiyah sembelihan": "التسمية عند الذبح",
+    "haiwan halal": "الحيوان المأكول",
+    "haiwan haram dimakan": "الحيوانات المحرمة",
+    "bangkai haiwan": "الميتة",
+    "makanan halal": "الأطعمة الحلال",
+    "makanan haram": "الأطعمة المحرمة",
+    "buruan": "الصيد",
+    "berburu": "الصيد البري",
+
+    # ========================================================
+    # JENAZAH DAN KEMATIAN
+    # ========================================================
+    "jenazah": "الجنازة",
+    "pengurusan jenazah": "أحكام الجنائز",
+    "mandi jenazah": "غسل الميت",
+    "kafan": "تكفين الميت",
+    "mengafankan jenazah": "تكفين الميت",
+    "solat jenazah": "صلاة الجنازة",
+    "pengebumian": "الدفن",
+    "tanam mayat": "دفن الميت",
+    "ziarah kubur": "زيارة القبور",
+    "talqin": "التلقين بعد الدفن",
+    "takziah": "التعزية",
+    "kematian": "الموت",
+    "mati syahid": "الشهيد",
+    "mandi orang mati": "غسل الميت",
+    "membawa jenazah": "حمل الجنازة",
+    "kubur": "القبر",
+    "bina kubur": "البناء على القبور",
+    "menangisi mayat": "البكاء على الميت",
+    "meratapi mayat": "النياحة على الميت",
+    "hutang si mati": "ديون الميت",
+    "harta peninggalan": "التركة",
+
+    # ========================================================
+    # NIKAH DAN RUMAH TANGGA
+    # ========================================================
+    "nikah": "النكاح",
+    "kahwin": "النكاح",
+    "perkahwinan": "الزواج",
+    "akad nikah": "عقد النكاح",
+    "wali nikah": "ولي النكاح",
+    "wali mujbir": "الولي المجبر",
+    "wali hakim": "الولي الحاكم",
+    "wali adhal": "الولي العاضل",
+    "saksi nikah": "شاهدا النكاح",
+    "mahar": "المهر",
+    "mas kahwin": "المهر",
+    "mahar musamma": "المهر المسمى",
+    "mahar mithil": "مهر المثل",
+    "walimah": "وليمة العرس",
+    "kenduri kahwin": "وليمة العرس",
+    "khitbah": "الخطبة",
+    "meminang": "الخطبة",
+    "pertunangan": "الخطبة",
+    "pinangan": "الخطبة",
+    "kafaah": "الكفاءة في النكاح",
+    "sekufu": "الكفاءة",
+    "larangan perkahwinan": "المحرمات من النساء",
+    "mahram": "المحارم",
+    "mahram kerana nasab": "المحرمات بالنسب",
+    "mahram kerana susuan": "المحرمات بالرضاع",
+    "susuan": "الرضاع",
+    "radhaah": "الرضاع",
+    "penyusuan": "الرضاعة",
+    "poligami": "تعدد الزوجات",
+    "nikah mutah": "نكاح المتعة",
+    "nikah misyar": "نكاح المسيار",
+    "nikah tanpa wali": "النكاح بغير ولي",
+    "nikah rahsia": "النكاح السري",
+    "nikah ketika ihram": "النكاح حال الإحرام",
+    "hak suami": "حقوق الزوج",
+    "hak isteri": "حقوق الزوجة",
+    "nafkah isteri": "نفقة الزوجة",
+    "nafkah anak": "نفقة الأولاد",
+    "nafkah keluarga": "النفقة على الأسرة",
+    "nusyuz": "النشوز",
+    "isteri nusyuz": "نشوز الزوجة",
+    "suami nusyuz": "نشوز الزوج",
+    "syiqaq": "الشقاق بين الزوجين",
+    "orang tengah rumah tangga": "الحكمين بين الزوجين",
+    "hakam": "الحكم بين الزوجين",
+    "hak penjagaan anak": "الحضانة",
+    "hadanah": "الحضانة",
+    "penjagaan anak": "الحضانة",
+    "penjagaan anak yatim": "كفالة اليتيم",
+    "tempoh idah": "العدة",
+    "iddah": "العدة",
+    "idah": "العدة",
+    "iddah cerai": "عدة الطلاق",
+    "iddah kematian suami": "عدة الوفاة",
+    "rujuk": "الرجعة",
+    "talak": "الطلاق",
+    "cerai": "الطلاق",
+    "perceraian": "الطلاق",
+    "talak satu": "الطلقة الأولى",
+    "talak dua": "الطلقة الثانية",
+    "talak tiga": "الطلاق الثلاث",
+    "talak rajie": "الطلاق الرجعي",
+    "talak bain": "الطلاق البائن",
+    "talak bain sughra": "الطلاق البائن بينونة صغرى",
+    "talak bain kubra": "الطلاق البائن بينونة كبرى",
+    "talak kinayah": "كناية الطلاق",
+    "talak soreh": "صريح الطلاق",
+    "lafaz cerai": "ألفاظ الطلاق",
+    "cerai taklik": "الطلاق المعلق",
+    "taklik": "التعليق في الطلاق",
+    "khulu": "الخلع",
+    "tebus talak": "الخلع",
+    "fasakh": "فسخ النكاح",
+    "li'an": "اللعان",
+    "li'an suami isteri": "اللعان بين الزوجين",
+    "zihar": "الظهار",
+    "ila": "الإيلاء",
+    "ila suami": "الإيلاء من الزوجة",
+    "poligami adil": "العدل بين الزوجات",
+    "perkahwinan bawah umur": "نكاح الصغير والصغيرة",
+    "hamil luar nikah": "الحمل من الزنا",
+    "anak tak sah taraf": "ولد الزنا",
+    "nasab anak": "النسب",
+    "anak angkat": "التبني",
+    "anak susuan": "ولد الرضاع",
+
+    # ========================================================
+    # FARAID DAN HARTA PUSAKA
+    # ========================================================
+    "faraid": "الفرائض",
+    "pusaka": "الميراث",
+    "warisan": "الميراث",
+    "pewarisan": "أحكام الميراث",
+    "harta pusaka": "التركة",
+    "ahli waris": "الورثة",
+    "pewaris": "المورث",
+    "waris lelaki": "الورثة من الرجال",
+    "waris perempuan": "الورثة من النساء",
+    "bahagian waris": "أنصبة الورثة",
+    "ashabul furud": "أصحاب الفروض",
+    "asabah": "العصبة",
+    "asabah binafsih": "العصبة بالنفس",
+    "asabah bilghair": "العصبة بالغير",
+    "asabah maal ghair": "العصبة مع الغير",
+    "hijab": "الحجب في الميراث",
+    "hijab hirman": "حجب الحرمان",
+    "hijab nuqsan": "حجب النقصان",
+    "aul": "العول في الفرائض",
+    "radd": "الرد في الميراث",
+    "kalalah": "الكلالة",
+    "datuk dalam faraid": "ميراث الجد",
+    "nenek dalam faraid": "ميراث الجدة",
+    "suami dalam faraid": "ميراث الزوج",
+    "isteri dalam faraid": "ميراث الزوجة",
+    "anak lelaki dalam faraid": "ميراث الابن",
+    "anak perempuan dalam faraid": "ميراث البنت",
+    "bapa dalam faraid": "ميراث الأب",
+    "ibu dalam faraid": "ميراث الأم",
+    "saudara seibu": "الإخوة لأم",
+    "saudara sebapa": "الإخوة لأب",
+    "saudara sekandung": "الإخوة الأشقاء",
+    "anak angkat pusaka": "ميراث المتبنى",
+    "wasiat wajibah": "الوصية الواجبة",
+    "halangan pusaka": "موانع الإرث",
+    "pembahagian pusaka": "قسمة التركة",
+    "pusaka berhutang": "ديون التركة",
+    "harta sepencarian": "المال المشترك بين الزوجين",
+    "hibah semasa hidup": "الهبة في الحياة",
+    "hibah bersyarat": "الهبة المقيدة بالشرط",
+
+    # ========================================================
+    # JUAL BELI DAN MUAMALAT
+    # ========================================================
+    "muamalat": "المعاملات المالية",
+    "jual beli": "البيع",
+    "perniagaan": "التجارة",
+    "perdagangan": "التجارة",
+    "akad": "العقد",
+    "kontrak": "العقد",
+    "ijab kabul": "الإيجاب والقبول",
+    "barang jualan": "المبيع",
+    "harga barang": "الثمن",
+    "penjual": "البائع",
+    "pembeli": "المشتري",
+    "syarat jual beli": "شروط البيع",
+    "rukun jual beli": "أركان البيع",
+    "jual beli sah": "صحة البيع",
+    "jual beli batal": "بطلان البيع",
+    "khiyar": "الخيار في البيع",
+    "khiyar majlis": "خيار المجلس",
+    "khiyar syarat": "خيار الشرط",
+    "khiyar aib": "خيار العيب",
+    "aib barang": "العيب في المبيع",
+    "jual beli gharar": "بيع الغرر",
+    "gharar": "الغرر",
+    "jual beli jahalah": "بيع الجهالة",
+    "jual beli hutang": "بيع الدين",
+    "jual beli bertangguh": "البيع المؤجل",
+    "jual beli ansuran": "البيع بالتقسيط",
+    "jual beli salam": "بيع السلم",
+    "salam": "السلم",
+    "istisna": "الاستصناع",
+    "murabahah": "المرابحة",
+    "tawarruq": "التورق",
+    "bai inah": "بيع العينة",
+    "bai urbun": "بيع العربون",
+    "jual beli mata wang": "الصرف",
+    "sarf": "الصرف",
+    "pertukaran mata wang": "الصرف",
+    "jual beli emas": "بيع الذهب",
+    "jual beli perak": "بيع الفضة",
+    "riba": "الربا",
+    "riba nasi'ah": "ربا النسيئة",
+    "riba fadhl": "ربا الفضل",
+    "riba jahiliah": "ربا الجاهلية",
+    "pinjaman": "القرض",
+    "pinjam wang": "القرض",
+    "hutang": "الدين",
+    "penghutang": "المدين",
+    "pemiutang": "الدائن",
+    "bayar hutang": "قضاء الدين",
+    "tangguh hutang": "إنظار المعسر",
+    "hutang bertambah": "زيادة الدين",
+    "jaminan": "الضمان",
+    "kafalah": "الكفالة",
+    "rahn": "الرهن",
+    "gadaian": "الرهن",
+    "gadai emas": "رهن الذهب",
+    "wang cagaran": "العربون",
+    "amanah": "الأمانة",
+    "wadi'ah": "الوديعة",
+    "simpanan amanah": "الوديعة",
+    "wakalah": "الوكالة",
+    "wakil": "الوكيل",
+    "perwakilan": "الوكالة",
+    "kafalah hutang": "كفالة الدين",
+    "hiwalah": "الحوالة",
+    "pemindahan hutang": "الحوالة",
+    "syarikah": "الشركة",
+    "perkongsian perniagaan": "الشركة",
+    "mudharabah": "المضاربة",
+    "mudarabah": "المضاربة",
+    "musyarakah": "المشاركة",
+    "ijarah": "الإجارة",
+    "sewaan": "الإجارة",
+    "upah": "الأجرة",
+    "upah kerja": "أجرة العمل",
+    "sewa rumah": "إجارة العقار",
+    "sewa tanah": "إجارة الأرض",
+    "ju'alah": "الجعالة",
+    "komisen": "السمسرة",
+    "broker": "السمسار",
+    "samsarah": "السمسرة",
+    "wakil jualan": "وكالة البيع",
+    "insurans": "التأمين",
+    "takaful": "التكافل",
+    "insurans konvensional": "التأمين التجاري",
+    "takaful keluarga": "التكافل العائلي",
+    "saham": "الأسهم",
+    "pelaburan": "الاستثمار",
+    "pelaburan patuh syariah": "الاستثمار المتوافق مع الشريعة",
+    "dividen": "الأرباح الموزعة",
+    "keuntungan": "الربح",
+    "kerugian": "الخسارة",
+    "monopoli": "الاحتكار",
+    "ihtikar": "الاحتكار",
+    "penipuan jual beli": "الغش في البيع",
+    "tadlis": "التدليس",
+    "rasuah": "الرشوة",
+    "risywah": "الرشوة",
+    "sogokan": "الرشوة",
+    "ghabn": "الغبن",
+    "ghabn fahisy": "الغبن الفاحش",
+    "najasy": "النجش",
+    "talaqqi rukban": "تلقي الركبان",
+    "tasriyah": "التصرية",
+    "jual beli atas jualan orang": "البيع على بيع الغير",
+    "hak milik": "الملكية",
+    "pemilikan": "الملك",
+    "ghasab": "الغصب",
+    "rampasan harta": "الغصب",
+    "luqatah": "اللقطة",
+    "barang tercicir": "اللقطة",
+    "ihya mawat": "إحياء الموات",
+    "menghidupkan tanah mati": "إحياء الأرض الموات",
+
+    # ========================================================
+    # MAKANAN, MINUMAN DAN SUMPAH
+    # ========================================================
+    "makanan": "الأطعمة",
+    "minuman": "الأشربة",
+    "makanan haram": "الأطعمة المحرمة",
+    "makanan halal": "الأطعمة الحلال",
+    "bangkai": "الميتة",
+    "darah": "الدم المسفوح",
+    "babi": "الخنزير",
+    "arak": "الخمر",
+    "khamar": "الخمر",
+    "minuman memabukkan": "المسكرات",
+    "dadah": "المخدرات",
+    "racun": "السموم",
+    "haiwan dua alam": "حيوانات البرمائيات",
+    "haiwan buas": "السباع",
+    "haiwan laut": "حيوانات البحر",
+    "haiwan air": "حيوانات الماء",
+    "sembelihan ahli kitab": "ذبائح أهل الكتاب",
+    "sumpah": "اليمين",
+    "sumpah dalam Islam": "أحكام الأيمان",
+    "sumpah palsu": "اليمين الغموس",
+    "sumpah lagha": "لغو اليمين",
+    "sumpah mun'aqidah": "اليمين المنعقدة",
+    "kafarah sumpah": "كفارة اليمين",
+    "nazar": "النذر",
+    "nazar puasa": "نذر الصيام",
+    "kafarah nazar": "كفارة النذر",
+
+    # ========================================================
+    # JENAYAH DAN HUKUMAN
+    # ========================================================
+    "jenayah": "الجنايات",
+    "hudud": "الحدود",
+    "qisas": "القصاص",
+    "diyat": "الدية",
+    "ta'zir": "التعزير",
+    "tazir": "التعزير",
+    "zina": "الزنا",
+    "tuduhan zina": "القذف",
+    "qazaf": "القذف",
+    "mencuri": "السرقة",
+    "sariqah": "السرقة",
+    "rompakan": "الحرابة",
+    "hirabah": "الحرابة",
+    "minum arak": "حد شرب الخمر",
+    "murtad": "الردة",
+    "riddah": "الردة",
+    "bughah": "البغي",
+    "pemberontakan": "البغي",
+    "bunuh": "القتل",
+    "pembunuhan": "القتل",
+    "bunuh sengaja": "القتل العمد",
+    "bunuh tidak sengaja": "القتل الخطأ",
+    "bunuh separa sengaja": "شبه العمد",
+    "kecederaan": "الجراح",
+    "qisas anggota": "القصاص فيما دون النفس",
+    "pampasan kecederaan": "أرش الجناية",
+    "diyat pembunuhan": "دية القتل",
+    "saksi jenayah": "الشهادة في الجنايات",
+    "bukti jenayah": "البينة في الجنايات",
+    "pengakuan jenayah": "الإقرار بالجناية",
+    "liwat": "اللواط",
+    "sihir": "السحر",
+    "hirabah": "الحرابة",
+
+    # ========================================================
+    # SUMPAH, HAK DAN KEHAKIMAN
+    # ========================================================
+    "kehakiman": "القضاء",
+    "hakim": "القاضي",
+    "mahkamah": "المحكمة",
+    "kesaksian": "الشهادة",
+    "saksi": "الشاهد",
+    "keterangan": "البينة",
+    "dakwaan": "الدعوى",
+    "pendakwa": "المدعي",
+    "orang yang didakwa": "المدعى عليه",
+    "pengakuan": "الإقرار",
+    "bukti": "البينة",
+    "sumpah kehakiman": "اليمين القضائية",
+    "penyelesaian pertikaian": "الصلح",
+    "sulh": "الصلح",
+    "perdamaian": "الصلح",
+    "arbitrasi": "التحكيم",
+    "tahkim": "التحكيم",
+    "wakil mahkamah": "الوكيل في الخصومة",
+    "hak manusia": "حقوق العباد",
+    "hak Allah": "حقوق الله",
+    "penganiayaan": "الظلم",
+    "zalim": "الظلم",
+    "mengambil hak orang": "أكل أموال الناس بالباطل",
+
+    # ========================================================
+    # KAEDAH FIQH DAN USUL FIQH
+    # ========================================================
+    "kaedah fiqh": "القواعد الفقهية",
+    "qawaid fiqhiyyah": "القواعد الفقهية",
+    "usul fiqh": "أصول الفقه",
+    "dalil syarak": "الأدلة الشرعية",
+    "al-quran dalam fiqh": "القرآن الكريم",
+    "sunnah sebagai dalil": "السنة النبوية",
+    "ijmak": "الإجماع",
+    "qiyas": "القياس",
+    "istidlal": "الاستدلال",
+    "nas": "النص الشرعي",
+    "dalil qat'i": "الدليل القطعي",
+    "dalil zanni": "الدليل الظني",
+    "am": "العام",
+    "khas": "الخاص",
+    "mutlak": "المطلق",
+    "muqayyad": "المقيد",
+    "mujmal": "المجمل",
+    "mubayyan": "المبين",
+    "mantuq": "المنطوق",
+    "mafhum": "المفهوم",
+    "amar": "الأمر",
+    "nahi": "النهي",
+    "nasakh": "النسخ",
+    "mansukh": "المنسوخ",
+    "illah": "العلة",
+    "illah hukum": "العلة الشرعية",
+    "hikmah hukum": "الحكمة الشرعية",
+    "tahqiq manath": "تحقيق المناط",
+    "takhrij manath": "تخريج المناط",
+    "tanqih manath": "تنقيح المناط",
+    "istishab": "الاستصحاب",
+    "istihsan": "الاستحسان",
+    "urf sahih": "العرف الصحيح",
+    "urf fasid": "العرف الفاسد",
+    "maslahah": "المصلحة",
+    "maslahah mursalah": "المصلحة المرسلة",
+    "saddu zaraie": "سد الذرائع",
+    "fath zaraie": "فتح الذرائع",
+    "darurat mengharuskan perkara terlarang": "الضرورات تبيح المحظورات",
+    "kesukaran membawa kemudahan": "المشقة تجلب التيسير",
+    "kemudaratan dihilangkan": "الضرر يزال",
+    "adat menjadi hukum": "العادة محكمة",
+    "keyakinan tidak hilang dengan syak": "اليقين لا يزول بالشك",
+    "setiap perkara bergantung kepada niat": "الأمور بمقاصدها",
+    "asal sesuatu perkara adalah harus": "الأصل في الأشياء الإباحة",
+    "asal ibadat adalah tauqif": "الأصل في العبادات التوقيف",
+    "fatwa berubah": "تغير الفتوى",
+    "perubahan hukum": "تغير الأحكام",
+    "maqasid": "مقاصد الشريعة",
+    "hifz al-din": "حفظ الدين",
+    "hifz al-nafs": "حفظ النفس",
+    "hifz al-aql": "حفظ العقل",
+    "hifz al-nasl": "حفظ النسل",
+    "hifz al-mal": "حفظ المال",
+
+    # ========================================================
+    # ISTILAH TAMBAHAN
+    # ========================================================
+    "perubatan": "أحكام التداوي",
+    "ubat": "الدواء",
+    "rawatan": "التداوي",
+    "pembedahan": "الجراحة الطبية",
+    "pemindahan organ": "نقل الأعضاء",
+    "derma organ": "التبرع بالأعضاء",
+    "pemindahan darah": "نقل الدم",
+    "vaksin": "اللقاحات",
+    "perancang keluarga": "تنظيم النسل",
+    "pengguguran": "الإجهاض",
+    "bayi tabung uji": "أطفال الأنابيب",
+    "persenyawaan luar rahim": "الإخصاب خارج الرحم",
+    "penentuan jantina": "تحديد جنس الجنين",
+    "klon manusia": "الاستنساخ البشري",
+    "urusan digital": "المعاملات الإلكترونية",
+    "jual beli online": "البيع الإلكتروني",
+    "wang digital": "النقود الرقمية",
+    "mata wang kripto": "العملات المشفرة",
+    "bitcoin": "البيتكوين",
+    "e-dompet": "المحفظة الإلكترونية",
+    "akad elektronik": "العقد الإلكتروني",
+    "tandatangan digital": "التوقيع الإلكتروني",
+    "hak cipta": "حقوق الملكية الفكرية",
+    "harta intelek": "الملكية الفكرية",
+    "privasi": "الخصوصية",
+    "fitnah": "البهتان",
+    "mengumpat": "الغيبة",
+    "ghibah": "الغيبة",
+    "namimah": "النميمة",
+    "adu domba": "النميمة",
+    "menipu": "الغش",
+    "dusta": "الكذب",
+    "bohong": "الكذب",
+    "maruah": "العرض",
+    "menjaga maruah": "حفظ العرض",
+    "ikhtilat": "الاختلاط",
+    "khalwat": "الخلوة",
+    "tabarruj": "التبرج",
+    "pakaian wanita": "لباس المرأة",
+    "hijab": "الحجاب",
+    "jilbab": "الجلباب",
+    "aurat wanita": "عورة المرأة",
+    "aurat lelaki": "عورة الرجل",
+    "bersalaman lelaki perempuan": "مصافحة المرأة الأجنبية",
+    "melihat aurat": "النظر إلى العورة",
+    "menundukkan pandangan": "غض البصر",
+
+    # ========================================================
+    # ISTILAH ASAL YANG DIKEKALKAN
+    # ========================================================
+    'masjid': 'المسجد',
 }
 
 
@@ -434,6 +1243,15 @@ def fallback_turath_queries(question: str) -> list:
 # TURATH SEARCH - SATU-SATUNYA SUMBER CARIAN
 # ============================================================
 
+def get_http_session() -> requests.Session:
+    """Satu Session bagi setiap thread supaya carian serentak tidak berkongsi Session."""
+    session = getattr(HTTP_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        HTTP_THREAD_LOCAL.session = session
+    return session
+
+
 def search_turath(queries: list) -> list:
     """Hantar pertanyaan ke servis Turath dan ekstrak hasil daripada beberapa format respons."""
     endpoint = f"{TURATH_SERVICE_URL}/search"
@@ -461,7 +1279,7 @@ def search_turath(queries: list) -> list:
         return []
 
     try:
-        response = HTTP_SESSION.post(
+        response = get_http_session().post(
             endpoint,
             json={"queries": queries},
             timeout=TURATH_TIMEOUT,
@@ -1096,6 +1914,148 @@ def split_telegram_message(text: str, max_units: int = 3200) -> list:
 
 
 # ============================================================
+# FIFO SEARCH QUEUE - MAKSIMUM 5 CARIAN SERENTAK
+# ============================================================
+
+class FairSearchQueue:
+    """Mengehadkan carian aktif dan memaklumkan giliran pengguna secara FIFO."""
+
+    def __init__(self, limit: int):
+        self.limit = max(1, int(limit))
+        self._active = 0
+        self._waiting = []
+        self._lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
+
+    def _waiting_text(self, position: int) -> str:
+        return (
+            "⏳ <b>Semua slot carian sedang digunakan.</b>\n\n"
+            f"🔢 <b>Giliran anda: {position}</b> dalam barisan menunggu.\n"
+            f"⚙️ Had carian serentak: <b>{self.limit}</b> pengguna.\n\n"
+            "Permintaan anda telah direkodkan. Bot akan memulakan carian secara "
+            "automatik apabila tiba giliran anda. Sila tunggu di sini."
+        )
+
+    def _active_text(self, active_count: int, resumed: bool = False) -> str:
+        lead = "✅ <b>Giliran anda telah tiba!</b>\n\n" if resumed else ""
+        return (
+            lead
+            + "🔎 <b>Sedang menyemak kitab Turath…</b>\n\n"
+            + "Carian anda sedang diproses.\n"
+            + f"⚙️ Slot carian aktif: <b>{active_count}/{self.limit}</b>.\n"
+            + "Jawapan dan jumlah rujukan bergantung pada hasil carian yang tersedia."
+        )
+
+    async def _safe_edit(self, message, text: str) -> None:
+        try:
+            await message.edit_text(
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            # Kegagalan mengemas kini status tidak sepatutnya menghentikan carian.
+            print(f"[SEARCH QUEUE STATUS EDIT] {exc}")
+
+    async def _refresh_positions(self, entries: list) -> None:
+        # Serialkan kemas kini supaya status lama tidak menimpa kedudukan terbaharu.
+        async with self._refresh_lock:
+            for position, entry in enumerate(entries, start=1):
+                if entry["future"].done():
+                    continue
+                await self._safe_edit(entry["message"], self._waiting_text(position))
+
+    async def acquire(self, status_message) -> None:
+        """Dapatkan slot; jika penuh, tunggu mengikut urutan permintaan."""
+        loop = asyncio.get_running_loop()
+        entry = None
+
+        async with self._lock:
+            if self._active < self.limit and not self._waiting:
+                self._active += 1
+                active_count = self._active
+            else:
+                entry = {
+                    "future": loop.create_future(),
+                    "message": status_message,
+                    "assigned": False,
+                }
+                self._waiting.append(entry)
+                position = len(self._waiting)
+                waiting_snapshot = list(self._waiting)
+
+        if entry is None:
+            try:
+                await self._safe_edit(status_message, self._active_text(active_count))
+            except asyncio.CancelledError:
+                await self.release()
+                raise
+            return
+
+        # Kedudukan asal barisan tidak berubah apabila pengguna baharu ditambah.
+        try:
+            await self._safe_edit(status_message, self._waiting_text(position))
+            active_count = await entry["future"]
+            await self._safe_edit(
+                status_message,
+                self._active_text(active_count, resumed=True),
+            )
+        except asyncio.CancelledError:
+            await self._cancel_waiter(entry)
+            raise
+
+    async def _cancel_waiter(self, entry: dict) -> None:
+        """Bersihkan barisan jika handler Telegram dibatalkan."""
+        async with self._lock:
+            index = next(
+                (i for i, candidate in enumerate(self._waiting) if candidate is entry),
+                None,
+            )
+            if index is not None:
+                self._waiting.pop(index)
+            elif entry.get("assigned"):
+                # Slot sudah diserahkan kepada permintaan ini tetapi handler dibatalkan.
+                entry["assigned"] = False
+                while self._waiting:
+                    next_entry = self._waiting.pop(0)
+                    if next_entry["future"].cancelled():
+                        continue
+                    next_entry["assigned"] = True
+                    if not next_entry["future"].done():
+                        next_entry["future"].set_result(self._active)
+                    break
+                else:
+                    self._active = max(0, self._active - 1)
+            waiting_snapshot = list(self._waiting)
+
+        await self._refresh_positions(waiting_snapshot)
+
+    async def release(self) -> None:
+        """Lepaskan slot dan terus serahkan kepada pengguna seterusnya jika ada."""
+        async with self._lock:
+            assigned = False
+            while self._waiting:
+                next_entry = self._waiting.pop(0)
+                if next_entry["future"].cancelled():
+                    continue
+                next_entry["assigned"] = True
+                if not next_entry["future"].done():
+                    next_entry["future"].set_result(self._active)
+                assigned = True
+                break
+
+            if not assigned:
+                self._active = max(0, self._active - 1)
+            waiting_snapshot = list(self._waiting)
+
+        # Kedudukan pengguna yang masih menunggu dikemas kini, contohnya 3 menjadi 2.
+        await self._refresh_positions(waiting_snapshot)
+
+
+SEARCH_QUEUE = FairSearchQueue(MAX_CONCURRENT_SEARCHES)
+
+
+# ============================================================
 # TELEGRAM HANDLERS
 # ============================================================
 
@@ -1148,13 +2108,34 @@ async def telegram_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         status_message = await update.message.reply_text(
-            "🔎 <b>Sedang menyemak kitab Turath…</b>\n\n"
-            "Saya sedang mencari petikan yang relevan daripada koleksi Turath. "
-            "Jawapan dan jumlah rujukan bergantung pada hasil carian yang tersedia.",
+            "⏳ <b>Menyediakan giliran carian…</b>\n\n"
+            "Bot sedang menentukan slot carian anda.",
             parse_mode="HTML",
         )
 
-        answer = await asyncio.to_thread(answer_question, question)
+        search_slot_acquired = False
+        try:
+            await SEARCH_QUEUE.acquire(status_message)
+            search_slot_acquired = True
+            answer = await asyncio.to_thread(answer_question, question)
+        except Exception as search_error:
+            print(f"[SEARCH PROCESSING ERROR] {search_error}")
+            traceback.print_exc()
+            try:
+                await status_message.edit_text(
+                    "❌ <b>Carian tidak dapat diselesaikan.</b>\n\n"
+                    "Berlaku masalah ketika memproses soalan anda. Sila cuba semula.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                await update.message.reply_text(
+                    "Maaf, berlaku masalah semasa memproses carian. Sila cuba semula."
+                )
+            return
+        finally:
+            if search_slot_acquired:
+                await SEARCH_QUEUE.release()
+
         chunks = split_telegram_message(answer)
 
         if not chunks:
@@ -1213,7 +2194,12 @@ def create_telegram_app() -> Application:
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN belum ditetapkan.")
 
-    telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    telegram_app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .concurrent_updates(TELEGRAM_CONCURRENT_UPDATES)
+        .build()
+    )
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_answer))
     telegram_app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
@@ -1352,6 +2338,8 @@ def health():
         "gemini_configured": bool(GOOGLE_API_KEY),
         "telegram_configured": bool(TELEGRAM_TOKEN),
         "telegram_autostart": TELEGRAM_AUTOSTART,
+        "max_concurrent_searches": MAX_CONCURRENT_SEARCHES,
+        "telegram_concurrent_updates": TELEGRAM_CONCURRENT_UPDATES,
         "telegram_status": _TELEGRAM_STATUS,
         "telegram_thread_alive": bool(_TELEGRAM_THREAD is not None and _TELEGRAM_THREAD.is_alive()),
         "telegram_last_error": _TELEGRAM_LAST_ERROR,
