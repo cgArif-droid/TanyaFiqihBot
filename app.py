@@ -881,6 +881,45 @@ def has_direct_enumerated_answer(answer: str) -> bool:
     return bool(numbered or bulleted or inline_numbered)
 
 
+def extract_cited_source_numbers(answer: str) -> set:
+    """Ambil nombor sumber daripada [S4], [S4, S7, S11] atau [S4, S7]."""
+    text = str(answer or "")
+    numbers = set()
+    for bracket_content in re.findall(r"\[([^\]]*)\]", text):
+        numbers.update(
+            int(number)
+            for number in re.findall(r"(?i)\bS\s*(\d+)\b", bracket_content)
+        )
+    return numbers
+
+
+def strip_model_reference_section(answer: str) -> str:
+    """Buang bibliografi yang dijana model supaya program membina rujukan yang tepat.
+
+    Penanda [S#] dalam bahagian isi dikekalkan. Senarai bibliografi akhir
+    dijana oleh build_references() daripada penanda dalam isi jawapan sahaja.
+    """
+    text = str(answer or "").strip()
+    if not text:
+        return text
+
+    heading_pattern = re.compile(
+        r"^(?:kitab\s+dan\s+sumber\s+dirujuk|"
+        r"senarai\s+(?:kitab\s+dan\s+)?(?:rujukan|sumber)|"
+        r"sumber\s+dirujuk|rujukan(?:\s+(?:kitab|sumber))?|"
+        r"bibliografi|references|referensi)\b",
+        re.IGNORECASE,
+    )
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        cleaned = re.sub(r"^\s*#{1,6}\s*", "", line)
+        cleaned = re.sub(r"[*_~`>]", "", cleaned).strip()
+        cleaned = cleaned.lstrip("📚📖📑🔗▪▫•-—: \t").strip()
+        if heading_pattern.search(cleaned):
+            return "\n".join(lines[:index]).rstrip()
+    return text
+
+
 def generate_fiqh_answer(question: str, sources: list) -> str:
     if not sources:
         return "### ⚠️ Sumber Turath Belum Mencukupi\n\nTurath tidak memulangkan petikan yang mencukupi untuk menghuraikan isu ini."
@@ -998,7 +1037,7 @@ Berikan jawapan akhir sahaja. Pastikan ia terperinci mengikut keluasan soalan, t
 
     def metrics(answer_text):
         words = len(re.findall(r"\b[\w'-]+\b", answer_text or ""))
-        nums = {int(number) for number in re.findall(r"\[S(\d+)\]", answer_text or "")}
+        nums = extract_cited_source_numbers(answer_text)
         valid_nums = {number for number in nums if 1 <= number <= len(sources)}
         cited_titles = {
             re.sub(r"\s+", " ", str(sources[number - 1].get("title", "")).casefold()).strip()
@@ -1008,7 +1047,7 @@ Berikan jawapan akhir sahaja. Pastikan ia terperinci mengikut keluasan soalan, t
         return words, cited_titles
 
     try:
-        draft = gemini_generate(prompt)
+        draft = strip_model_reference_section(gemini_generate(prompt))
         word_count, cited_titles = metrics(draft)
         print(
             f"[ANSWER QUALITY] mode={'broad' if broad_topic else 'focused'}; "
@@ -1046,7 +1085,7 @@ DRAF UNTUK DIPERBAIKI:
 
 Berikan versi akhir sahaja.
 """
-            revised = gemini_generate(revision_prompt)
+            revised = strip_model_reference_section(gemini_generate(revision_prompt))
             revised_words, revised_titles = metrics(revised)
             revised_has_list = has_direct_enumerated_answer(revised)
             better_directness = missing_direct_list and revised_has_list
@@ -1063,7 +1102,7 @@ Berikan versi akhir sahaja.
                     f"[ANSWER QUALITY] original retained; revised_words={revised_words}; "
                     f"direct_list={revised_has_list}"
                 )
-        return draft.strip()
+        return strip_model_reference_section(draft).strip()
     except Exception as exc:
         print(f"[ANSWER GENERATION ERROR] {exc}")
         traceback.print_exc()
@@ -1082,7 +1121,11 @@ def format_source_reference(source: dict, index: int) -> str:
 def build_references(sources: list, answer: str = "") -> str:
     if not sources:
         return ""
-    cited_numbers = sorted({int(n) for n in re.findall(r"\[S(\d+)\]", answer or "")})
+    # Rujukan mesti dikira daripada isi jawapan, bukan bibliografi yang mungkin
+    # dijana sendiri oleh Gemini. Ini mengelakkan kitab tidak dipetik seperti
+    # [S1] muncul, dan mengelakkan rujukan sebenar seperti [S11] tercicir.
+    answer = strip_model_reference_section(answer)
+    cited_numbers = sorted(extract_cited_source_numbers(answer))
     if not cited_numbers:
         return (
             "### ⚠️ Semakan Rujukan\n\nJawapan tidak mempunyai penanda [S#] yang dapat dipadankan. "
